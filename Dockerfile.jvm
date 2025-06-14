@@ -1,0 +1,45 @@
+# To build image Run `docker build --tag tablo2hdhomerun:<version> .`
+
+ARG OPENJDK_VERSION=11
+ARG OPENJDK_WORKDIR=/openjdk/src/project
+
+# Multi-stage image ... creates intermediate layer(s) for doing the graalvm native
+# build (this is discarded by docker post-build)
+FROM openjdk:${OPENJDK_VERSION}-jdk-alpine AS build
+
+ARG GRADLE_VERSION=7.3.3
+
+# Install tools required for project
+# Run `docker build --no-cache .` to update dependencies
+RUN apk update \
+ && apk add wget unzip \
+ && wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -P /tmp \
+ && unzip -d /opt/gradle /tmp/gradle-${GRADLE_VERSION}-bin.zip
+
+ENV GRADLE_HOME=/opt/gradle/gradle-${GRADLE_VERSION}
+ENV PATH=${GRADLE_HOME}/bin:${PATH}
+
+WORKDIR /openjdk/src/project
+
+# Copy the entire project and build it
+# This layer is rebuilt when a file changes in the project directory
+COPY . /openjdk/src/project
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon shadowJar
+
+# This results in a single layer image
+#FROM alpine AS tablo2hdhomerun
+FROM openjdk:${OPENJDK_VERSION}-jre-alpine AS tablo2hdhomerun-base
+
+ARG OPENJDK_WORKDIR
+
+ENV tablo2hdhomerun_HOME=/opt/tablo2hdhomerun
+ENV PATH=${tablo2hdhomerun_HOME}/bin:${PATH}
+
+WORKDIR ${tablo2hdhomerun_HOME}
+
+COPY --from=build ${OPENJDK_WORKDIR}/tablo2hdhomerun* ${OPENJDK_WORKDIR}/build/libs/* ${tablo2hdhomerun_HOME}/
+
+# And we finally create the application layer
+FROM tablo2hdhomerun-base AS tablo2hdhomerun
+ENTRYPOINT [ "java" ]
+#CMD [ "-Djava.net.preferIPv4Stack=true" , "-jar" , "tablo2hdhomerun.jar" , "-d" ]

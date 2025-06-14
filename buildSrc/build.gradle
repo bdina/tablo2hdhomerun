@@ -1,0 +1,16 @@
+plugins {
+    id 'java-gradle-plugin'
+}
+
+gradlePlugin {
+    plugins {
+        nativeImage {
+            id = 'compiler.native-image'
+            implementationClass = 'compiler.NativeImagePlugin'
+        }
+        scalaCli {
+            id = 'compiler.scala-cli'
+            implementationClass = 'compiler.ScalaCliPlugin'
+        }
+    }
+}
