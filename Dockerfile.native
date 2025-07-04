@@ -2,12 +2,12 @@
 
 # Multi-stage image ... creates intermediate layer(s) for doing the graalvm native
 # build (this is discarded by docker post-build)
-FROM ubuntu:22.04 AS build
+FROM ubuntu:24.04 AS build
 
-ARG JAVA_VERSION=23.0.0
+ARG JAVA_VERSION=24.0.1
 ARG GRAALVM_WORKDIR=/graalvm/src/project
 
-ARG GRADLE_VERSION=8.10.1
+ARG GRADLE_VERSION=8.14.2
 
 # Install tools required for project
 # Run `docker build --no-cache .` to update dependencies
@@ -55,9 +55,22 @@ RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon nativeImage
 
 # Create a staging image (this will be part of the distribution)
 #FROM alpine AS app-stage
-FROM scratch AS app-stage
+#FROM scratch AS app-stage
+FROM ubuntu:24.04 AS app-stage
 
 ARG GRAALVM_WORKDIR
+
+# Install tools required for project
+# Run `docker build --no-cache .` to update dependencies
+RUN apt-get update -y \
+ && apt-get upgrade -y \
+ && apt-get install -y ffmpeg \
+ && apt-get install -y libmfx1 libmfx-tools \
+ && apt-get install -y libva-drm2 libva-x11-2 vainfo \
+ && apt-get install -y intel-media-va-driver-non-free \
+ && apt-get autoremove --purge -y
+
+RUN rm -rf /tmp/*
 
 ENV GRAALVM_WORKDIR=${GRAALVM_WORKDIR}
 ENV APP_HOME=/opt/tablo2hdhomerun
@@ -65,11 +78,11 @@ ENV PATH=${APP_HOME}/bin:${PATH}
 
 WORKDIR ${APP_HOME}
 
-COPY --from=build /graalvm/src/project/build/tablo2hdhomerun /graalvm/src/project/tablo2hdhomerun.properties ${APP_HOME}/
+COPY --from=build /graalvm/src/project/build/tablo2hdhomerun* ${APP_HOME}/
 
-#CMD [ "/bin/sh" ]
+CMD [ "/bin/bash" ]
 
 # And we finally create the application layer
-FROM app-stage AS app
-ENTRYPOINT [ "./tablo2hdhomerun" ]
-CMD [ "-XX:+PrintGC" , "-XX:+VerboseGC" , "-d" ]
+#FROM app-stage AS app
+#ENTRYPOINT [ "./tablo2hdhomerun" ]
+#CMD [ "-XX:+PrintGC" , "-XX:+VerboseGC" ]

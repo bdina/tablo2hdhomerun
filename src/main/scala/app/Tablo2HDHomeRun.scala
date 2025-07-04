@@ -1,19 +1,29 @@
 package app
 
-import org.apache.pekko.actor.typed.scaladsl.{ AbstractBehavior, ActorContext, Behaviors }
-import org.apache.pekko.actor.typed.{ ActorRef, ActorSystem, Behavior }
+import org.apache.pekko
 
-import org.apache.pekko.stream._
-import org.apache.pekko.stream.scaladsl._
+import pekko.actor.typed.scaladsl.{ AbstractBehavior, ActorContext, Behaviors }
+import pekko.actor.typed.{ ActorRef, ActorSystem, Behavior }
 
-import scala.concurrent.duration._
+import pekko.http.scaladsl.Http
+import pekko.http.scaladsl.model._
+import pekko.http.scaladsl.server.Directives._
+
+import pekko.stream._
+import pekko.stream.scaladsl._
 
 import java.io.File
 import java.nio.file.{Path,Paths}
+import java.net.InetAddress
 
 import org.slf4j.{Logger,LoggerFactory}
 
+import scala.concurrent.duration._
+import scala.io.StdIn
 import scala.util.{Failure,Success,Try}
+
+import spray.json._
+import DefaultJsonProtocol._
 
 object FsMonitor {
   val log = LoggerFactory.getLogger(this.getClass)
@@ -43,7 +53,7 @@ object FsNotify {
   private final case class FsQueueResponse(response: FsQueue.Response) extends Command
 
   object FsQueue {
-    implicit val system: ActorSystem[app.TranscodeDaemon.Command] = AppContext.system
+    implicit val system: ActorSystem[app.Tablo2HDHomeRun.Command] = AppContext.system
 
     val bufferSize = 1000
 
@@ -274,8 +284,8 @@ object FsScan {
 }
 
 object AppContext {
-  implicit val system: ActorSystem[TranscodeDaemon.Command] =
-    ActorSystem(TranscodeDaemon(), "transcode-daemon")
+  implicit val system: ActorSystem[Tablo2HDHomeRun.Command] =
+    ActorSystem(Tablo2HDHomeRun(), "tablo2hdhomerun-daemon")
 }
 
 object Tablo2HDHomeRun extends App {
@@ -302,11 +312,384 @@ object Tablo2HDHomeRun extends App {
     }
   }
 
-  implicit val system: ActorSystem[app.TranscodeDaemon.Command] = AppContext.system
+  implicit val system: ActorSystem[app.Tablo2HDHomeRun.Command] = AppContext.system
+  // needed for the future flatMap/onComplete in the end
+  implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
 
-  val path = if (args.length == 1) args(0) else "/tmp"
+//  val root = if (args.length == 1) args(0) else "/tmp"
 
-  system ! StartWatch(Paths.get(path))
+//  system ! StartWatch(Paths.get(root))
+  object Response {
+    object JsonProtocol {
+      implicit object inetAddressFormat extends JsonFormat[InetAddress] {
+        override def read(js : JsValue) : InetAddress = js match {
+          case JsString(value) =>
+            Try(InetAddress.getByName(value)) match {
+              case Success(inetAddress) =>
+                inetAddress
+              case Failure(t) =>
+                deserializationError(s"could not parse InetAddress -> ${t.getMessage}")
+            }
+            case _ =>
+              deserializationError(s"Expected String for InetAddress, but got $js")
+        }
+        override def write(inetAddress : InetAddress) : JsValue = JsString(inetAddress.getHostAddress)
+      }
+      implicit object uriFormat extends JsonFormat[Uri] {
+        override def read(js: JsValue): Uri = js match {
+          case JsString(value) =>
+            Try(Uri(value)) match {
+              case Success(uri) =>
+                uri
+              case Failure(t) =>
+                deserializationError(s"could not parse Uri -> ${t.getMessage}")
+            }
+            case _ =>
+              deserializationError(s"Expected Uri path, but got $js")
+        }
+        override def write(uri : Uri) : JsValue = JsString(uri.toString)
+      }
+    }
+    case class Discover(
+      FriendlyName: String
+    , LocalIP: InetAddress
+    , BaseURL: Uri
+    , LineupURL: Uri
+    , Manufacturer: String = "tablo2hdhomerun"
+    , ModelNumber: String = "HDHR3-US"
+    , FirmwareName: String = "hdhomerun3_atsc"
+    , FirmwareVersion: String = "20240101"
+    , DeviceID: String = "12345678"
+    , DeviceAuth: String = "tabloauth123"
+    ) {
+      def proxyAddress(inetAddress: InetAddress, port: Int) =
+        BaseURL.withHost(inetAddress.getHostAddress.toString).withPort(port)
+    }
+    object Discover {
+      def apply(friendlyName: String, localIp: InetAddress): Discover = {
+        val proxyUri = Uri(s"${TABLO_PROTOCOL}://${localIp.getHostAddress}:${PROXY_PORT}")
+        Discover(FriendlyName=friendlyName, LocalIP=localIp, BaseURL=proxyUri, LineupURL=proxyUri.withPath(Uri.Path("/lineup.json")))
+      }
+      object JsonProtocol {
+        import Response.JsonProtocol.{inetAddressFormat,uriFormat}
+        implicit val discoverFormat: JsonFormat[Discover] = jsonFormat10(Discover.apply)
+      }
+    }
+
+    case class Channel(
+      GuideNumber: String
+    , GuideName: String
+    , Tags: Seq[Channel.Tag]
+    , URL: Uri
+    )
+    object Channel {
+      sealed trait Tag
+      object Tag {
+        case object Favorite extends Tag
+        case object DRM extends Tag
+      }
+
+      object JsonProtocol {
+        import Response.JsonProtocol.uriFormat
+        implicit object tagFormat extends JsonFormat[Tag] {
+          def read(js: JsValue): Tag = js match {
+            case JsString("Favorite") =>
+              Tag.Favorite
+            case JsString("DRM") =>
+              Tag.DRM
+            case _ =>
+              deserializationError(s"Expected Tag value (Favorite or DRM), but got: $js")
+          }
+          def write(tag: Tag): JsValue = tag match {
+            case Tag.Favorite =>
+              JsString("Favorite")
+            case Tag.DRM =>
+              JsString("DRM")
+          }
+        }
+        implicit val channelFormat: JsonFormat[Channel] = jsonFormat4(Channel.apply)
+      }
+    }
+  }
+
+//  val ARG_IP = if (args.length == 1) args(0) else "128.0.0.1"
+
+  val TABLO_IP = InetAddress.getByName("192.168.11.219")
+  val TABLO_PROTOCOL = "http"
+  val TABLO_PORT = 8885
+
+  val PROXY_IP = InetAddress.getByName("192.168.11.5")
+  val PROXY_PORT = 8080
+
+  case class ChannelInfo(
+    call_sign: String
+  , call_sign_src: String
+  , major: Int
+  , minor: Int
+  , network: Option[String]
+  , resolution: String
+  , favourite: Boolean
+  , tms_station_id: String
+  , tms_affiliate_id: String
+  , source: String
+  )
+
+  case class ChannelObject(
+    object_id: Int
+  , path: String
+  , channel: ChannelInfo
+  )
+
+  object JsonProtocol extends DefaultJsonProtocol {
+    implicit val channelInfoFormat: JsonFormat[ChannelInfo] = jsonFormat10(ChannelInfo.apply)
+    implicit val channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
+  }
+
+  import Response.Discover
+  val discover = Discover(friendlyName="Tablo Legacy Gen Proxy",localIp=PROXY_IP)
+
+  val route =
+    path("discover.json") {
+      get {
+        import Discover.JsonProtocol.discoverFormat
+        complete(HttpEntity(ContentTypes.`application/json`, discover.toJson.compactPrint))
+      }
+    } ~
+    path("lineup.json") {
+      get {
+        import pekko.http.scaladsl.unmarshalling.Unmarshal
+        import pekko.http.scaladsl.marshalling.Marshal
+        import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
+
+        import JsonProtocol._
+
+        import scala.concurrent.Future
+
+        val baseUrl = discover.proxyAddress(TABLO_IP,TABLO_PORT)
+        val getUri = baseUrl.withPath(Uri.Path("/guide/channels"))
+        val postUri = baseUrl.withPath(Uri.Path("/batch"))
+
+        val responseFuture: Future[HttpResponse] = Http().singleRequest(HttpRequest(uri = getUri))
+        val channelPathsFuture: Future[Seq[String]] = responseFuture.flatMap { response =>
+          log.info(s"[lineup] guide/channels (GET) - $response")
+          Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
+        }
+        val detailedInfoFuture: Future[Map[String, ChannelObject]] = channelPathsFuture.flatMap { paths =>
+          val jsonEntityFuture = Marshal(paths.toJson).to[RequestEntity]
+          jsonEntityFuture.flatMap { entity =>
+            val postRequest = HttpRequest(
+              method = HttpMethods.POST
+            , uri = postUri
+            , entity = entity.withContentType(ContentTypes.`application/json`)
+            )
+
+            Http().singleRequest(postRequest).flatMap { response =>
+              log.info(s"[lineup] batch (POST) - $response")
+              Unmarshal(response.entity).to[String].map { body => body.parseJson.convertTo[Map[String, ChannelObject]] }
+            }
+          }
+        }
+
+        onComplete(detailedInfoFuture) {
+          case Success(data) =>
+            log.info("[lineup] channel details:")
+            val response = data.map { case (path,info @ ChannelObject(_,_,channel)) =>
+              log.info(s"[lineup] $path => ${channel.call_sign}, ${channel.network.getOrElse("None")}")
+              val num = s"${channel.major}.${channel.minor}"
+              val url = s"${discover.BaseURL.withPath(Uri.Path(s"/channel/${info.object_id}"))}"
+              val src = s"${discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${info.object_id}/watch"))}"
+              JsObject(
+                "GuideNumber" -> JsString(num)
+              , "GuideName" -> JsString(channel.call_sign)
+              , "URL" -> JsString(url)
+              , "type" -> JsString(channel.source)
+              , "srcURL" -> JsString(src)
+              )
+            }
+            complete(HttpEntity(ContentTypes.`application/json`, response.toJson.compactPrint))
+          case Failure(ex) =>
+            log.info(s"[lineup] Failed: ${ex.getMessage}")
+            complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce channel lineup"))
+        }
+      }
+    } ~
+    path("lineup_status.json") {
+      get {
+        case class LineupStatus(
+          ScanInProgress: Int = 0
+        , ScanPossible: Int = 1
+        , Source: String = "Antenna"
+        , SourceList: Seq[String] = List("Antenna")
+        )
+        object LineupStatus {
+          object JsonProtocol {
+            implicit val lineupStatusFormat: JsonFormat[LineupStatus] = jsonFormat4(LineupStatus.apply)
+          }
+        }
+
+        import LineupStatus.JsonProtocol.lineupStatusFormat
+        complete(HttpEntity(ContentTypes.`application/json`, LineupStatus().toJson.compactPrint))
+      }
+    } ~
+    path("channel" / LongNumber) { channelId =>
+      get {
+        object Request {
+          case class WatchRequest(
+            bandwidth: Int = 1000
+          , no_fast_startup: Boolean = false
+          )
+          object WatchRequest {
+            object JsonProtocol {
+              implicit val watchRequestFormat: JsonFormat[WatchRequest] = jsonFormat2(WatchRequest.apply)
+            }
+
+            val uri = discover.proxyAddress(TABLO_IP,TABLO_PORT).withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
+          }
+          object Tuners {
+            val uri = discover.proxyAddress(TABLO_IP,TABLO_PORT).withPath(Uri.Path(s"/server/tuners"))
+            val httpRequest = HttpRequest(uri = uri)
+          }
+        }
+        object Response {
+          case class VideoDetails(width: Int = 0, height: Int = 0)
+          case class WatchResponse(
+            token: String // df9586a4-5548-48a9-87f2-1191a8a0df8b
+          , expires: String // 2025-06-18T02:55:38Z
+          , keepalive: Int // 120
+          , playlist_url: Uri // http://192.168.11.219:80/stream/pl.m3u8?-_XhOSWWP5qBhXIVMu6c7g
+          , bif_url_sd: Option[Uri]
+          , bif_url_hd: Option[Uri]
+          , video_details: VideoDetails
+          )
+          object JsonProtocol {
+            import Tablo2HDHomeRun.Response.JsonProtocol.uriFormat
+            implicit val videoDetailsFormat: JsonFormat[VideoDetails] = jsonFormat2(VideoDetails.apply)
+            implicit val watchResponseFormat: JsonFormat[WatchResponse] = jsonFormat7(WatchResponse.apply)
+          }
+
+          case class Tuners(in_use: Boolean, channel: Option[Uri], recording: Option[Uri])
+          object Tuners {
+            object JsonProtocol {
+              import Tablo2HDHomeRun.Response.JsonProtocol.uriFormat
+              implicit val tunersFormat: JsonFormat[Tuners] = jsonFormat3(Tuners.apply)
+            }
+          }
+        }
+
+        import pekko.http.scaladsl.unmarshalling.Unmarshal
+        import Response.JsonProtocol._
+        import scala.concurrent.Future
+
+        val tunersFuture: Future[Seq[Response.Tuners]] =
+          Http().singleRequest(Request.Tuners.httpRequest).flatMap { response =>
+            import Response.Tuners.JsonProtocol.tunersFormat
+            log.info(s"[channel] server/tuners (POST) - $response")
+            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[Response.Tuners]])
+          }
+
+        case object NoAvailableTunersError extends Exception("No available tuners")
+
+        val watchFuture: Future[Response.WatchResponse] = tunersFuture.flatMap { tuners =>
+          val available = tuners.filterNot(_.in_use).size
+          log.info(s"[channel] available tuners - $available")
+          if (available > 0) {
+            import Request.WatchRequest.JsonProtocol.watchRequestFormat
+            val httpRequest = HttpRequest(
+              method = HttpMethods.POST
+            , uri = Request.WatchRequest.uri
+            , entity = HttpEntity(ContentTypes.`application/json`, Request.WatchRequest().toJson.compactPrint)
+            )
+            log.debug(s"[channel] built http request - $httpRequest")
+            Http().singleRequest(httpRequest).flatMap { response =>
+              log.info(s"[channel] guide/channels/$channelId/watch (POST) - $response")
+              Unmarshal(response.entity).to[String].map { s =>
+                log.info(s"[channel] guide/channels/$channelId/watch response (raw) [$s]")
+                s.parseJson.convertTo[Response.WatchResponse]
+              }
+            }
+          } else {
+            log.info(s"[channel] no available tuners (0/${tuners.size})")
+            Future.failed(NoAvailableTunersError)
+          }
+        }
+
+        import pekko.util._
+        import org.apache.pekko.stream.scaladsl._
+        import scala.util.{Failure, Success}
+
+        def stream(playlist_url: Uri): Source[ByteString, _] = Source.lazySource { () =>
+          val ffmpegCmd = Array(
+            "ffmpeg"
+          , "-i", playlist_url.toString
+          , "-c", "copy"
+          , "-f", "mpegts"
+          , "-v", "repeat+level+panic"
+          , "pipe:1"
+          )
+
+          // Create a Java Process and get its stdout as InputStream
+          log.info(s"[channel] execute command line - ${ffmpegCmd.mkString(" ")}")
+          val process = sys.runtime.exec(ffmpegCmd)
+
+          // Stream the stdout of ffmpeg
+          val ffmpegSource: Source[ByteString,_] =
+            StreamConverters
+              .fromInputStream(() => process.getInputStream)
+              .watchTermination() { (_, done) =>
+                done.onComplete {
+                  case Success(_) =>
+                    log.info(s"[channel] client disconnected; terminating ffmpeg process (10s delay) ...")
+//                    system.scheduler.scheduleOnce (10.seconds, () => {
+                      log.info(s"[channel] terminating ffmpeg process")
+                      process.destroy()
+//                    })
+                  case Failure(ex) =>
+                    println(s"[channel] stream failed: ${ex.getMessage}")
+                    process.destroy()
+                }
+              }
+
+//          val tsNullPacket = ByteString(0x47.toByte) ++ ByteString.fromArray(Array.ofDim(0))
+//          // Heartbeat source: emits a small silent TS packet or a dummy chunk
+//          val heartbeat: Source[ByteString, _] =
+//            Source.tick(0.seconds, 1.second, tsNullPacket) // 0x47 is TS sync byte
+//
+//          // Merge heartbeat and ffmpeg output
+//          Source.combine(heartbeat, ffmpegSource)(Merge(_))
+
+//          Source.single(tsNullPacket) ++ ffmpegSource
+          ffmpegSource
+        }
+
+        onComplete (watchFuture) {
+          case Success(data) =>
+            log.info(s"[channel] tuned to channel - $data")
+            val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
+            complete(HttpEntity.Chunked.fromData(ContentType(`video/mp2t`), stream(data.playlist_url)))
+          case Failure(ex) =>
+            log.info(s"[channel] failed to start stream - ${ex.getMessage}")
+            complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+        }
+      }
+    } ~
+    path("guide.xml") {
+      get {
+        complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, "<XML></XML>"))
+      }
+    } ~
+    path("favicon.ico") {
+      get {
+        complete(HttpEntity(ContentTypes.`text/html(UTF-8)`, ""))
+      }
+    }
+
+  val bindingFuture = Http().newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT).bind(route)
+
+  println(s"Server now online. Please navigate to http://${PROXY_IP}:${PROXY_PORT}\nPress RETURN to stop...")
+    StdIn.readLine() // let it run until user presses return
+    bindingFuture
+      .flatMap(_.unbind()) // trigger unbinding from the port
+      .onComplete(_ => system.terminate()) // and shutdown when done
 }
 
 object FFMpegDelegate {

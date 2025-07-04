@@ -61,17 +61,6 @@ import org.gradle.api.Project
 class NativeImagePlugin implements Plugin<Project> {
     @Override
     void apply(Project project) {
-        // Delay task registration until after evaluation
-        project.afterEvaluate {
-            if (!project.plugins.hasPlugin("com.github.johnrengelman.shadow")) {
-                throw new IllegalStateException("The Shadow plugin must be applied for 'nativeImage' to work.")
-            }
-
-            project.tasks.register('nativeImage', NativeImageTask) { task ->
-                dependsOn project.tasks.named('shadowJar')
-                group = 'verification'
-                description = 'Builds a native image from a shadowJar'
-            }
-        }
+        project.task('nativeImage', type: NativeImageTask)
     }
 }
