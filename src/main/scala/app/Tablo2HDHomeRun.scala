@@ -448,6 +448,11 @@ object Tablo2HDHomeRun extends App {
   import Response.Discover
   val discover = Discover(friendlyName="Tablo Legacy Gen Proxy",localIp=PROXY_IP)
 
+  import pekko.http.scaladsl.unmarshalling.Unmarshal
+  import pekko.http.scaladsl.marshalling.Marshal
+
+  import scala.concurrent.Future
+
   val route =
     path("discover.json") {
       get {
@@ -457,13 +462,9 @@ object Tablo2HDHomeRun extends App {
     } ~
     path("lineup.json") {
       get {
-        import pekko.http.scaladsl.unmarshalling.Unmarshal
-        import pekko.http.scaladsl.marshalling.Marshal
         import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
 
         import JsonProtocol._
-
-        import scala.concurrent.Future
 
         val baseUrl = discover.proxyAddress(TABLO_IP,TABLO_PORT)
         val getUri = baseUrl.withPath(Uri.Path("/guide/channels"))
@@ -485,7 +486,7 @@ object Tablo2HDHomeRun extends App {
 
             Http().singleRequest(postRequest).flatMap { response =>
               log.info(s"[lineup] batch (POST) - $response")
-              Unmarshal(response.entity).to[String].map { body => body.parseJson.convertTo[Map[String, ChannelObject]] }
+              Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
             }
           }
         }
@@ -576,9 +577,7 @@ object Tablo2HDHomeRun extends App {
           }
         }
 
-        import pekko.http.scaladsl.unmarshalling.Unmarshal
         import Response.JsonProtocol._
-        import scala.concurrent.Future
 
         val tunersFuture: Future[Seq[Response.Tuners]] =
           Http().singleRequest(Request.Tuners.httpRequest).flatMap { response =>
@@ -599,13 +598,9 @@ object Tablo2HDHomeRun extends App {
             , uri = Request.WatchRequest.uri
             , entity = HttpEntity(ContentTypes.`application/json`, Request.WatchRequest().toJson.compactPrint)
             )
-            log.debug(s"[channel] built http request - $httpRequest")
             Http().singleRequest(httpRequest).flatMap { response =>
               log.info(s"[channel] guide/channels/$channelId/watch (POST) - $response")
-              Unmarshal(response.entity).to[String].map { s =>
-                log.info(s"[channel] guide/channels/$channelId/watch response (raw) [$s]")
-                s.parseJson.convertTo[Response.WatchResponse]
-              }
+              Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
             }
           } else {
             log.info(s"[channel] no available tuners (0/${tuners.size})")
@@ -614,8 +609,6 @@ object Tablo2HDHomeRun extends App {
         }
 
         import pekko.util._
-        import org.apache.pekko.stream.scaladsl._
-        import scala.util.{Failure, Success}
 
         def stream(playlist_url: Uri): Source[ByteString, _] = Source.lazySource { () =>
           val ffmpegCmd = Array(
@@ -627,38 +620,21 @@ object Tablo2HDHomeRun extends App {
           , "pipe:1"
           )
 
-          // Create a Java Process and get its stdout as InputStream
-          log.info(s"[channel] execute command line - ${ffmpegCmd.mkString(" ")}")
           val process = sys.runtime.exec(ffmpegCmd)
+          log.info(s"[channel] execute command line - ${ffmpegCmd.mkString(" ")} => spawn ${process.pid}")
 
-          // Stream the stdout of ffmpeg
-          val ffmpegSource: Source[ByteString,_] =
-            StreamConverters
-              .fromInputStream(() => process.getInputStream)
-              .watchTermination() { (_, done) =>
-                done.onComplete {
-                  case Success(_) =>
-                    log.info(s"[channel] client disconnected; terminating ffmpeg process (10s delay) ...")
-//                    system.scheduler.scheduleOnce (10.seconds, () => {
-                      log.info(s"[channel] terminating ffmpeg process")
-                      process.destroy()
-//                    })
-                  case Failure(ex) =>
-                    println(s"[channel] stream failed: ${ex.getMessage}")
-                    process.destroy()
-                }
+          StreamConverters
+            .fromInputStream(() => process.getInputStream) // stream the stdout of ffmpeg
+            .watchTermination() { (_, done) =>
+              done.onComplete {
+                case Success(_) =>
+                  log.info(s"[channel] terminating ffmpeg process ${process.pid}")
+                  process.destroy()
+                case Failure(ex) =>
+                  println(s"[channel] stream failed: ${ex.getMessage}")
+                  process.destroy()
               }
-
-//          val tsNullPacket = ByteString(0x47.toByte) ++ ByteString.fromArray(Array.ofDim(0))
-//          // Heartbeat source: emits a small silent TS packet or a dummy chunk
-//          val heartbeat: Source[ByteString, _] =
-//            Source.tick(0.seconds, 1.second, tsNullPacket) // 0x47 is TS sync byte
-//
-//          // Merge heartbeat and ffmpeg output
-//          Source.combine(heartbeat, ffmpegSource)(Merge(_))
-
-//          Source.single(tsNullPacket) ++ ffmpegSource
-          ffmpegSource
+            }
         }
 
         onComplete (watchFuture) {
