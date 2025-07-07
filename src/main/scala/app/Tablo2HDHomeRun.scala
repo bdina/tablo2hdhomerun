@@ -626,12 +626,13 @@ object Tablo2HDHomeRun extends App {
           StreamConverters
             .fromInputStream(() => process.getInputStream) // stream the stdout of ffmpeg
             .watchTermination() { (_, done) =>
+              log.info(s"[channel] started http stream - ffmpeg (pid ${process.pid})")
               done.onComplete {
                 case Success(_) =>
-                  log.info(s"[channel] terminating ffmpeg process ${process.pid}")
+                  log.info(s"[channel] terminating ffmpeg (kill pid ${process.pid})")
                   process.destroy()
                 case Failure(ex) =>
-                  println(s"[channel] stream failed: ${ex.getMessage}")
+                  log.info(s"[channel] stream failed: ${ex.getMessage} (kill pid ${process.pid})")
                   process.destroy()
               }
             }
@@ -650,11 +651,13 @@ object Tablo2HDHomeRun extends App {
     } ~
     path("guide.xml") {
       get {
+        log.info("[guide] fetch guide")
         complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, "<XML></XML>"))
       }
     } ~
     path("favicon.ico") {
       get {
+        log.info("[favicon] fetch favicon (no-op)")
         complete(HttpEntity(ContentTypes.`text/html(UTF-8)`, ""))
       }
     }
