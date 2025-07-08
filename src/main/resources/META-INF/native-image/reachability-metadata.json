@@ -43,19 +43,19 @@
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Request$1$WatchRequest",
+      "type": "app.Tablo2HDHomeRun$Request$3$WatchRequest",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$1$Tuners",
+      "type": "app.Tablo2HDHomeRun$Response$3$Tuners",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$1$VideoDetails",
+      "type": "app.Tablo2HDHomeRun$Response$3$VideoDetails",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$1$WatchResponse",
+      "type": "app.Tablo2HDHomeRun$Response$3$WatchResponse",
       "allDeclaredFields": true
     },
     {
