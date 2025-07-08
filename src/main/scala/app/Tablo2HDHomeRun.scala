@@ -376,41 +376,6 @@ object Tablo2HDHomeRun extends App {
         implicit val discoverFormat: JsonFormat[Discover] = jsonFormat10(Discover.apply)
       }
     }
-
-    case class Channel(
-      GuideNumber: String
-    , GuideName: String
-    , Tags: Seq[Channel.Tag]
-    , URL: Uri
-    )
-    object Channel {
-      sealed trait Tag
-      object Tag {
-        case object Favorite extends Tag
-        case object DRM extends Tag
-      }
-
-      object JsonProtocol {
-        import Response.JsonProtocol.uriFormat
-        implicit object tagFormat extends JsonFormat[Tag] {
-          def read(js: JsValue): Tag = js match {
-            case JsString("Favorite") =>
-              Tag.Favorite
-            case JsString("DRM") =>
-              Tag.DRM
-            case _ =>
-              deserializationError(s"Expected Tag value (Favorite or DRM), but got: $js")
-          }
-          def write(tag: Tag): JsValue = tag match {
-            case Tag.Favorite =>
-              JsString("Favorite")
-            case Tag.DRM =>
-              JsString("DRM")
-          }
-        }
-        implicit val channelFormat: JsonFormat[Channel] = jsonFormat4(Channel.apply)
-      }
-    }
   }
 
   val TABLO_IP = InetAddress.getByName("192.168.11.219")
@@ -419,32 +384,6 @@ object Tablo2HDHomeRun extends App {
 
   val PROXY_IP = InetAddress.getByName("192.168.11.5")
   val PROXY_PORT = 8080
-
-  case class ChannelInfo(
-    call_sign: String
-  , call_sign_src: String
-  , major: Int
-  , minor: Int
-  , network: Option[String]
-  , resolution: String
-  , favourite: Boolean
-  , tms_station_id: String
-  , tms_affiliate_id: String
-  , source: String
-  )
-
-  case class ChannelObject(
-    object_id: Int
-  , path: String
-  , channel: ChannelInfo
-  )
-
-  object Channel {
-    object JsonProtocol extends DefaultJsonProtocol {
-      implicit val channelInfoFormat: JsonFormat[ChannelInfo] = jsonFormat10(ChannelInfo.apply)
-      implicit val channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
-    }
-  }
 
   import Response.Discover
   val discover = Discover(friendlyName="Tablo Legacy Gen Proxy",localIp=PROXY_IP)
@@ -479,9 +418,36 @@ object Tablo2HDHomeRun extends App {
             , entity = entity.withContentType(ContentTypes.`application/json`)
             )
           }
+
+          case class ChannelInfo(
+            call_sign: String
+          , call_sign_src: String
+          , major: Int
+          , minor: Int
+          , network: Option[String]
+          , resolution: String
+          , favourite: Boolean
+          , tms_station_id: String
+          , tms_affiliate_id: String
+          , source: String
+          )
+
+          case class ChannelObject(
+            object_id: Int
+          , path: String
+          , channel: ChannelInfo
+          )
+
+          object Channel {
+            object JsonProtocol extends DefaultJsonProtocol {
+              implicit val channelInfoFormat: JsonFormat[ChannelInfo] = jsonFormat10(ChannelInfo.apply)
+              implicit val channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
+            }
+          }
         }
         object Response {
           object ChannelObject {
+            import Request._
             def jsValue(obj: ChannelObject): JsValue = {
               val num = s"${obj.channel.major}.${obj.channel.minor}"
               val url = s"${discover.BaseURL.withPath(Uri.Path(s"/channel/${obj.object_id}"))}"
@@ -497,6 +463,7 @@ object Tablo2HDHomeRun extends App {
           }
         }
 
+        import Request._
         import Channel.JsonProtocol._
         import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
 

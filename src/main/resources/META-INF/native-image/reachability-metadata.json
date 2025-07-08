@@ -1120,9 +1120,6 @@
       "glob": "application.properties"
     },
     {
-      "glob": "library.properties"
-    },
-    {
       "glob": "pekko-http-version.conf"
     },
     {
