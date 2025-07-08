@@ -31,15 +31,15 @@
       "type": "[Lscala.Tuple2;"
     },
     {
-      "type": "app.Tablo2HDHomeRun$ChannelInfo",
-      "allDeclaredFields": true
-    },
-    {
-      "type": "app.Tablo2HDHomeRun$ChannelObject",
-      "allDeclaredFields": true
-    },
-    {
       "type": "app.Tablo2HDHomeRun$LineupStatus$1",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo2HDHomeRun$Request$1$ChannelInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo2HDHomeRun$Request$1$ChannelObject",
       "allDeclaredFields": true
     },
     {
@@ -1118,6 +1118,9 @@
     },
     {
       "glob": "application.properties"
+    },
+    {
+      "glob": "library.properties"
     },
     {
       "glob": "pekko-http-version.conf"

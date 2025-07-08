@@ -378,11 +378,11 @@ object Tablo2HDHomeRun extends App {
     }
   }
 
-  val TABLO_IP = InetAddress.getByName("192.168.11.219")
+  val TABLO_IP = InetAddress.getByName(sys.env.getOrElse("TABLO_IP","127.0.0.1"))
   val TABLO_PROTOCOL = "http"
   val TABLO_PORT = 8885
 
-  val PROXY_IP = InetAddress.getByName("192.168.11.5")
+  val PROXY_IP = InetAddress.getByName(sys.env.getOrElse("PROXY_IP","127.0.0.1"))
   val PROXY_PORT = 8080
 
   import Response.Discover
@@ -653,10 +653,10 @@ object Tablo2HDHomeRun extends App {
   val bindingFuture = Http().newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT).bind(route)
 
   println(s"Server now online. Please navigate to http://${PROXY_IP}:${PROXY_PORT}\nPress RETURN to stop...")
-    StdIn.readLine() // let it run until user presses return
-    bindingFuture
-      .flatMap(_.unbind()) // trigger unbinding from the port
-      .onComplete(_ => system.terminate()) // and shutdown when done
+  StdIn.readLine() // let it run until user presses return
+  bindingFuture
+    .flatMap(_.unbind()) // trigger unbinding from the port
+    .onComplete(_ => system.terminate()) // and shutdown when done
 }
 
 object FFMpegDelegate {
