@@ -7,6 +7,7 @@ import pekko.actor.typed.{ ActorRef, ActorSystem, Behavior }
 
 import pekko.http.scaladsl.Http
 import pekko.http.scaladsl.model._
+import pekko.http.scaladsl.server.RejectionHandler
 import pekko.http.scaladsl.server.Directives._
 
 import pekko.stream._
@@ -395,11 +396,13 @@ object Tablo2HDHomeRun extends App {
 
   val HttpCtx = Http()
 
-  val route =
+  val routes =
     path("discover.json") {
       get {
         import Discover.JsonProtocol.discoverFormat
-        complete(HttpEntity(ContentTypes.`application/json`, discover.toJson.compactPrint))
+        val response = discover.toJson
+        log.info(s"[discover] discover.json (GET) - $response")
+        complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
       }
     } ~
     path("lineup.json") {
@@ -499,20 +502,24 @@ object Tablo2HDHomeRun extends App {
     } ~
     path("lineup_status.json") {
       get {
-        case class LineupStatus(
-          ScanInProgress: Int = 0
-        , ScanPossible: Int = 1
-        , Source: String = "Antenna"
-        , SourceList: Seq[String] = List("Antenna")
-        )
-        object LineupStatus {
-          object JsonProtocol {
-            implicit val lineupStatusFormat: JsonFormat[LineupStatus] = jsonFormat4(LineupStatus.apply)
+        object Response {
+          case class LineupStatus(
+            ScanInProgress: Int = 0
+          , ScanPossible: Int = 1
+          , Source: String = "Antenna"
+          , SourceList: Seq[String] = List("Antenna")
+          )
+          object LineupStatus {
+            object JsonProtocol {
+              implicit val lineupStatusFormat: JsonFormat[LineupStatus] = jsonFormat4(LineupStatus.apply)
+            }
           }
         }
 
-        import LineupStatus.JsonProtocol.lineupStatusFormat
-        complete(HttpEntity(ContentTypes.`application/json`, LineupStatus().toJson.compactPrint))
+        import Response.LineupStatus.JsonProtocol.lineupStatusFormat
+        val response = Response.LineupStatus().toJson
+        log.info(s"[lineup_status] lineup_status.json - $response")
+        complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
       }
     } ~
     path("channel" / LongNumber) { channelId =>
@@ -650,6 +657,18 @@ object Tablo2HDHomeRun extends App {
       }
     }
 
+  val loggedRejectionHandler =
+    RejectionHandler
+      .newBuilder()
+      .handleNotFound { // Handle the case where no route matched (empty rejections)
+        extractRequest { request =>
+          log.info(s"[NotFound] unknown path - $request")
+          complete(HttpResponse(StatusCodes.NotFound, entity = "Resource not found"))
+        }
+      }
+      .result() // Add other handlers for specific rejections if needed
+
+  val route = handleRejections(loggedRejectionHandler) { routes }
   val bindingFuture = Http().newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT).bind(route)
 
   println(s"Server now online. Please navigate to http://${PROXY_IP}:${PROXY_PORT}\nPress RETURN to stop...")
