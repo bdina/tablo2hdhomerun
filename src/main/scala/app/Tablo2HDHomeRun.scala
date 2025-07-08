@@ -518,7 +518,7 @@ object Tablo2HDHomeRun extends App {
 
         import Response.LineupStatus.JsonProtocol.lineupStatusFormat
         val response = Response.LineupStatus().toJson
-        log.info(s"[lineup_status] lineup_status.json - $response")
+        log.info(s"[lineup_status] lineup_status.json (GET) - $response")
         complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
       }
     } ~
@@ -646,13 +646,13 @@ object Tablo2HDHomeRun extends App {
     } ~
     path("guide.xml") {
       get {
-        log.info("[guide] fetch guide")
+        log.info("[guide] guide.xml (no-op) (GET)")
         complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, "<XML></XML>"))
       }
     } ~
     path("favicon.ico") {
       get {
-        log.info("[favicon] fetch favicon (no-op)")
+        log.info("[favicon] favicon.ico (no-op) (GET)")
         complete(HttpEntity(ContentTypes.`text/html(UTF-8)`, ""))
       }
     }
