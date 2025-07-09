@@ -23,7 +23,7 @@ repositories {
 ext {
     scala_maj = '2.13'
     scala_ver = "${scala_maj}.16"
-    pekko_core = '1.1.3'
+    pekko_core = '1.1.4'
     pekko_http = '1.2.0'
 }
 
