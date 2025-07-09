@@ -668,8 +668,12 @@ object Tablo2HDHomeRun extends App {
       }
       .result() // Add other handlers for specific rejections if needed
 
-  val route = handleRejections(loggedRejectionHandler) { routes }
-  val bindingFuture = Http().newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT).bind(route)
+  val bindingFuture =
+    HttpCtx
+      .newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT)
+      .bind {
+        handleRejections(loggedRejectionHandler) { routes }
+      }
 
   println(s"Server now online. Please navigate to http://${PROXY_IP}:${PROXY_PORT}\nPress RETURN to stop...")
   StdIn.readLine() // let it run until user presses return
