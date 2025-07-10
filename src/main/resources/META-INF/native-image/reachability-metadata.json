@@ -31,31 +31,31 @@
       "type": "[Lscala.Tuple2;"
     },
     {
-      "type": "app.Tablo2HDHomeRun$Request$1$ChannelInfo",
+      "type": "app.Tablo2HDHomeRun$Channel$Request$WatchRequest",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Request$1$ChannelObject",
+      "type": "app.Tablo2HDHomeRun$Channel$Response$Tuners",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Request$3$WatchRequest",
+      "type": "app.Tablo2HDHomeRun$Channel$Response$VideoDetails",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$3$LineupStatus",
+      "type": "app.Tablo2HDHomeRun$Channel$Response$WatchResponse",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$5$Tuners",
+      "type": "app.Tablo2HDHomeRun$Lineup$Request$ChannelInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$5$VideoDetails",
+      "type": "app.Tablo2HDHomeRun$Lineup$Request$ChannelObject",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$5$WatchResponse",
+      "type": "app.Tablo2HDHomeRun$LineupStatus$Response$LineupStatus",
       "allDeclaredFields": true
     },
     {
