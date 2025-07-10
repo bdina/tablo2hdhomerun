@@ -7,7 +7,7 @@ FROM ubuntu:24.04 AS build
 ARG JAVA_VERSION=24.0.1
 ARG GRAALVM_WORKDIR=/graalvm/src/project
 
-ARG GRADLE_VERSION=8.14.2
+ARG GRADLE_VERSION=8.14.3
 
 # Install tools required for project
 # Run `docker build --no-cache .` to update dependencies
