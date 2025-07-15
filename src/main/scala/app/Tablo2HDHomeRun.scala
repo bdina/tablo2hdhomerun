@@ -289,6 +289,21 @@ object AppContext {
   implicit val system: ActorSystem[pekko.NotUsed] = ActorSystem(Tablo2HDHomeRun(), "tablo2hdhomerun-system")
 }
 
+object Dependencies {
+  val log = LoggerFactory.getLogger(this.getClass)
+
+  import scala.sys.process._
+  val devNull = ProcessLogger(_ => {}, _ => {})
+
+  def verify() = {
+    val ffmpegCheck = Try { "ffmpeg -version".!<(devNull) }.getOrElse(-1)
+    if (ffmpegCheck != 0) {
+      log.info("[dependencies] missing dependency -> ffmpeg (check installation)")
+      System.exit(1)
+    }
+  }
+}
+
 object Tablo2HDHomeRun extends App {
   val log = LoggerFactory.getLogger(this.getClass)
 
@@ -296,9 +311,11 @@ object Tablo2HDHomeRun extends App {
 
   val media = sys.env.get("MEDIA_ROOT")
 
+  Dependencies.verify()
+
   def apply(): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
     media.map { case root =>
-      log.info(s"[tablo2hdhomerun] media root set -> $root")
+      log.info(s"[apply] media root set -> $root")
 
       val monitor = context.spawn(FsMonitor(), "monitor-actor")
       context.log.info(s"[apply] created monitor actor $monitor")
@@ -502,10 +519,7 @@ object Tablo2HDHomeRun extends App {
 
         val HttpCtx = Http()
 
-        def scan(sender: Option[ActorRef[Response.Fetch]] = None): Unit = {
-          import JsonProtocol._
-          import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
-
+        def scan(): Future[Seq[JsValue]] =
           HttpCtx
             .singleRequest(Proxy.Request.httpRequest)
             .flatMap { response =>
@@ -513,6 +527,8 @@ object Tablo2HDHomeRun extends App {
               Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
             }
             .flatMap { paths =>
+              import JsonProtocol._
+              import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
               Marshal(paths.toJson)
                 .to[RequestEntity]
                 .flatMap { entity =>
@@ -522,24 +538,20 @@ object Tablo2HDHomeRun extends App {
                   }
                 }
             }
-            .onComplete {
-              case Success(data) =>
-                log.info(s"[lineup-actor] channels found: ${data.size}")
-                val channels =
-                  data
-                    .map { case (path,obj) =>
-                      log.info(s"[lineup-actor] $path => ${obj.channel.call_sign}, ${obj.channel.network.getOrElse("None")}")
-                      Proxy.Response.ChannelObject.jsValue(obj)
-                    }
-                    .toSeq
+            .map { data =>
+              log.info(s"[lineup-actor] channels found: ${data.size}")
+              val channels =
+                data
+                  .map { case (path,obj) =>
+                    log.info(s"[lineup-actor] $path => ${obj.channel.call_sign}, ${obj.channel.network.getOrElse("None")}")
+                    Proxy.Response.ChannelObject.jsValue(obj)
+                  }
+                  .toSeq
 
-                context.self ! Command.Store(channels)
+              context.self ! Command.Store(channels)
 
-                sender.map { replyTo => replyTo ! LineupActor.Response.Fetch(channels, context.self) }
-              case Failure(ex) =>
-                log.info(s"[lineup-actor] Failed: ${ex.getMessage}")
+              channels
             }
-        }
 
         context.self ! Command.Scan
 
@@ -560,8 +572,8 @@ object Tablo2HDHomeRun extends App {
           case Command.Scan =>
             log.info("[lineup-actor] channel scan requested")
 
-            scan()
             scanInProgress = true
+            scan()
 
             Behaviors.same
 
@@ -573,16 +585,20 @@ object Tablo2HDHomeRun extends App {
 
             Behaviors.same
 
-          case Request.Fetch(sender) if cache._1.isOverdue() =>
+          case Request.Fetch(replyTo) if cache._1.isOverdue() =>
             log.info("[lineup-actor] channel fetch")
 
-            scan(sender = Some(sender))
+            val sender = replyTo
+
             scanInProgress = true
+            scan().map { channels =>
+              sender ! LineupActor.Response.Fetch(channels, context.self)
+            }
 
             Behaviors.same
 
           case Request.Fetch(sender) =>
-            val channels = cache._2
+            val (_,channels) = cache
 
             log.info(s"[lineup-actor] channels found: ${channels.size}")
             sender ! LineupActor.Response.Fetch(channels, context.self)
