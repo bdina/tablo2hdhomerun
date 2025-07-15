@@ -471,12 +471,20 @@ object Tablo2HDHomeRun extends App {
     object LineupActor {
       sealed trait Request
       object Request {
-        case class Fetch(replyTo: ActorRef[Response]) extends Request
+        case class Fetch(replyTo: ActorRef[Response.Fetch]) extends Request
+        case class Status(replyTo: ActorRef[Response.Status]) extends Request
       }
 
       sealed trait Response
       object Response {
-        case class Fetch(channels: Seq[JsValue], replyTo: ActorRef[Request]) extends Response
+        case class Fetch(channels: Seq[JsValue], replyTo: ActorRef[Request.Fetch]) extends Response
+        case class Status(scanInProgress: Int, scanPossible: Int, replyTo: ActorRef[Request.Fetch]) extends Response
+      }
+
+      sealed trait Command extends Request
+      object Command {
+        case class Store(channels: Seq[JsValue]) extends Command
+        case object Scan extends Command
       }
 
       trait Error extends Exception
@@ -490,45 +498,74 @@ object Tablo2HDHomeRun extends App {
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
         var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow,Seq.empty)
+        var scanInProgress: Boolean = false
+
+        val HttpCtx = Http()
+
+        def scan(sender: Option[ActorRef[Response.Fetch]] = None) = {
+          import JsonProtocol._
+          import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
+
+          HttpCtx
+            .singleRequest(Proxy.Request.httpRequest)
+            .flatMap { response =>
+              log.info(s"[lineup-actor] guide/channels (GET) - $response")
+              Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
+            }
+            .flatMap { paths =>
+              Marshal(paths.toJson)
+                .to[RequestEntity]
+                .flatMap { entity =>
+                  HttpCtx.singleRequest(Proxy.Request.postRequest(entity)).flatMap { response =>
+                    log.info(s"[lineup-actor] batch (POST) - $response")
+                    Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
+                  }
+                }
+            }
+            .onComplete {
+              case Success(data) =>
+                log.info(s"[lineup-actor] channels found: ${data.size}")
+                val channels =
+                  data
+                    .map { case (path,obj) =>
+                      log.info(s"[lineup-actor] $path => ${obj.channel.call_sign}, ${obj.channel.network.getOrElse("None")}")
+                      Proxy.Response.ChannelObject.jsValue(obj)
+                    }
+                    .toSeq
+
+                context.self ! Command.Store(channels)
+
+                sender.map { replyTo => replyTo ! LineupActor.Response.Fetch(channels, context.self) }
+              case Failure(ex) =>
+                log.info(s"[lineup-actor] Failed: ${ex.getMessage}")
+            }
+        }
+
+        context.self ! Command.Scan
 
         Behaviors.receiveMessage {
+          case Command.Store(channels) =>
+            cache = (1.day.fromNow, channels)
+
+            scanInProgress = false
+
+            Behaviors.same
+
+          case Command.Scan =>
+            scan()
+
+            scanInProgress = true
+
+            Behaviors.same
+
+          case Request.Status(sender) =>
+            val (scanning,possible) = if (scanInProgress) (1,0) else (0,1)
+            sender ! Response.Status(scanInProgress=scanning, scanPossible=possible, replyTo=context.self)
+
+            Behaviors.same
+
           case Request.Fetch(sender) if cache._1.isOverdue() =>
-            import JsonProtocol._
-            import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
-
-            HttpCtx
-              .singleRequest(Proxy.Request.httpRequest)
-              .flatMap { response =>
-                log.info(s"[lineup-actor] guide/channels (GET) - $response")
-                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
-              }
-              .flatMap { paths =>
-                Marshal(paths.toJson)
-                  .to[RequestEntity]
-                  .flatMap { entity =>
-                    HttpCtx.singleRequest(Proxy.Request.postRequest(entity)).flatMap { response =>
-                      log.info(s"[lineup-actor] batch (POST) - $response")
-                      Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
-                    }
-                  }
-              }
-              .onComplete {
-                case Success(data) =>
-                  log.info(s"[lineup-actor] channels found: ${data.size}")
-                  val channels =
-                    data
-                      .map { case (path,obj) =>
-                        log.info(s"[lineup-actor] $path => ${obj.channel.call_sign}, ${obj.channel.network.getOrElse("None")}")
-                        Proxy.Response.ChannelObject.jsValue(obj)
-                      }
-                      .toSeq
-
-                  cache = (1.day.fromNow, channels)
-
-                  sender ! LineupActor.Response.Fetch(channels, context.self)
-                case Failure(ex) =>
-                  log.info(s"[lineup-actor] Failed: ${ex.getMessage}")
-              }
+            scan(sender = Some(sender))
 
             Behaviors.same
 
@@ -562,9 +599,9 @@ object Tablo2HDHomeRun extends App {
         get {
           import pekko.actor.typed.scaladsl.AskPattern._
           implicit val timeout: pekko.util.Timeout = 3.seconds
-          val detailedInfoFuture: Future[LineupActor.Response] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
+          val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
 
-          onComplete(detailedInfoFuture) {
+          onComplete(lineupF) {
             case Success(LineupActor.Response.Fetch(channels,_)) =>
               complete(HttpEntity(ContentTypes.`application/json`, channels.toJson.compactPrint))
             case Failure(ex) =>
@@ -575,10 +612,20 @@ object Tablo2HDHomeRun extends App {
       } ~
       path("lineup_status.json") {
         get {
-          import Response.LineupStatus.JsonProtocol.lineupStatusFormat
-          val response = Response.LineupStatus().toJson
-          log.info(s"[lineup_status] lineup_status.json (GET) - $response")
-          complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
+          import pekko.actor.typed.scaladsl.AskPattern._
+          implicit val timeout: pekko.util.Timeout = 3.seconds
+          val statusF: Future[LineupActor.Response.Status] = lineupActor.ask(replyTo => LineupActor.Request.Status(replyTo))
+
+          onComplete(statusF) {
+            case Success(LineupActor.Response.Status(scanInProgress,scanPossible,_)) =>
+              import Response.LineupStatus.JsonProtocol.lineupStatusFormat
+              val response = Response.LineupStatus(ScanInProgress=scanInProgress,ScanPossible=scanPossible).toJson
+              log.info(s"[lineup_status] lineup_status.json (GET) - $response")
+              complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
+            case Failure(ex) =>
+              log.info(s"[lineup_status] Failed: ${ex.getMessage}")
+              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to get lineup status"))
+          }
         }
       }
   }
