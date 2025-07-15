@@ -54,7 +54,7 @@ object FsNotify {
   private final case class FsQueueResponse(response: FsQueue.Response) extends Command
 
   object FsQueue {
-    implicit val system: ActorSystem[app.Tablo2HDHomeRun.Command] = AppContext.system
+    implicit val system: ActorSystem[Nothing] = AppContext.system
 
     val bufferSize = 1000
 
@@ -138,33 +138,34 @@ object FsNotify {
     import org.apache.pekko.actor.typed.scaladsl.AskPattern._
     import org.apache.pekko.util.Timeout
     import scala.concurrent.Future
-    val queue = Source
-      .queue[FsQueue.Enqueue](bufferSize)
-      .mapAsync(parallelism=1) {
-        case Enqueue(p,replyTo) =>
-          val uuid = java.util.UUID.randomUUID
-          val proxy = system.systemActorOf(QueueProxy(p.toFile), s"ffmpeg-proxy-${uuid}")
-          system.log.info(s"[queue] send convert message to proxy $proxy")
+    val queue =
+      Source
+        .queue[FsQueue.Enqueue](bufferSize)
+        .mapAsync(parallelism=1) {
+          case Enqueue(p,replyTo) =>
+            val uuid = java.util.UUID.randomUUID
+            val proxy = system.systemActorOf(QueueProxy(p.toFile), s"ffmpeg-proxy-${uuid}")
+            system.log.info(s"[queue] send convert message to proxy $proxy")
 
-          implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-          implicit val timeout: Timeout = 10.minutes
-          val status: Future[QueueProxy.Response] =
-            proxy.ask(ref => QueueProxy.Request.Notify(replyTo=ref))
+            implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+            implicit val timeout: Timeout = 10.minutes
+            val status: Future[QueueProxy.Response] =
+              proxy.ask(ref => QueueProxy.Request.Notify(replyTo=ref))
 
-          status.onComplete {
-            case Success(QueueProxy.Response.Complete) =>
-              system.log.info(s"[queue] task complete")
-              replyTo ! FsQueue.Response.Complete(p)
-            case Success(QueueProxy.Response.Pending) =>
-              ()
-            case fail =>
-              ()
-          }
+            status.onComplete {
+              case Success(QueueProxy.Response.Complete) =>
+                system.log.info(s"[queue] task complete")
+                replyTo ! FsQueue.Response.Complete(p)
+              case Success(QueueProxy.Response.Pending) =>
+                ()
+              case fail =>
+                ()
+            }
 
-          Future.successful(p.toFile)
-      }
-      .toMat(Sink.foreach(p => system.log.info(s"[queue] completed $p")))(Keep.left)
-      .run()
+            Future.successful(p.toFile)
+        }
+        .toMat(Sink.foreach(p => system.log.info(s"[queue] completed $p")))(Keep.left)
+        .run()
 
     def +=(e: FsQueue.Enqueue): Unit = queue.offer(e)
   }
@@ -285,41 +286,45 @@ object FsScan {
 }
 
 object AppContext {
-  implicit val system: ActorSystem[Tablo2HDHomeRun.Command] =
-    ActorSystem(Tablo2HDHomeRun(), "tablo2hdhomerun-daemon")
+  implicit val system: ActorSystem[pekko.NotUsed] = ActorSystem(Tablo2HDHomeRun(), "tablo2hdhomerun-system")
 }
 
 object Tablo2HDHomeRun extends App {
   val log = LoggerFactory.getLogger(this.getClass)
 
-  sealed trait Command
-  final case class StartWatch(path: Path) extends Command
+  private final case class FsMonitorResponse(response: FsMonitor.Response)
 
-  private final case class FsMonitorResponse(response: FsMonitor.Response) extends Command
+  val media = sys.env.get("MEDIA_ROOT")
 
-  def apply(): Behavior[Command] = Behaviors.setup { context =>
-    val responseMapper: ActorRef[FsMonitor.Response] =
-      context.messageAdapter(resp => FsMonitorResponse(resp))
+  def apply(): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
+    media.map { case root =>
+      log.info(s"[tablo2hdhomerun] media root set -> $root")
 
-    Behaviors.receiveMessage[Command] {
-      case StartWatch(path) =>
-        val monitor = context.spawn(FsMonitor(), "monitor")
-        context.log.info(s"[apply] created monitor $monitor")
-        monitor ! FsMonitor.Watch(path=path,ext=Seq("ts,","mkv"),replyTo=responseMapper)
-        Behaviors.same
-      case FsMonitorResponse(resp) =>
-        context.log.info(s"[apply] received response $resp - shutdown")
-        Behaviors.stopped
+      val monitor = context.spawn(FsMonitor(), "monitor-actor")
+      context.log.info(s"[apply] created monitor actor $monitor")
+
+      implicit val timeout: pekko.util.Timeout = 3.seconds
+
+      val path = Paths.get(root)
+      context.ask[FsMonitor.Watch,FsMonitor.Ack](monitor, ref => FsMonitor.Watch(path=path,ext=Seq("ts,","mkv"),replyTo=ref)) {
+        case Success(FsMonitor.Ack(p,_)) =>
+          context.log.info(s"[apply] received ACK($p)")
+          pekko.NotUsed
+        case Failure(ex) =>
+          context.log.info(s"[apply] received FAILURE with ${ex.getMessage}")
+          pekko.NotUsed
+      }
     }
+
+    val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor")
+    startHttp(lineup)
+
+    Behaviors.empty
   }
 
-  implicit val system: ActorSystem[app.Tablo2HDHomeRun.Command] = AppContext.system
+  implicit val system: ActorSystem[Nothing] = AppContext.system
 
   implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-
-//  val root = if (args.length == 1) args(0) else "/tmp"
-
-//  system ! StartWatch(Paths.get(root))
 
   object Response {
     object JsonProtocol {
@@ -361,7 +366,7 @@ object Tablo2HDHomeRun extends App {
     , ModelNumber: String = "HDHR3-US"
     , FirmwareName: String = "hdhomerun3_atsc"
     , FirmwareVersion: String = "20240101"
-    , DeviceID: String = "12345678"
+    , DeviceID: String = "12345678" // TODO hash friendly name
     , DeviceAuth: String = "tabloauth123"
     ) {
       def proxyAddress(inetAddress: InetAddress, port: Int) =
@@ -407,8 +412,32 @@ object Tablo2HDHomeRun extends App {
   val HttpCtx = Http()
 
   object Lineup {
-    object Request {
-      object Lineup {
+    case class ChannelInfo(
+      call_sign: String
+    , call_sign_src: String
+    , major: Int
+    , minor: Int
+    , network: Option[String]
+    , resolution: String
+    , favourite: Boolean
+    , tms_station_id: String
+    , tms_affiliate_id: String
+    , source: String
+    )
+
+    case class ChannelObject(
+      object_id: Int
+    , path: String
+    , channel: ChannelInfo
+    )
+
+    object JsonProtocol extends DefaultJsonProtocol {
+      implicit val channelInfoFormat: JsonFormat[ChannelInfo] = jsonFormat10(ChannelInfo.apply)
+      implicit val channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
+    }
+
+    object Proxy {
+      object Request {
         val baseUrl = discover.proxyAddress(TABLO_IP,TABLO_PORT)
         val getUri = baseUrl.withPath(Uri.Path("/guide/channels"))
         val postUri = baseUrl.withPath(Uri.Path("/batch"))
@@ -421,79 +450,108 @@ object Tablo2HDHomeRun extends App {
         , entity = entity.withContentType(ContentTypes.`application/json`)
         )
       }
-
-      case class ChannelInfo(
-        call_sign: String
-      , call_sign_src: String
-      , major: Int
-      , minor: Int
-      , network: Option[String]
-      , resolution: String
-      , favourite: Boolean
-      , tms_station_id: String
-      , tms_affiliate_id: String
-      , source: String
-      )
-
-      case class ChannelObject(
-        object_id: Int
-      , path: String
-      , channel: ChannelInfo
-      )
-
-      object JsonProtocol extends DefaultJsonProtocol {
-        implicit val channelInfoFormat: JsonFormat[ChannelInfo] = jsonFormat10(ChannelInfo.apply)
-        implicit val channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
-      }
-    }
-    object Response {
-      object ChannelObject {
-        import Request._
-        def jsValue(obj: ChannelObject): JsValue = {
-          val num = s"${obj.channel.major}.${obj.channel.minor}"
-          val url = s"${discover.BaseURL.withPath(Uri.Path(s"/channel/${obj.object_id}"))}"
-          val src = s"${discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${obj.object_id}/watch"))}"
-          JsObject(
-            "GuideNumber" -> JsString(num)
-          , "GuideName" -> JsString(obj.channel.call_sign)
-          , "URL" -> JsString(url)
-          , "type" -> JsString(obj.channel.source)
-          , "srcURL" -> JsString(src)
-          )
+      object Response {
+        object ChannelObject {
+          def jsValue(obj: ChannelObject): JsValue = {
+            val num = s"${obj.channel.major}.${obj.channel.minor}"
+            val url = s"${discover.BaseURL.withPath(Uri.Path(s"/channel/${obj.object_id}"))}"
+            val src = s"${discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${obj.object_id}/watch"))}"
+            JsObject(
+              "GuideNumber" -> JsString(num)
+            , "GuideName" -> JsString(obj.channel.call_sign)
+            , "URL" -> JsString(url)
+            , "type" -> JsString(obj.channel.source)
+            , "srcURL" -> JsString(src)
+            )
+          }
         }
       }
     }
 
-    val route =
+    object LineupActor {
+      sealed trait Request
+      object Request {
+        case class Fetch(replyTo: ActorRef[Response]) extends Request
+      }
+
+      sealed trait Response
+      object Response {
+        case class Fetch(channels: Seq[JsValue], replyTo: ActorRef[Request]) extends Response
+      }
+
+      trait Error extends Exception
+      object Error {
+        case class ServerError(f: File) extends Exception(s"server error: $f") with Error
+      }
+
+      val log = LoggerFactory.getLogger(this.getClass)
+
+      implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
+
+      def apply(): Behavior[Request] = Behaviors.setup { context =>
+        var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow,Seq.empty)
+
+        Behaviors.receiveMessage {
+          case Request.Fetch(sender) if cache._1.isOverdue() =>
+            import JsonProtocol._
+            import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
+
+            HttpCtx
+              .singleRequest(Proxy.Request.httpRequest)
+              .flatMap { response =>
+                log.info(s"[lineup-actor] guide/channels (GET) - $response")
+                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
+              }
+              .flatMap { paths =>
+                Marshal(paths.toJson)
+                  .to[RequestEntity]
+                  .flatMap { entity =>
+                    HttpCtx.singleRequest(Proxy.Request.postRequest(entity)).flatMap { response =>
+                      log.info(s"[lineup-actor] batch (POST) - $response")
+                      Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
+                    }
+                  }
+              }
+              .onComplete {
+                case Success(data) =>
+                  log.info(s"[lineup-actor] channels found: ${data.size}")
+                  val channels =
+                    data
+                      .map { case (path,obj) =>
+                        log.info(s"[lineup-actor] $path => ${obj.channel.call_sign}, ${obj.channel.network.getOrElse("None")}")
+                        Proxy.Response.ChannelObject.jsValue(obj)
+                      }
+                      .toSeq
+
+                  cache = (1.day.fromNow, channels)
+
+                  sender ! LineupActor.Response.Fetch(channels, context.self)
+                case Failure(ex) =>
+                  log.info(s"[lineup-actor] Failed: ${ex.getMessage}")
+              }
+
+            Behaviors.same
+
+          case Request.Fetch(sender) =>
+            val channels = cache._2
+
+            log.info(s"[lineup-actor] channels found: ${channels.size}")
+            sender ! LineupActor.Response.Fetch(channels, context.self)
+
+            Behaviors.same
+        }
+      }
+    }
+
+    def route(lineupActor: ActorRef[Lineup.LineupActor.Request]) =
       path("lineup.json") {
         get {
-          import Request._
-          import JsonProtocol._
-          import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
-
-          val lineupFuture: Future[HttpResponse] = HttpCtx.singleRequest(Request.Lineup.httpRequest)
-          val channelPathsFuture: Future[Seq[String]] = lineupFuture.flatMap { response =>
-            log.info(s"[lineup] guide/channels (GET) - $response")
-            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
-          }
-          val detailedInfoFuture: Future[Map[String, ChannelObject]] = channelPathsFuture.flatMap { paths =>
-            Marshal(paths.toJson)
-              .to[RequestEntity]
-              .flatMap { entity =>
-                HttpCtx.singleRequest(Request.Lineup.postRequest(entity)).flatMap { response =>
-                  log.info(s"[lineup] batch (POST) - $response")
-                  Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
-                }
-              }
-          }
+          import pekko.actor.typed.scaladsl.AskPattern._
+          implicit val timeout: pekko.util.Timeout = 3.seconds
+          val detailedInfoFuture: Future[LineupActor.Response] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
 
           onComplete(detailedInfoFuture) {
-            case Success(data) =>
-              log.info(s"[lineup] channels found: ${data.size}")
-              val channels = data.map { case (path,obj) =>
-                log.info(s"[lineup] $path => ${obj.channel.call_sign}, ${obj.channel.network.getOrElse("None")}")
-                Response.ChannelObject.jsValue(obj)
-              }
+            case Success(LineupActor.Response.Fetch(channels,_)) =>
               complete(HttpEntity(ContentTypes.`application/json`, channels.toJson.compactPrint))
             case Failure(ex) =>
               log.info(s"[lineup] Failed: ${ex.getMessage}")
@@ -518,10 +576,9 @@ object Tablo2HDHomeRun extends App {
       }
     }
 
-    val route =
+    def route(lineupActor: ActorRef[Lineup.LineupActor.Request]) =
       path("lineup_status.json") {
         get {
-
           import Response.LineupStatus.JsonProtocol.lineupStatusFormat
           val response = Response.LineupStatus().toJson
           log.info(s"[lineup_status] lineup_status.json (GET) - $response")
@@ -674,37 +731,66 @@ object Tablo2HDHomeRun extends App {
       }
   }
 
-  val routes =
-    Discover.route ~
-    Lineup.route ~
-    LineupStatus.route ~
-    Channel.route ~
-    Guide.route ~
-    Favicon.route
+  /**
+   * Linup routes -> actor backed
+   *   LineupActor loads channels from tuner on start and caches
+   *   them. When the cache expires it will refresh. The refresh
+   *   can be active or passive. (maybe the active refresh will
+   *   run on schedule like at 2a)
+   *
+   *   The endpoint handler messages the actor to get channel data
+   *   which should be very low latency.
+   *
+   * Guid route -> actor backed
+   *   GuideActor loads EPG from Tablo on start and caches it. The
+   *   guide should keep 1 week of data (configurable) and will load
+   *   on a sliding window 1x per day
+   *
+   *   The endpoint handler messages the actor to get guide data
+   *   which should be very low latency.
+   *
+   * Channel route -> stream backed
+   *   To start a stream first select an available tuner on the Tablo
+   *   and ask it to start by sending a Watch request. The response
+   *   from the Watch request will provide a URL of an M3U playlist.
+   *   Take the M3U playlist provided by the Tablo and transcode
+   *   with FFMpeg to an MPEG T3 stream sent back to client via an
+   *   HTTP chunked entity.
+   */
 
-  val loggedRejectionHandler =
-    RejectionHandler
-      .newBuilder()
-      .handleNotFound { // Handle the case where no route matched (empty rejections)
-        extractRequest { request =>
-          log.info(s"[NotFound] unknown path - $request")
-          complete(HttpResponse(StatusCodes.NotFound, entity = "Resource not found"))
+  def startHttp(lineupActor: ActorRef[Lineup.LineupActor.Request]): Unit = {
+    val routes =
+      Discover.route ~
+      Lineup.route(lineupActor) ~
+      LineupStatus.route(lineupActor) ~
+      Channel.route ~
+      Guide.route ~
+      Favicon.route
+
+    val loggedRejectionHandler =
+      RejectionHandler
+        .newBuilder()
+        .handleNotFound { // Handle the case where no route matched (empty rejections)
+          extractRequest { request =>
+            log.info(s"[NotFound] unknown path - $request")
+            complete(HttpResponse(StatusCodes.NotFound, entity = "Resource not found"))
+          }
         }
-      }
-      .result() // Add other handlers for specific rejections if needed
+        .result() // Add other handlers for specific rejections if needed
 
-  val bindingFuture =
-    HttpCtx
-      .newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT)
-      .bind {
-        handleRejections(loggedRejectionHandler) { routes }
-      }
+    val bindingFuture =
+      Http()
+        .newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT)
+        .bind {
+          handleRejections(loggedRejectionHandler) { routes }
+        }
 
-  println(s"Server now online. Please navigate to http://${PROXY_IP}:${PROXY_PORT}\nPress RETURN to stop...")
-  StdIn.readLine() // let it run until user presses return
-  bindingFuture
-    .flatMap(_.unbind()) // trigger unbinding from the port
-    .onComplete(_ => system.terminate()) // and shutdown when done
+    println(s"Server now online. Please navigate to http://${PROXY_IP.getHostAddress}:${PROXY_PORT}\nPress RETURN to stop...")
+    StdIn.readLine() // let it run until user presses return
+    bindingFuture
+      .flatMap(_.unbind()) // trigger unbinding from the port
+      .onComplete(_ => system.terminate()) // and shutdown when done
+  }
 }
 
 object FFMpegDelegate {
@@ -717,7 +803,7 @@ object FFMpegDelegate {
 
   sealed trait Response
   object Response {
-    case class Status(code: Int,replyTo: ActorRef[Request]) extends Response
+    case class Status(code: Int, replyTo: ActorRef[Request]) extends Response
   }
 
   trait Error extends Exception

@@ -47,11 +47,11 @@
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Lineup$Request$ChannelInfo",
+      "type": "app.Tablo2HDHomeRun$Lineup$ChannelInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Lineup$Request$ChannelObject",
+      "type": "app.Tablo2HDHomeRun$Lineup$ChannelObject",
       "allDeclaredFields": true
     },
     {
