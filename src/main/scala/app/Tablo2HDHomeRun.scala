@@ -502,7 +502,7 @@ object Tablo2HDHomeRun extends App {
 
         val HttpCtx = Http()
 
-        def scan(sender: Option[ActorRef[Response.Fetch]] = None) = {
+        def scan(sender: Option[ActorRef[Response.Fetch]] = None): Unit = {
           import JsonProtocol._
           import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
 
@@ -545,27 +545,39 @@ object Tablo2HDHomeRun extends App {
 
         Behaviors.receiveMessage {
           case Command.Store(channels) =>
-            cache = (1.day.fromNow, channels)
+            log.info(s"[lineup-actor] store channels: ${channels.size}")
 
+            cache = (1.day.fromNow, channels)
             scanInProgress = false
 
             Behaviors.same
 
-          case Command.Scan =>
-            scan()
+          case Command.Scan if scanInProgress =>
+            log.info("[lineup-actor] channel scan requested ; already in progress (suppress)")
 
+            Behaviors.same
+
+          case Command.Scan =>
+            log.info("[lineup-actor] channel scan requested")
+
+            scan()
             scanInProgress = true
 
             Behaviors.same
 
           case Request.Status(sender) =>
+            log.info("[lineup-actor] channel status requested")
+
             val (scanning,possible) = if (scanInProgress) (1,0) else (0,1)
             sender ! Response.Status(scanInProgress=scanning, scanPossible=possible, replyTo=context.self)
 
             Behaviors.same
 
           case Request.Fetch(sender) if cache._1.isOverdue() =>
+            log.info("[lineup-actor] channel fetch")
+
             scan(sender = Some(sender))
+            scanInProgress = true
 
             Behaviors.same
 
