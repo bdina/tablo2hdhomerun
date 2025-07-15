@@ -543,25 +543,6 @@ object Tablo2HDHomeRun extends App {
       }
     }
 
-    def route(lineupActor: ActorRef[Lineup.LineupActor.Request]) =
-      path("lineup.json") {
-        get {
-          import pekko.actor.typed.scaladsl.AskPattern._
-          implicit val timeout: pekko.util.Timeout = 3.seconds
-          val detailedInfoFuture: Future[LineupActor.Response] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
-
-          onComplete(detailedInfoFuture) {
-            case Success(LineupActor.Response.Fetch(channels,_)) =>
-              complete(HttpEntity(ContentTypes.`application/json`, channels.toJson.compactPrint))
-            case Failure(ex) =>
-              log.info(s"[lineup] Failed: ${ex.getMessage}")
-              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce channel lineup"))
-          }
-        }
-      }
-  }
-
-  object LineupStatus {
     object Response {
       case class LineupStatus(
         ScanInProgress: Int = 0
@@ -577,6 +558,21 @@ object Tablo2HDHomeRun extends App {
     }
 
     def route(lineupActor: ActorRef[Lineup.LineupActor.Request]) =
+      path("lineup.json") {
+        get {
+          import pekko.actor.typed.scaladsl.AskPattern._
+          implicit val timeout: pekko.util.Timeout = 3.seconds
+          val detailedInfoFuture: Future[LineupActor.Response] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
+
+          onComplete(detailedInfoFuture) {
+            case Success(LineupActor.Response.Fetch(channels,_)) =>
+              complete(HttpEntity(ContentTypes.`application/json`, channels.toJson.compactPrint))
+            case Failure(ex) =>
+              log.info(s"[lineup] Failed: ${ex.getMessage}")
+              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce channel lineup"))
+          }
+        }
+      } ~
       path("lineup_status.json") {
         get {
           import Response.LineupStatus.JsonProtocol.lineupStatusFormat
@@ -762,7 +758,6 @@ object Tablo2HDHomeRun extends App {
     val routes =
       Discover.route ~
       Lineup.route(lineupActor) ~
-      LineupStatus.route(lineupActor) ~
       Channel.route ~
       Guide.route ~
       Favicon.route
