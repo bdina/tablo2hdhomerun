@@ -802,33 +802,6 @@ object Tablo2HDHomeRun extends App {
       }
   }
 
-  /**
-   * Linup routes -> actor backed
-   *   LineupActor loads channels from tuner on start and caches
-   *   them. When the cache expires it will refresh. The refresh
-   *   can be active or passive. (maybe the active refresh will
-   *   run on schedule like at 2a)
-   *
-   *   The endpoint handler messages the actor to get channel data
-   *   which should be very low latency.
-   *
-   * Guid route -> actor backed
-   *   GuideActor loads EPG from Tablo on start and caches it. The
-   *   guide should keep 1 week of data (configurable) and will load
-   *   on a sliding window 1x per day
-   *
-   *   The endpoint handler messages the actor to get guide data
-   *   which should be very low latency.
-   *
-   * Channel route -> stream backed
-   *   To start a stream first select an available tuner on the Tablo
-   *   and ask it to start by sending a Watch request. The response
-   *   from the Watch request will provide a URL of an M3U playlist.
-   *   Take the M3U playlist provided by the Tablo and transcode
-   *   with FFMpeg to an MPEG T3 stream sent back to client via an
-   *   HTTP chunked entity.
-   */
-
   def startHttp(lineupActor: ActorRef[Lineup.LineupActor.Request]): Unit = {
     val routes =
       Discover.route ~
