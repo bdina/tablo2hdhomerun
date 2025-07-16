@@ -19,7 +19,8 @@ RUN apt-get update -y \
  && mkdir -p /opt/graalvm-community-jdk-${JAVA_VERSION} \
  && tar zxvf /tmp/graalvm-community-jdk-${JAVA_VERSION}_linux-x64_bin.tar.gz -C /opt/graalvm-community-jdk-${JAVA_VERSION} --strip-components 1 \
  && wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -P /tmp \
- && unzip -d /opt /tmp/gradle-${GRADLE_VERSION}-bin.zip
+ && unzip -d /opt /tmp/gradle-${GRADLE_VERSION}-bin.zip \
+ && DEBIAN_FRONTEND=noninteractive TZ=America/NEW_YORK apt-get -y install tzdata ffmpeg
 
 ARG MUSL_VERSION=11.2.1
 ARG ZLIB_VERSION=1.3.1
@@ -83,6 +84,6 @@ COPY --from=build /graalvm/src/project/build/tablo2hdhomerun* ${APP_HOME}/
 CMD [ "/bin/bash" ]
 
 # And we finally create the application layer
-#FROM app-stage AS app
-#ENTRYPOINT [ "./tablo2hdhomerun" ]
-#CMD [ "-XX:+PrintGC" , "-XX:+VerboseGC" ]
+FROM app-stage AS app
+ENTRYPOINT [ "./tablo2hdhomerun" ]
+CMD [ "-XX:+PrintGC" , "-XX:+VerboseGC" ]
