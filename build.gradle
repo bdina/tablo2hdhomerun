@@ -32,7 +32,6 @@ ext {
 dependencies {
     implementation group: 'org.scala-lang' , name: "scala${scala_maj}-library_${scala_maj}"  , version: scala_ver
     implementation group: 'org.scala-lang' , name: "scala${scala_maj}-compiler_${scala_maj}" , version: scala_ver
-//    implementation group: 'org.scala-lang' , name: "scala${scala_maj}-reflect_${scala_maj}"  , version: scala_ver
 
     implementation group: 'org.jcodec', name: 'jcodec', version: '0.2.6'
 
@@ -43,7 +42,6 @@ dependencies {
     implementation group: 'org.apache.pekko', name: "pekko-http_${scala_maj}", version: pekko_http
     implementation group: 'org.apache.pekko', name: "pekko-http-spray-json_${scala_maj}", version: pekko_http
 
-//    implementation group: 'org.scala-lang.modules', name: "scala-async_${scala_maj}", version: '1.0.1'
     implementation group: 'org.scala-lang.modules', name: "scala-xml_${scala_maj}", version: '2.3.0'
 
     implementation group: 'org.scalaz', name: "scalaz-core_${scala_maj}", version: '7.3.8'
@@ -125,13 +123,11 @@ compileScala {
     scalaCompileOptions.additionalParameters = [
         '-feature'
       , '-no-indent'
-//      , '-deprecation'
       , '-explain'
       , '-Werror'
       , '-Wnonunit-statement'
       , '-Wsafe-init'
       , '-Wunused:all'
       , '-Wvalue-discard'
-//      , '-Yexplicit-nulls'
     ]
 }
