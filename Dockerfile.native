@@ -85,5 +85,4 @@ CMD [ "/bin/bash" ]
 
 # And we finally create the application layer
 FROM app-stage AS app
-ENTRYPOINT [ "./tablo2hdhomerun" ]
-CMD [ "-XX:+PrintGC" , "-XX:+VerboseGC" ]
+ENTRYPOINT [ "./tablo2hdhomerun" , "-XX:+PrintGC" , "-XX:+VerboseGC" ]
