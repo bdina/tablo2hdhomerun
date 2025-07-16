@@ -78,13 +78,14 @@ object FsNotify {
 
       val killSwitch = KillSwitches.shared(s"queue-proxy-killswitch-${java.util.UUID.randomUUID}")
       log.info("[queue:proxy] via kill switch {}", killSwitch)
-      Source
-        .tick(10.second, 10.second, ())
-        .via(killSwitch.flow)
-        .map { case _ =>
-          worker ! FFMpegDelegate.Request.Status(replyTo=ffmpegResponseMapper)
-        }
-        .runWith(Sink.ignore)
+      val _ =
+        Source
+          .tick(10.second, 10.second, ())
+          .via(killSwitch.flow)
+          .map { case _ =>
+            worker ! FFMpegDelegate.Request.Status(replyTo=ffmpegResponseMapper)
+          }
+          .runWith(Sink.ignore)
 
       var parent: Option[ActorRef[QueueProxy.Response]] = None
 
@@ -101,7 +102,7 @@ object FsNotify {
             case FFMpegDelegate.Response.Status(code,replyTo) =>
               log.info(s"[queue:proxy] signal stop -> $replyTo")
               replyTo ! FFMpegDelegate.Request.Stop(replyTo=ffmpegResponseMapper)
-              parent.map(ref => ref ! QueueProxy.Response.Complete)
+              parent.foreach (ref => ref ! QueueProxy.Response.Complete)
               killSwitch.shutdown()
               Behaviors.same
           }
@@ -158,7 +159,7 @@ object FsNotify {
                 replyTo ! FsQueue.Response.Complete(p)
               case Success(QueueProxy.Response.Pending) =>
                 ()
-              case fail =>
+              case _ =>
                 ()
             }
 
@@ -167,7 +168,7 @@ object FsNotify {
         .toMat(Sink.foreach(p => system.log.info(s"[queue] completed $p")))(Keep.left)
         .run()
 
-    def +=(e: FsQueue.Enqueue): Unit = queue.offer(e)
+    def +=(e: FsQueue.Enqueue): Unit = queue.offer(e) : Unit
   }
 
   def apply(path: Path, ext: Seq[String]): Behavior[Command] =
@@ -182,24 +183,25 @@ object FsNotify {
           case Poll =>
             context.log.info(s"[fsnotify:schedule] received signal to start poll")
             implicit val system = AppContext.system
-            Source
-              .tick(10.second, 10.second, ())
-              .map { case _ =>
-                val uuid = java.util.UUID.randomUUID
-                val worker = system.systemActorOf(FsScan(ext), s"FsScan-scan-${uuid}")
-                system.log.info(s"[fsnotify:schedule] send scan message to worker $worker")
-                worker ! FsScan.Scan(root=path,replyTo=fsResponseMapper)
-              }
-              .runWith(Sink.ignore)
+            val _ =
+              Source
+                .tick(10.second, 10.second, ())
+                .map { case _ =>
+                  val uuid = java.util.UUID.randomUUID
+                  val worker = system.systemActorOf(FsScan(ext), s"FsScan-scan-${uuid}")
+                  system.log.info(s"[fsnotify:schedule] send scan message to worker $worker")
+                  worker ! FsScan.Scan(root=path,replyTo=fsResponseMapper)
+                }
+                .runWith(Sink.ignore)
             Behaviors.same
-          case FsScanResponse(resp @ FsScan.Ack(paths,replyTo)) =>
+          case FsScanResponse(resp @ FsScan.Ack(paths,_)) =>
             context.log.info(s"[fsnotify:schedule] received $resp message")
             paths.foreach { case path =>
               context.log.info(s"[fsnotify:schedule] put $path in queue")
               FsQueue += FsQueue.Enqueue(p=path,replyTo=fsQueueResponseMapper)
             }
             Behaviors.same
-          case FsQueueResponse(resp @ FsQueue.Response.Complete(p)) =>
+          case FsQueueResponse(FsQueue.Response.Complete(p)) =>
             context.log.info(s"[fsnotify:schedule] remove $p from cache")
             Behaviors.same
         }
@@ -249,7 +251,7 @@ object FsScan {
         case Scan(root,replyTo) =>
           context.log.info(s"[standby] scan $root (replyTo $replyTo)")
           val self = context.self
-          scan(root=root,ext=ext)(using context.log).map {
+          scan(root=root,ext=ext)(using context.log).foreach {
             case result =>
               log.info(s"[standby] scanned $root with result $result - tell $replyTo")
               replyTo ! Ack(paths=result,from=self)
@@ -314,7 +316,7 @@ object Tablo2HDHomeRun extends App {
   Dependencies.verify()
 
   def apply(): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
-    media.map { case root =>
+    media.foreach { case root =>
       log.info(s"[apply] media root set -> $root")
 
       val monitor = context.spawn(FsMonitor(), "monitor-actor")
@@ -573,7 +575,7 @@ object Tablo2HDHomeRun extends App {
             log.info("[lineup-actor] channel scan requested")
 
             scanInProgress = true
-            scan()
+            scan() : Unit
 
             Behaviors.same
 
@@ -591,7 +593,7 @@ object Tablo2HDHomeRun extends App {
             val sender = replyTo
 
             scanInProgress = true
-            scan().map { channels =>
+            scan().foreach { channels =>
               sender ! LineupActor.Response.Fetch(channels, context.self)
             }
 
@@ -829,7 +831,7 @@ object Tablo2HDHomeRun extends App {
         }
 
     println(s"Server now online. Please navigate to http://${PROXY_IP.getHostAddress}:${PROXY_PORT}\nPress RETURN to stop...")
-    StdIn.readLine() // let it run until user presses return
+    StdIn.readLine() : Unit // let it run until user presses return
     bindingFuture
       .flatMap(_.unbind()) // trigger unbinding from the port
       .onComplete(_ => system.terminate()) // and shutdown when done
@@ -904,7 +906,7 @@ case class FFMpegDelegate(
       Behaviors.same
     case Request.Stop(sender) if proc.nonEmpty =>
       log.info("[transcode] received stop from {}", sender)
-      proc.map(_.destroy())
+      proc.foreach(_.destroy())
       proc = None
       release(file) match {
         case Success(_) =>
