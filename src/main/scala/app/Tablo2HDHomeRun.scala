@@ -48,7 +48,7 @@ object FsNotify {
   val log = LoggerFactory.getLogger(this.getClass)
 
   sealed trait Command
-  final case object Poll extends Command
+  case object Poll extends Command
 
   private final case class FsScanResponse(response: FsScan.Response) extends Command
   private final case class FsQueueResponse(response: FsQueue.Response) extends Command
@@ -238,7 +238,7 @@ object FsScan {
 
   sealed trait Command
   final case class Scan(root: Path, replyTo: ActorRef[Ack]) extends Command
-  final case object Stop extends Command
+  case object Stop extends Command
 
   sealed trait Response
   final case class Ack(paths: Seq[Path], from: ActorRef[Scan]) extends Response
@@ -249,7 +249,7 @@ object FsScan {
         case Scan(root,replyTo) =>
           context.log.info(s"[standby] scan $root (replyTo $replyTo)")
           val self = context.self
-          scan(root=root,ext=ext)(context.log).map {
+          scan(root=root,ext=ext)(using context.log).map {
             case result =>
               log.info(s"[standby] scanned $root with result $result - tell $replyTo")
               replyTo ! Ack(paths=result,from=self)
@@ -354,8 +354,8 @@ object Tablo2HDHomeRun extends App {
               case Failure(t) =>
                 deserializationError(s"could not parse InetAddress -> ${t.getMessage}")
             }
-            case _ =>
-              deserializationError(s"Expected String for InetAddress, but got $js")
+          case _ =>
+            deserializationError(s"Expected String for InetAddress, but got $js")
         }
         override def write(inetAddress : InetAddress) : JsValue = JsString(inetAddress.getHostAddress)
       }
@@ -368,8 +368,8 @@ object Tablo2HDHomeRun extends App {
               case Failure(t) =>
                 deserializationError(s"could not parse Uri -> ${t.getMessage}")
             }
-            case _ =>
-              deserializationError(s"Expected Uri path, but got $js")
+          case _ =>
+            deserializationError(s"Expected Uri path, but got $js")
         }
         override def write(uri : Uri) : JsValue = JsString(uri.toString)
       }
@@ -741,7 +741,7 @@ object Tablo2HDHomeRun extends App {
 
           import pekko.util._
 
-          def stream(playlist_url: Uri): Source[ByteString, _] = Source.lazySource { () =>
+          def stream(playlist_url: Uri): Source[ByteString, ?] = Source.lazySource { () =>
             val ffmpegCmd = Array(
               "ffmpeg"
             , "-i", playlist_url.toString
