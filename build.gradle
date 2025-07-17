@@ -22,20 +22,18 @@ repositories {
 
 ext {
     scala_maj = '3'
-    scala_min = '7'
-    scala_patch = '1'
-    scala_ver = "${scala_maj}.${scala_min}.${scala_patch}"
+    scala_ver = "${scala_maj}.7.1"
+
     pekko_core = '1.1.4'
     pekko_http = '1.2.0'
+    scala_test = '3.2.9'
 }
 
 dependencies {
     implementation group: 'org.scala-lang' , name: "scala${scala_maj}-library_${scala_maj}"  , version: scala_ver
     implementation group: 'org.scala-lang' , name: "scala${scala_maj}-compiler_${scala_maj}" , version: scala_ver
 
-    implementation group: 'org.jcodec', name: 'jcodec', version: '0.2.6'
-
-    implementation group: 'org.slf4j', name: 'slf4j-simple', version: '2.0.9'
+    implementation group: 'org.slf4j', name: 'slf4j-simple', version: '2.0.17'
 
     implementation group: 'org.apache.pekko', name: "pekko-actor-typed_${scala_maj}", version: pekko_core
     implementation group: 'org.apache.pekko', name: "pekko-stream_${scala_maj}", version: pekko_core
@@ -44,13 +42,11 @@ dependencies {
 
     implementation group: 'org.scala-lang.modules', name: "scala-xml_${scala_maj}", version: '2.3.0'
 
-    implementation group: 'org.scalaz', name: "scalaz-core_${scala_maj}", version: '7.3.8'
-
-    testImplementation group: 'org.scalatest', name: "scalatest_${scala_maj}", version: '3.2.9'
-    testImplementation group: 'org.scalactic', name: "scalactic_${scala_maj}", version: '3.2.9'
+    testImplementation group: 'org.scalatest', name: "scalatest_${scala_maj}", version: scala_test
+    testImplementation group: 'org.scalactic', name: "scalactic_${scala_maj}", version: scala_test
 
     testImplementation group: 'junit', name: 'junit', version: '4.13.2'
-    testImplementation group: 'org.scalatestplus', name: "junit-4-13_${scala_maj}", version: '3.2.9.0'
+    testImplementation group: 'org.scalatestplus', name: "junit-4-13_${scala_maj}", version: "${scala_test}.0"
 }
 
 version gitVersion()
@@ -100,9 +96,9 @@ shadowJar {
 nativeImage {
     dependsOn shadowJar
 
-    minHeap 100
-    maxHeap 3072
-    maxNew 3072
+    minHeap 128
+    maxHeap 128
+    maxNew 64
 
     parameters = [
       NativeImageTask.Option.STATIC
@@ -124,10 +120,13 @@ compileScala {
         '-feature'
       , '-no-indent'
       , '-explain'
+      , '-language:noAutoTupling'
+//      , '-language:strictEquality'
       , '-Werror'
       , '-Wnonunit-statement'
       , '-Wsafe-init'
       , '-Wunused:all'
       , '-Wvalue-discard'
+//      , '-Yexplicit-nulls'
     ]
 }
