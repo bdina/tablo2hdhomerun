@@ -7,6 +7,9 @@
       "type": "[Ljava.lang.Class;"
     },
     {
+      "type": "[Ljava.lang.Object;"
+    },
+    {
       "type": "[Ljava.lang.String;"
     },
     {
@@ -17,9 +20,6 @@
     },
     {
       "type": "[Lorg.apache.pekko.actor.LightArrayRevolverScheduler$TaskQueue;"
-    },
-    {
-      "type": "[Lorg.apache.pekko.io.dns.RecordType;"
     },
     {
       "type": "[Lorg.apache.pekko.routing.ConsistentRoutee;"
@@ -53,6 +53,59 @@
     {
       "type": "app.Tablo2HDHomeRun$Lineup$ChannelObject",
       "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo2HDHomeRun$Lineup$JsonProtocol$",
+      "fields": [
+        {
+          "name": "BigDecimalJsonFormat$lzy1"
+        },
+        {
+          "name": "BigIntJsonFormat$lzy1"
+        },
+        {
+          "name": "BooleanJsonFormat$lzy1"
+        },
+        {
+          "name": "ByteJsonFormat$lzy1"
+        },
+        {
+          "name": "CharJsonFormat$lzy1"
+        },
+        {
+          "name": "DoubleJsonFormat$lzy1"
+        },
+        {
+          "name": "FloatJsonFormat$lzy1"
+        },
+        {
+          "name": "IntJsonFormat$lzy1"
+        },
+        {
+          "name": "JsValueFormat$lzy1"
+        },
+        {
+          "name": "LongJsonFormat$lzy1"
+        },
+        {
+          "name": "RootJsArrayFormat$lzy1"
+        },
+        {
+          "name": "RootJsObjectFormat$lzy1"
+        },
+        {
+          "name": "ShortJsonFormat$lzy1"
+        },
+        {
+          "name": "StringJsonFormat$lzy1"
+        },
+        {
+          "name": "SymbolJsonFormat$lzy1"
+        },
+        {
+          "name": "UnitJsonFormat$lzy1"
+        }
+      ]
     },
     {
       "type": "app.Tablo2HDHomeRun$Lineup$Response$LineupStatus",
@@ -190,6 +243,58 @@
       ]
     },
     {
+      "type": "org.apache.pekko.actor.ActorSystemImpl",
+      "fields": [
+        {
+          "name": "_start$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.actor.Address",
+      "fields": [
+        {
+          "name": "hashCode$lzy1"
+        },
+        {
+          "name": "toString$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.actor.CoordinatedShutdown",
+      "fields": [
+        {
+          "name": "tasks$lzy1"
+        },
+        {
+          "name": "terminationWatcher$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.actor.CoordinatedShutdown$$anon$1",
+      "fields": [
+        {
+          "name": "Cancelled$lzy1"
+        },
+        {
+          "name": "Pending$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.actor.CoordinatedShutdown$tasks$",
+      "fields": [
+        {
+          "name": "StrictPhaseDefinition$lzy1"
+        },
+        {
+          "name": "TaskDefinition$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.actor.LightArrayRevolverScheduler",
       "methods": [
         {
@@ -212,6 +317,23 @@
     },
     {
       "type": "org.apache.pekko.actor.LocalActorRefProvider",
+      "fields": [
+        {
+          "name": "defaultMailbox$lzy1"
+        },
+        {
+          "name": "guardian$lzy1"
+        },
+        {
+          "name": "rootGuardian$lzy1"
+        },
+        {
+          "name": "systemGuardian$lzy1"
+        },
+        {
+          "name": "tempContainer$lzy1"
+        }
+      ],
       "methods": [
         {
           "name": "<init>",
@@ -266,6 +388,11 @@
     },
     {
       "type": "org.apache.pekko.actor.typed.internal.MiscMessageSerializer",
+      "fields": [
+        {
+          "name": "resolver$lzy1"
+        }
+      ],
       "methods": [
         {
           "name": "<init>",
@@ -277,6 +404,17 @@
     },
     {
       "type": "org.apache.pekko.actor.typed.internal.adapter.ActorRefAdapter"
+    },
+    {
+      "type": "org.apache.pekko.actor.typed.internal.adapter.ActorSystemAdapter",
+      "fields": [
+        {
+          "name": "getWhenTerminated$lzy1"
+        },
+        {
+          "name": "whenTerminated$lzy1"
+        }
+      ]
     },
     {
       "type": "org.apache.pekko.actor.typed.internal.adapter.ActorSystemAdapter$LoadTypedExtensions$",
@@ -348,6 +486,22 @@
       ]
     },
     {
+      "type": "org.apache.pekko.dispatch.Dispatcher$LazyExecutorServiceDelegate",
+      "fields": [
+        {
+          "name": "executor$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.dispatch.ForkJoinExecutorConfigurator$ForkJoinExecutorServiceFactory",
+      "fields": [
+        {
+          "name": "pekkoJdk9ForkJoinPoolHandleOpt$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.dispatch.Mailbox",
       "fields": [
         {
@@ -366,6 +520,14 @@
         },
         {
           "name": "_shutdownScheduleDoNotCallMeDirectly"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.dispatch.MessageDispatcher$",
+      "fields": [
+        {
+          "name": "actors$lzy1"
         }
       ]
     },
@@ -430,6 +592,14 @@
       ]
     },
     {
+      "type": "org.apache.pekko.event.EventStream",
+      "fields": [
+        {
+          "name": "org$apache$pekko$event$SubchannelClassification$$subscriptions$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.event.EventStreamUnsubscriber",
       "methods": [
         {
@@ -458,6 +628,11 @@
     },
     {
       "type": "org.apache.pekko.event.slf4j.Slf4jLogger",
+      "fields": [
+        {
+          "name": "log$lzy1"
+        }
+      ],
       "methods": [
         {
           "name": "<init>",
@@ -487,11 +662,186 @@
       ]
     },
     {
+      "type": "org.apache.pekko.http.impl.engine.client.OutgoingConnectionBlueprint$PrepareResponse$$anon$6",
+      "fields": [
+        {
+          "name": "substreamHandler$lzy1"
+        },
+        {
+          "name": "waitForMessageEnd$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.http.impl.engine.client.PoolMasterActor",
       "methods": [
         {
           "name": "<init>",
           "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.impl.engine.client.pool.NewHostConnectionPool$HostConnectionPoolStage$$anon$1",
+      "fields": [
+        {
+          "name": "Event$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.impl.engine.client.pool.NewHostConnectionPool$HostConnectionPoolStage$$anon$1$Slot",
+      "fields": [
+        {
+          "name": "keepAliveDurationFuzziness$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.impl.engine.parsing.HttpHeaderParser",
+      "fields": [
+        {
+          "name": "byteBuffer$lzy1"
+        },
+        {
+          "name": "charBuffer$lzy1"
+        },
+        {
+          "name": "decoder$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.impl.engine.rendering.HttpResponseRendererFactory",
+      "fields": [
+        {
+          "name": "CloseConnection$lzy1"
+        },
+        {
+          "name": "DontClose$lzy1"
+        },
+        {
+          "name": "HttpResponseRenderer$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.impl.engine.server.GracefulTerminatorStage$$anon$2",
+      "fields": [
+        {
+          "name": "failureCallback$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.impl.engine.server.HttpServerBluePrint$ControllerStage$$anon$10",
+      "fields": [
+        {
+          "name": "OneHundredContinueStage$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.impl.util.SettingsCompanionImpl$",
+      "fields": [
+        {
+          "name": "configAdditions$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.scaladsl.server.Directives$",
+      "fields": [
+        {
+          "name": "HexIntNumber$lzy1"
+        },
+        {
+          "name": "HexLongNumber$lzy1"
+        },
+        {
+          "name": "IntNumber$lzy1"
+        },
+        {
+          "name": "LongNumber$lzy1"
+        },
+        {
+          "name": "PathEnd$lzy1"
+        },
+        {
+          "name": "Remaining$lzy1"
+        },
+        {
+          "name": "RemainingPath$lzy1"
+        },
+        {
+          "name": "Segment$lzy1"
+        },
+        {
+          "name": "Slash$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.scaladsl.server.PathMatchers$",
+      "fields": [
+        {
+          "name": "HexIntNumber$lzy1"
+        },
+        {
+          "name": "HexLongNumber$lzy1"
+        },
+        {
+          "name": "IntNumber$lzy1"
+        },
+        {
+          "name": "LongNumber$lzy1"
+        },
+        {
+          "name": "PathEnd$lzy1"
+        },
+        {
+          "name": "Remaining$lzy1"
+        },
+        {
+          "name": "RemainingPath$lzy1"
+        },
+        {
+          "name": "Segment$lzy1"
+        },
+        {
+          "name": "Slash$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.http.scaladsl.server.directives.PathDirectives$",
+      "fields": [
+        {
+          "name": "HexIntNumber$lzy1"
+        },
+        {
+          "name": "HexLongNumber$lzy1"
+        },
+        {
+          "name": "IntNumber$lzy1"
+        },
+        {
+          "name": "LongNumber$lzy1"
+        },
+        {
+          "name": "PathEnd$lzy1"
+        },
+        {
+          "name": "Remaining$lzy1"
+        },
+        {
+          "name": "RemainingPath$lzy1"
+        },
+        {
+          "name": "Segment$lzy1"
+        },
+        {
+          "name": "Slash$lzy1"
         }
       ]
     },
@@ -506,6 +856,14 @@
     },
     {
       "type": "org.apache.pekko.io.InetAddressDnsResolver",
+      "fields": [
+        {
+          "name": "defaultCachePolicy$lzy1"
+        },
+        {
+          "name": "defaultNegativeCachePolicy$lzy1"
+        }
+      ],
       "methods": [
         {
           "name": "<init>",
@@ -617,6 +975,17 @@
       ]
     },
     {
+      "type": "org.apache.pekko.routing.ConsistentHashingRoutingLogic",
+      "fields": [
+        {
+          "name": "log$lzy1"
+        },
+        {
+          "name": "selfAddress$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.routing.RoundRobinPool",
       "methods": [
         {
@@ -724,6 +1093,14 @@
       ]
     },
     {
+      "type": "org.apache.pekko.stream.Attributes$SourceLocation",
+      "fields": [
+        {
+          "name": "locationName$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.stream.SinkRef"
     },
     {
@@ -738,10 +1115,66 @@
       ]
     },
     {
+      "type": "org.apache.pekko.stream.UniformFanOutShape",
+      "fields": [
+        {
+          "name": "_outArray$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.stream.impl.PhasedFusingActorMaterializer",
+      "fields": [
+        {
+          "name": "executionContext$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.stream.impl.fusing.Collect$$anon$5",
+      "fields": [
+        {
+          "name": "decider$lzy2"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.stream.impl.fusing.GraphInterpreterShell",
+      "fields": [
+        {
+          "name": "interpreter$lzy1"
+        },
+        {
+          "name": "log$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.stream.impl.fusing.MapAsyncUnordered$$anon$29",
+      "fields": [
+        {
+          "name": "decider$lzy9"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.stream.impl.fusing.MapConcat$$anon$1",
+      "fields": [
+        {
+          "name": "decider$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.stream.impl.streamref.StreamRefsProtocol"
     },
     {
       "type": "org.apache.pekko.stream.serialization.StreamRefSerializer",
+      "fields": [
+        {
+          "name": "serialization$lzy1"
+        }
+      ],
       "methods": [
         {
           "name": "<init>",
@@ -761,6 +1194,22 @@
       "type": "org.apache.pekko.util.ByteString$ByteStrings"
     },
     {
+      "type": "org.apache.pekko.util.Collections$PartialImmutableValuesIterable",
+      "fields": [
+        {
+          "name": "size$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "org.parboiled2.support.AlternativeUnpacks",
+      "fields": [
+        {
+          "name": "DontUnpack$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.slf4j.simple.SimpleServiceProvider"
     },
     {
@@ -771,6 +1220,14 @@
     },
     {
       "type": "scala.Long"
+    },
+    {
+      "type": "spray.json.DefaultJsonProtocol$",
+      "fields": [
+        {
+          "name": "0bitmap$1"
+        }
+      ]
     },
     {
       "type": "sun.misc.Unsafe",
