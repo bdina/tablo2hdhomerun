@@ -830,12 +830,27 @@ object Tablo2HDHomeRun extends App {
           handleRejections(loggedRejectionHandler) { routes }
         }
 
-    println(s"Server now online. Please navigate to http://${PROXY_IP.getHostAddress}:${PROXY_PORT}\nPress RETURN to stop...")
-    StdIn.readLine() : Unit // let it run until user presses return
+    val daemon = if (args.length == 1) args(0) == "-d" else false
+    val break = if (daemon) "CTRL-C" else "RETURN"
+    val url = s"http://${PROXY_IP.getHostAddress}:${PROXY_PORT}"
+    val message = s"Server now online. Please navigate to ${url}\nPress ${break} to stop..."
+
+    println(message)
+    if (!daemon) {
+      StdIn.readLine() : Unit // let it run until user presses return
+    } else {
+      Monitor.ref.synchronized { Monitor.ref.wait() }
+    }
+
     bindingFuture
       .flatMap(_.unbind()) // trigger unbinding from the port
       .onComplete(_ => system.terminate()) // and shutdown when done
   }
+}
+
+case class Monitor()
+object Monitor {
+  val ref = Monitor()
 }
 
 object FFMpegDelegate {
