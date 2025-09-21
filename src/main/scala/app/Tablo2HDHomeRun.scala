@@ -59,7 +59,7 @@ object FsNotify {
   object FsQueue {
     implicit val system: ActorSystem[Nothing] = AppContext.system
 
-    val bufferSize = 1000
+    val bufferSize = 100 // Reduced buffer size to limit memory usage
 
     import java.io.File
     case class QueueProxy(
@@ -273,8 +273,10 @@ object FsScan {
     import java.nio.file.attribute.{UserDefinedFileAttributeView => Xattr}
     import scala.jdk.CollectionConverters._
     import scala.jdk.StreamConverters._
+
+    // Use streaming to avoid loading entire directory tree into memory
     Files.find(root, Integer.MAX_VALUE, (_, a) => a.isRegularFile)
-      .toScala(Vector)
+      .toScala(LazyList) // Use LazyList instead of Vector for memory efficiency
       .filter { case path =>
         val kind = ext.find(path.getFileName.toFile.getName.endsWith(_))
         val scanned = Try {
@@ -287,6 +289,7 @@ object FsScan {
         log.info(s"[scan] found $kind (state: $scanned) - hit $hit")
         hit
       }
+      .toSeq // Convert to Seq only at the end
   }
 }
 
@@ -519,7 +522,9 @@ object Tablo2HDHomeRun extends App {
       implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
-        var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow,Seq.empty)
+        // Use WeakReference for cache to allow GC when memory pressure is high
+        var cache: (scala.concurrent.duration.Deadline, java.lang.ref.WeakReference[Seq[JsValue]]) =
+          (0.seconds.fromNow, new java.lang.ref.WeakReference(Seq.empty))
         var scanInProgress: Boolean = false
 
         val HttpCtx = Http()
@@ -564,7 +569,7 @@ object Tablo2HDHomeRun extends App {
           case Command.Store(channels) =>
             log.info(s"[lineup-actor] store channels: ${channels.size}")
 
-            cache = (1.day.fromNow, channels)
+            cache = (1.day.fromNow, new java.lang.ref.WeakReference(channels))
             scanInProgress = false
 
             Behaviors.same
@@ -603,7 +608,8 @@ object Tablo2HDHomeRun extends App {
             Behaviors.same
 
           case Request.Fetch(sender) =>
-            val (_,channels) = cache
+            val (_,channelsRef) = cache
+            val channels = channelsRef.get.getOrElse(Seq.empty)
 
             log.info(s"[lineup-actor] channels found: ${channels.size}")
             sender ! LineupActor.Response.Fetch(channels, context.self)
@@ -772,31 +778,42 @@ object Tablo2HDHomeRun extends App {
       }
     }
 
-    object GuideActor {
-      sealed trait Request
-      object Request {
-        case class FetchGuide(replyTo: ActorRef[Response.FetchGuide]) extends Request
-        case class FetchChannelGuide(channelId: Int, replyTo: ActorRef[Response.FetchChannelGuide]) extends Request
-      }
+  object GuideActor {
+    sealed trait Request
+    object Request {
+      case class FetchGuide(replyTo: ActorRef[Response.FetchGuide]) extends Request
+      case class FetchChannelGuide(channelId: Int, replyTo: ActorRef[Response.FetchChannelGuide]) extends Request
+    }
 
-      sealed trait Response
-      object Response {
-        case class FetchGuide(guide: Seq[ChannelGuide], replyTo: ActorRef[Request.FetchGuide]) extends Response
-        case class FetchChannelGuide(channelGuide: ChannelGuide, replyTo: ActorRef[Request.FetchChannelGuide]) extends Response
-      }
+    sealed trait Response
+    object Response {
+      case class FetchGuide(guide: Seq[ChannelGuide], replyTo: ActorRef[Request.FetchGuide]) extends Response
+      case class FetchChannelGuide(channelGuide: ChannelGuide, replyTo: ActorRef[Request.FetchChannelGuide]) extends Response
+    }
 
-      sealed trait Command extends Request
-      object Command {
-        case class StoreGuide(guide: Seq[ChannelGuide]) extends Command
-        case object Scan extends Command
-      }
+    sealed trait Command extends Request
+    object Command {
+      case class StoreGuide(guide: Seq[ChannelGuide]) extends Command
+      case object Scan extends Command
+    }
 
-      val log = LoggerFactory.getLogger(this.getClass)
+    val log = LoggerFactory.getLogger(this.getClass)
 
-      implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
+    implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
+
+    // Singleton actor instance to avoid creating new actors per request
+    private var _instance: Option[ActorRef[Request]] = None
+
+    def instance: ActorRef[Request] = _instance.getOrElse {
+      val actor = AppContext.system.systemActorOf(apply(), "guide-actor-singleton")
+      _instance = Some(actor)
+      actor
+    }
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
-        var cache: (scala.concurrent.duration.Deadline, Seq[ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
+        // Use WeakReference for cache to allow GC when memory pressure is high
+        var cache: (scala.concurrent.duration.Deadline, java.lang.ref.WeakReference[Seq[ChannelGuide]]) =
+          (0.seconds.fromNow, new java.lang.ref.WeakReference(Seq.empty))
         var scanInProgress: Boolean = false
 
         val HttpCtx = Http()
@@ -804,10 +821,9 @@ object Tablo2HDHomeRun extends App {
         def generateFallbackPrograms(channelId: Int, callSign: String): Seq[Program] = {
           // Generate sample program data when Tablo API doesn't provide it
           val now = java.time.Instant.now()
-          val programs = scala.collection.mutable.ArrayBuffer[Program]()
 
-          // Generate 24 hours of sample programming
-          for (hour <- 0 until 24) {
+          // Use LazyList for memory efficiency - only materialize when needed
+          LazyList.range(0, 24).map { hour =>
             val startTime = now.plusSeconds(hour * 3600)
             val endTime = startTime.plusSeconds(3600) // 1 hour programs
 
@@ -827,7 +843,7 @@ object Tablo2HDHomeRun extends App {
               case _ => Some("General")
             }
 
-            programs += Program(
+            Program(
               id = s"fallback_${channelId}_${hour}",
               title = programTitle,
               description = Some(description),
@@ -844,9 +860,7 @@ object Tablo2HDHomeRun extends App {
               is_sports = false,
               is_news = hour match { case 6 | 7 | 8 | 9 | 22 | 23 => true; case _ => false }
             )
-          }
-
-          programs.toSeq
+          }.toSeq
         }
 
         def fetchProgramsForChannel(channelId: Int): Future[Seq[Program]] = {
@@ -967,7 +981,7 @@ object Tablo2HDHomeRun extends App {
         Behaviors.receiveMessage {
           case Command.StoreGuide(guide) =>
             log.info(s"[guide-actor] store guide: ${guide.size} channels")
-            cache = (1.hour.fromNow, guide)
+            cache = (1.hour.fromNow, new java.lang.ref.WeakReference(guide))
             scanInProgress = false
             Behaviors.same
 
@@ -992,13 +1006,15 @@ object Tablo2HDHomeRun extends App {
             Behaviors.same
 
           case Request.FetchGuide(replyTo) =>
-            val (_, guide) = cache
+            val (_, guideRef) = cache
+            val guide = guideRef.get.getOrElse(Seq.empty)
             log.info(s"[guide-actor] guide fetch from cache: ${guide.size} channels")
             replyTo ! Response.FetchGuide(guide, context.self)
             Behaviors.same
 
           case Request.FetchChannelGuide(channelId, replyTo) =>
-            val (_, guide) = cache
+            val (_, guideRef) = cache
+            val guide = guideRef.get.getOrElse(Seq.empty)
             val channelGuide = guide.find(_.channel_id == channelId).getOrElse {
               ChannelGuide(channelId, "Unknown", 0, 0, Seq.empty)
             }
@@ -1072,16 +1088,25 @@ object Tablo2HDHomeRun extends App {
           import pekko.actor.typed.scaladsl.AskPattern._
           implicit val timeout: pekko.util.Timeout = 10.seconds
 
-          val guideActor = AppContext.system.systemActorOf(GuideActor(), "guide-actor")
-          val guideF: Future[GuideActor.Response.FetchGuide] = guideActor.ask(replyTo => GuideActor.Request.FetchGuide(replyTo))
+          val guideF: Future[GuideActor.Response.FetchGuide] = GuideActor.instance.ask(replyTo => GuideActor.Request.FetchGuide(replyTo))
 
           onComplete(guideF) {
             case Success(GuideActor.Response.FetchGuide(guide, _)) =>
               log.info(s"[guide] guide.xml (GET) - ${guide.size} channels")
-              val xmlContent = XMLTVFormatter.formatGuide(guide)
-              val xmlString = xmlContent.toString
-              log.info(s"[guide] generated XML size: ${xmlString.length} characters")
-              complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, xmlString))
+
+              // Stream XML generation to avoid loading entire response in memory
+              val xmlStream = Source.fromIterator(() =>
+                Iterator("<tv>") ++
+                guide.iterator.flatMap(channelGuide =>
+                  Iterator(XMLTVFormatter.formatChannel(channelGuide).toString) ++
+                  channelGuide.programs.iterator.map(program =>
+                    XMLTVFormatter.formatProgram(program, channelGuide).toString
+                  )
+                ) ++
+                Iterator("</tv>")
+              ).map(ByteString(_))
+
+              complete(HttpEntity.Chunked.fromData(ContentTypes.`text/xml(UTF-8)`, xmlStream))
             case Failure(ex) =>
               log.info(s"[guide] Failed: ${ex.getMessage}")
               // Return empty XMLTV format on failure
