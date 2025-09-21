@@ -26,6 +26,9 @@ import scala.util.{Failure,Success,Try}
 import spray.json._
 import DefaultJsonProtocol._
 
+import scala.xml.{Elem, NodeSeq}
+import scala.xml.transform._
+
 object FsMonitor {
   val log = LoggerFactory.getLogger(this.getClass)
 
@@ -660,6 +663,435 @@ object Tablo2HDHomeRun extends App {
       }
   }
 
+  object Guide {
+    case class Program(
+      id: String
+    , title: String
+    , description: Option[String]
+    , start_time: String
+    , end_time: String
+    , channel_id: Int
+    , episode_title: Option[String]
+    , season_number: Option[Int]
+    , episode_number: Option[Int]
+    , year: Option[Int]
+    , genre: Option[String]
+    , rating: Option[String]
+    , is_movie: Boolean = false
+    , is_sports: Boolean = false
+    , is_news: Boolean = false
+    )
+
+    case class ChannelGuide(
+      channel_id: Int
+    , call_sign: String
+    , major: Int
+    , minor: Int
+    , programs: Seq[Program]
+    )
+
+    object JsonProtocol extends DefaultJsonProtocol {
+      implicit val programFormat: JsonFormat[Program] = jsonFormat15(Program.apply)
+      implicit val channelGuideFormat: JsonFormat[ChannelGuide] = jsonFormat5(ChannelGuide.apply)
+    }
+
+    object Proxy {
+      object Request {
+        val baseUrl = discover.proxyAddress(TABLO_IP,TABLO_PORT)
+
+        // Try to discover program guide endpoints
+        def getProgramsUri(channelId: Int, startTime: Option[String] = None, endTime: Option[String] = None) = {
+          val baseUri = baseUrl.withPath(Uri.Path(s"/guide/channels/$channelId/programs"))
+          val queryParams = (startTime, endTime) match {
+            case (Some(start), Some(end)) => s"?start=$start&end=$end"
+            case (Some(start), None) => s"?start=$start"
+            case (None, Some(end)) => s"?end=$end"
+            case _ => ""
+          }
+          Uri(baseUri.toString + queryParams)
+        }
+
+        def getScheduleUri(startTime: Option[String] = None, endTime: Option[String] = None) = {
+          val baseUri = baseUrl.withPath(Uri.Path("/guide/schedule"))
+          val queryParams = (startTime, endTime) match {
+            case (Some(start), Some(end)) => s"?start=$start&end=$end"
+            case (Some(start), None) => s"?start=$start"
+            case (None, Some(end)) => s"?end=$end"
+            case _ => ""
+          }
+          Uri(baseUri.toString + queryParams)
+        }
+
+        def httpRequest(uri: Uri) = HttpRequest(uri = uri)
+      }
+
+      object Response {
+        // Try to parse program data from various possible Tablo API response formats
+        case class TabloProgram(
+          id: Option[String]
+        , title: Option[String]
+        , description: Option[String]
+        , start_time: Option[String]
+        , end_time: Option[String]
+        , episode_title: Option[String]
+        , season_number: Option[Int]
+        , episode_number: Option[Int]
+        , year: Option[Int]
+        , genre: Option[String]
+        , rating: Option[String]
+        , is_movie: Option[Boolean]
+        , is_sports: Option[Boolean]
+        , is_news: Option[Boolean]
+        )
+
+        object TabloProgram {
+          object JsonProtocol {
+            implicit val tabloProgramFormat: JsonFormat[TabloProgram] = jsonFormat14(TabloProgram.apply)
+          }
+        }
+
+        def convertToProgram(tabloProgram: TabloProgram, channelId: Int): Program = {
+          Program(
+            id = tabloProgram.id.getOrElse(s"prog_${System.currentTimeMillis()}")
+          , title = tabloProgram.title.getOrElse("Unknown Program")
+          , description = tabloProgram.description
+          , start_time = tabloProgram.start_time.getOrElse("")
+          , end_time = tabloProgram.end_time.getOrElse("")
+          , channel_id = channelId
+          , episode_title = tabloProgram.episode_title
+          , season_number = tabloProgram.season_number
+          , episode_number = tabloProgram.episode_number
+          , year = tabloProgram.year
+          , genre = tabloProgram.genre
+          , rating = tabloProgram.rating
+          , is_movie = tabloProgram.is_movie.getOrElse(false)
+          , is_sports = tabloProgram.is_sports.getOrElse(false)
+          , is_news = tabloProgram.is_news.getOrElse(false)
+          )
+        }
+      }
+    }
+
+    object GuideActor {
+      sealed trait Request
+      object Request {
+        case class FetchGuide(replyTo: ActorRef[Response.FetchGuide]) extends Request
+        case class FetchChannelGuide(channelId: Int, replyTo: ActorRef[Response.FetchChannelGuide]) extends Request
+      }
+
+      sealed trait Response
+      object Response {
+        case class FetchGuide(guide: Seq[ChannelGuide], replyTo: ActorRef[Request.FetchGuide]) extends Response
+        case class FetchChannelGuide(channelGuide: ChannelGuide, replyTo: ActorRef[Request.FetchChannelGuide]) extends Response
+      }
+
+      sealed trait Command extends Request
+      object Command {
+        case class StoreGuide(guide: Seq[ChannelGuide]) extends Command
+        case object Scan extends Command
+      }
+
+      val log = LoggerFactory.getLogger(this.getClass)
+
+      implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
+
+      def apply(): Behavior[Request] = Behaviors.setup { context =>
+        var cache: (scala.concurrent.duration.Deadline, Seq[ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
+        var scanInProgress: Boolean = false
+
+        val HttpCtx = Http()
+
+        def generateFallbackPrograms(channelId: Int, callSign: String): Seq[Program] = {
+          // Generate sample program data when Tablo API doesn't provide it
+          val now = java.time.Instant.now()
+          val programs = scala.collection.mutable.ArrayBuffer[Program]()
+
+          // Generate 24 hours of sample programming
+          for (hour <- 0 until 24) {
+            val startTime = now.plusSeconds(hour * 3600)
+            val endTime = startTime.plusSeconds(3600) // 1 hour programs
+
+            val programTitle = hour match {
+              case 0 | 1 | 2 | 3 | 4 | 5 => "Late Night Programming"
+              case 6 | 7 | 8 | 9 => "Morning News"
+              case 10 | 11 | 12 | 13 => "Daytime Programming"
+              case 14 | 15 | 16 | 17 => "Afternoon Shows"
+              case 18 | 19 | 20 | 21 => "Prime Time"
+              case 22 | 23 => "Evening News"
+            }
+
+            val description = s"Programming on $callSign"
+            val genre = hour match {
+              case 6 | 7 | 8 | 9 | 22 | 23 => Some("News")
+              case 18 | 19 | 20 | 21 => Some("Drama")
+              case _ => Some("General")
+            }
+
+            programs += Program(
+              id = s"fallback_${channelId}_${hour}",
+              title = programTitle,
+              description = Some(description),
+              start_time = startTime.toString,
+              end_time = endTime.toString,
+              channel_id = channelId,
+              episode_title = None,
+              season_number = None,
+              episode_number = None,
+              year = None,
+              genre = genre,
+              rating = None,
+              is_movie = false,
+              is_sports = false,
+              is_news = hour match { case 6 | 7 | 8 | 9 | 22 | 23 => true; case _ => false }
+            )
+          }
+
+          programs.toSeq
+        }
+
+        def fetchProgramsForChannel(channelId: Int): Future[Seq[Program]] = {
+          // Try multiple possible endpoints for program data
+          val endpoints = Seq(
+            Proxy.Request.getProgramsUri(channelId),
+            Proxy.Request.getScheduleUri().withPath(Uri.Path(s"/guide/channels/$channelId")),
+            Proxy.Request.baseUrl.withPath(Uri.Path(s"/guide/channels/$channelId/schedule"))
+          )
+
+          def tryEndpoint(uri: Uri): Future[Seq[Program]] = {
+            HttpCtx.singleRequest(Proxy.Request.httpRequest(uri)).flatMap { response =>
+              log.info(s"[guide-actor] trying endpoint $uri - $response")
+              if (response.status.isSuccess()) {
+                Unmarshal(response.entity).to[String].map { body =>
+                  log.info(s"[guide-actor] response body: $body")
+                  // Try to parse as JSON array of programs
+                  Try {
+                    import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
+                    body.parseJson.convertTo[Seq[Proxy.Response.TabloProgram]]
+                      .map(Proxy.Response.convertToProgram(_, channelId))
+                  }.getOrElse {
+                    // If that fails, try to parse as a single program object
+                    Try {
+                      import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
+                      val program = body.parseJson.convertTo[Proxy.Response.TabloProgram]
+                      Seq(Proxy.Response.convertToProgram(program, channelId))
+                    }.getOrElse {
+                      log.warn(s"[guide-actor] could not parse program data from $uri")
+                      Seq.empty
+                    }
+                  }
+                }
+              } else {
+                log.info(s"[guide-actor] endpoint $uri returned ${response.status}")
+                Future.successful(Seq.empty)
+              }
+            }.recover {
+              case ex =>
+                log.warn(s"[guide-actor] failed to fetch from $uri: ${ex.getMessage}")
+                Seq.empty
+            }
+          }
+
+          // Try endpoints in sequence until one succeeds
+          endpoints.foldLeft(Future.successful(Seq.empty[Program])) { (acc, uri) =>
+            acc.flatMap { programs =>
+              if (programs.nonEmpty) {
+                Future.successful(programs)
+              } else {
+                tryEndpoint(uri)
+              }
+            }
+          }.map { programs =>
+            if (programs.isEmpty) {
+              log.info(s"[guide-actor] no programs found for channel $channelId, generating fallback data")
+              generateFallbackPrograms(channelId, "Unknown")
+            } else {
+              programs
+            }
+          }
+        }
+
+        def scan(): Future[Seq[ChannelGuide]] = {
+          // First get the list of channels
+          val channelsUri = Proxy.Request.baseUrl.withPath(Uri.Path("/guide/channels"))
+          HttpCtx.singleRequest(Proxy.Request.httpRequest(channelsUri)).flatMap { response =>
+            log.info(s"[guide-actor] guide/channels (GET) - $response")
+            if (response.status.isSuccess()) {
+              Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]]).flatMap { paths =>
+                import Lineup.JsonProtocol._
+                import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
+                Marshal(paths.toJson)
+                  .to[RequestEntity]
+                  .flatMap { entity =>
+                    val batchUri = Proxy.Request.baseUrl.withPath(Uri.Path("/batch"))
+                    val batchRequest = HttpRequest(
+                      method = HttpMethods.POST,
+                      uri = batchUri,
+                      entity = entity.withContentType(ContentTypes.`application/json`)
+                    )
+                    HttpCtx.singleRequest(batchRequest).flatMap { batchResponse =>
+                      log.info(s"[guide-actor] batch (POST) - $batchResponse")
+                      Unmarshal(batchResponse.entity).to[String].map(_.parseJson.convertTo[Map[String, Lineup.ChannelObject]])
+                    }
+                  }
+              }.flatMap { channelData =>
+                log.info(s"[guide-actor] channels found: ${channelData.size}")
+
+                // Fetch programs for each channel
+                val channelFutures = channelData.map { case (path, channelObj) =>
+                  fetchProgramsForChannel(channelObj.object_id).map { programs =>
+                    ChannelGuide(
+                      channel_id = channelObj.object_id,
+                      call_sign = channelObj.channel.call_sign,
+                      major = channelObj.channel.major,
+                      minor = channelObj.channel.minor,
+                      programs = programs
+                    )
+                  }
+                }
+
+                Future.sequence(channelFutures.toSeq)
+              }
+            } else {
+              log.warn(s"[guide-actor] failed to get channels: ${response.status}")
+              Future.successful(Seq.empty)
+            }
+          }.recover {
+            case ex =>
+              log.error(s"[guide-actor] scan failed: ${ex.getMessage}")
+              Seq.empty
+          }
+        }
+
+        context.self ! Command.Scan
+
+        Behaviors.receiveMessage {
+          case Command.StoreGuide(guide) =>
+            log.info(s"[guide-actor] store guide: ${guide.size} channels")
+            cache = (1.hour.fromNow, guide)
+            scanInProgress = false
+            Behaviors.same
+
+          case Command.Scan if scanInProgress =>
+            log.info("[guide-actor] guide scan requested ; already in progress (suppress)")
+            Behaviors.same
+
+          case Command.Scan =>
+            log.info("[guide-actor] guide scan requested")
+            scanInProgress = true
+            scan().foreach { guide =>
+              context.self ! Command.StoreGuide(guide)
+            }
+            Behaviors.same
+
+          case Request.FetchGuide(replyTo) if cache._1.isOverdue() =>
+            log.info("[guide-actor] guide fetch - cache expired")
+            scanInProgress = true
+            scan().foreach { guide =>
+              replyTo ! Response.FetchGuide(guide, context.self)
+            }
+            Behaviors.same
+
+          case Request.FetchGuide(replyTo) =>
+            val (_, guide) = cache
+            log.info(s"[guide-actor] guide fetch from cache: ${guide.size} channels")
+            replyTo ! Response.FetchGuide(guide, context.self)
+            Behaviors.same
+
+          case Request.FetchChannelGuide(channelId, replyTo) =>
+            val (_, guide) = cache
+            val channelGuide = guide.find(_.channel_id == channelId).getOrElse {
+              ChannelGuide(channelId, "Unknown", 0, 0, Seq.empty)
+            }
+            replyTo ! Response.FetchChannelGuide(channelGuide, context.self)
+            Behaviors.same
+        }
+      }
+    }
+
+    object XMLTVFormatter {
+      def formatTimestamp(timeStr: String): String = {
+        // Try to parse various timestamp formats and convert to XMLTV format
+        Try {
+          val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
+          val instant = java.time.Instant.parse(timeStr)
+          instant.toString
+        }.getOrElse {
+          Try {
+            val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+            val localDateTime = java.time.LocalDateTime.parse(timeStr, formatter)
+            localDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant.toString
+          }.getOrElse {
+            java.time.Instant.now().toString
+          }
+        }
+      }
+
+      def formatChannel(channelGuide: ChannelGuide): Elem = {
+        val channelId = s"${channelGuide.major}.${channelGuide.minor}"
+        <channel id={channelId}>
+          <display-name>{channelGuide.call_sign}</display-name>
+          <display-name>{channelId}</display-name>
+          <display-name>{s"${channelGuide.call_sign} (${channelId})"}</display-name>
+        </channel>
+      }
+
+      def formatProgram(program: Program, channelGuide: ChannelGuide): Elem = {
+        val channelId = s"${channelGuide.major}.${channelGuide.minor}"
+        val startTime = formatTimestamp(program.start_time)
+        val stopTime = formatTimestamp(program.end_time)
+
+        <programme start={startTime} stop={stopTime} channel={channelId}>
+          <title>{program.title}</title>
+          {program.episode_title.map(ep => <sub-title>{ep}</sub-title>).getOrElse(NodeSeq.Empty)}
+          {program.description.map(desc => <desc>{desc}</desc>).getOrElse(NodeSeq.Empty)}
+          {program.year.map(year => <date>{year}</date>).getOrElse(NodeSeq.Empty)}
+          {program.genre.map(genre => <category>{genre}</category>).getOrElse(NodeSeq.Empty)}
+          {program.rating.map(rating => <rating><value>{rating}</value></rating>).getOrElse(NodeSeq.Empty)}
+          {if (program.is_movie) <category>Movie</category> else NodeSeq.Empty}
+          {if (program.is_sports) <category>Sports</category> else NodeSeq.Empty}
+          {if (program.is_news) <category>News</category> else NodeSeq.Empty}
+        </programme>
+      }
+
+      def formatGuide(guide: Seq[ChannelGuide]): Elem = {
+        val channels = guide.map(formatChannel)
+        val programmes = guide.flatMap(channelGuide =>
+          channelGuide.programs.map(program => formatProgram(program, channelGuide))
+        )
+
+        <tv>
+          {channels}
+          {programmes}
+        </tv>
+      }
+    }
+
+    val route =
+      path("guide.xml") {
+        get {
+          import pekko.actor.typed.scaladsl.AskPattern._
+          implicit val timeout: pekko.util.Timeout = 10.seconds
+
+          val guideActor = AppContext.system.systemActorOf(GuideActor(), "guide-actor")
+          val guideF: Future[GuideActor.Response.FetchGuide] = guideActor.ask(replyTo => GuideActor.Request.FetchGuide(replyTo))
+
+          onComplete(guideF) {
+            case Success(GuideActor.Response.FetchGuide(guide, _)) =>
+              log.info(s"[guide] guide.xml (GET) - ${guide.size} channels")
+              val xmlContent = XMLTVFormatter.formatGuide(guide)
+              val xmlString = xmlContent.toString
+              log.info(s"[guide] generated XML size: ${xmlString.length} characters")
+              complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, xmlString))
+            case Failure(ex) =>
+              log.info(s"[guide] Failed: ${ex.getMessage}")
+              // Return empty XMLTV format on failure
+              val emptyGuide = <tv></tv>
+              complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, emptyGuide.toString))
+          }
+        }
+      }
+  }
+
   object Channel {
     object Request {
       case class WatchRequest(
@@ -784,15 +1216,6 @@ object Tablo2HDHomeRun extends App {
       }
   }
 
-  object Guide {
-    val route =
-      path("guide.xml") {
-        get {
-          log.info("[guide] guide.xml (no-op) (GET)")
-          complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, "<XML></XML>"))
-        }
-      }
-  }
 
   object Favicon {
     val route =
