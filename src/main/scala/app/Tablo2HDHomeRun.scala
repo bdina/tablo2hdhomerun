@@ -1216,7 +1216,6 @@ object Tablo2HDHomeRun extends App {
       }
   }
 
-
   object Favicon {
     val route =
       path("favicon.ico") {
