@@ -1280,7 +1280,7 @@ object FFMpegDelegate {
   sealed trait Request
   object Request {
     case class Status(replyTo: ActorRef[Response]) extends Request
-    case class Start(replyTo: ActorRef[Response]) extends Request 
+    case class Start(replyTo: ActorRef[Response]) extends Request
     case class Stop(replyTo: ActorRef[Response]) extends Request
   }
 
