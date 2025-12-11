@@ -20,9 +20,9 @@ repositories {
 
 ext {
     scala_maj = '3'
-    scala_ver = "${scala_maj}.7.3"
+    scala_ver = "${scala_maj}.7.4"
 
-    pekko_core = '1.2.0'
+    pekko_core = '1.3.0'
     pekko_http = '1.2.0'
     scala_test = '3.2.9'
 }
