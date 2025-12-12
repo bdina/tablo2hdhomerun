@@ -1,3 +1,5 @@
+import compiler.NativeImageTask
+
 plugins {
   id 'compiler.native-image'
   id 'compiler.scala-cli'
@@ -38,7 +40,7 @@ dependencies {
     implementation group: 'org.apache.pekko', name: "pekko-http_${scala_maj}", version: pekko_http
     implementation group: 'org.apache.pekko', name: "pekko-http-spray-json_${scala_maj}", version: pekko_http
 
-    implementation group: 'org.scala-lang.modules', name: "scala-xml_${scala_maj}", version: '2.3.0'
+    implementation group: 'org.scala-lang.modules', name: "scala-xml_${scala_maj}", version: '2.4.0'
 
     testImplementation group: 'org.scalatest', name: "scalatest_${scala_maj}", version: scala_test
     testImplementation group: 'org.scalactic', name: "scalactic_${scala_maj}", version: scala_test
