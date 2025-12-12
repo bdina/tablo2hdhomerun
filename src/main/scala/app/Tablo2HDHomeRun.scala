@@ -27,7 +27,6 @@ import spray.json._
 import DefaultJsonProtocol._
 
 import scala.xml.{Elem, NodeSeq}
-import scala.xml.transform._
 
 object FsMonitor {
   val log = LoggerFactory.getLogger(this.getClass)
@@ -609,7 +608,7 @@ object Tablo2HDHomeRun extends App {
 
           case Request.Fetch(sender) =>
             val (_,channelsRef) = cache
-            val channels = channelsRef.get.getOrElse(Seq.empty)
+            val channels = Option(channelsRef.get).getOrElse(Seq.empty)
 
             log.info(s"[lineup-actor] channels found: ${channels.size}")
             sender ! LineupActor.Response.Fetch(channels, context.self)
@@ -951,7 +950,7 @@ object Tablo2HDHomeRun extends App {
                 log.info(s"[guide-actor] channels found: ${channelData.size}")
 
                 // Fetch programs for each channel
-                val channelFutures = channelData.map { case (path, channelObj) =>
+                val channelFutures = channelData.map { case (_, channelObj) =>
                   fetchProgramsForChannel(channelObj.object_id).map { programs =>
                     ChannelGuide(
                       channel_id = channelObj.object_id,
@@ -1007,14 +1006,14 @@ object Tablo2HDHomeRun extends App {
 
           case Request.FetchGuide(replyTo) =>
             val (_, guideRef) = cache
-            val guide = guideRef.get.getOrElse(Seq.empty)
+            val guide = Option(guideRef.get).getOrElse(Seq.empty)
             log.info(s"[guide-actor] guide fetch from cache: ${guide.size} channels")
             replyTo ! Response.FetchGuide(guide, context.self)
             Behaviors.same
 
           case Request.FetchChannelGuide(channelId, replyTo) =>
             val (_, guideRef) = cache
-            val guide = guideRef.get.getOrElse(Seq.empty)
+            val guide = Option(guideRef.get).getOrElse(Seq.empty)
             val channelGuide = guide.find(_.channel_id == channelId).getOrElse {
               ChannelGuide(channelId, "Unknown", 0, 0, Seq.empty)
             }
@@ -1028,7 +1027,6 @@ object Tablo2HDHomeRun extends App {
       def formatTimestamp(timeStr: String): String = {
         // Try to parse various timestamp formats and convert to XMLTV format
         Try {
-          val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss'Z'")
           val instant = java.time.Instant.parse(timeStr)
           instant.toString
         }.getOrElse {
@@ -1088,29 +1086,33 @@ object Tablo2HDHomeRun extends App {
           import pekko.actor.typed.scaladsl.AskPattern._
           implicit val timeout: pekko.util.Timeout = 10.seconds
 
-          val guideF: Future[GuideActor.Response.FetchGuide] = GuideActor.instance.ask(replyTo => GuideActor.Request.FetchGuide(replyTo))
+          val guideF: Future[GuideActor.Response.FetchGuide] =
+            GuideActor.instance.ask(replyTo => GuideActor.Request.FetchGuide(replyTo))
 
           onComplete(guideF) {
             case Success(GuideActor.Response.FetchGuide(guide, _)) =>
               log.info(s"[guide] guide.xml (GET) - ${guide.size} channels")
 
-              // Stream XML generation to avoid loading entire response in memory
-              val xmlStream = Source.fromIterator(() =>
-                Iterator("<tv>") ++
-                guide.iterator.flatMap(channelGuide =>
-                  Iterator(XMLTVFormatter.formatChannel(channelGuide).toString) ++
-                  channelGuide.programs.iterator.map(program =>
-                    XMLTVFormatter.formatProgram(program, channelGuide).toString
-                  )
-                ) ++
-                Iterator("</tv>")
-              ).map(ByteString(_))
+              // stream XML generation to avoid loading entire response in memory
+              import org.apache.pekko.util.ByteString
+              val xmlStream =
+                Source
+                  .fromIterator { () =>
+                    Iterator("<tv>") ++
+                    guide.iterator.flatMap(channelGuide =>
+                      Iterator(XMLTVFormatter.formatChannel(channelGuide).toString) ++
+                      channelGuide.programs.iterator.map(program =>
+                        XMLTVFormatter.formatProgram(program, channelGuide).toString
+                      )
+                    ) ++
+                    Iterator("</tv>")
+                  }
+                  .map(ByteString(_))
 
               complete(HttpEntity.Chunked.fromData(ContentTypes.`text/xml(UTF-8)`, xmlStream))
             case Failure(ex) =>
               log.info(s"[guide] Failed: ${ex.getMessage}")
-              // Return empty XMLTV format on failure
-              val emptyGuide = <tv></tv>
+              val emptyGuide = <tv></tv> // return empty XMLTV format on failure
               complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, emptyGuide.toString))
           }
         }
