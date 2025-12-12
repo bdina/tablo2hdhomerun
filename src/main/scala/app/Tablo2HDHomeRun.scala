@@ -521,9 +521,7 @@ object Tablo2HDHomeRun extends App {
       implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
-        // Use WeakReference for cache to allow GC when memory pressure is high
-        var cache: (scala.concurrent.duration.Deadline, java.lang.ref.WeakReference[Seq[JsValue]]) =
-          (0.seconds.fromNow, new java.lang.ref.WeakReference(Seq.empty))
+        var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
         var scanInProgress: Boolean = false
 
         val HttpCtx = Http()
@@ -568,7 +566,7 @@ object Tablo2HDHomeRun extends App {
           case Command.Store(channels) =>
             log.info(s"[lineup-actor] store channels: ${channels.size}")
 
-            cache = (1.day.fromNow, new java.lang.ref.WeakReference(channels))
+            cache = (1.day.fromNow, channels)
             scanInProgress = false
 
             Behaviors.same
@@ -607,8 +605,7 @@ object Tablo2HDHomeRun extends App {
             Behaviors.same
 
           case Request.Fetch(sender) =>
-            val (_,channelsRef) = cache
-            val channels = Option(channelsRef.get).getOrElse(Seq.empty)
+            val (_,channels) = cache
 
             log.info(s"[lineup-actor] channels found: ${channels.size}")
             sender ! LineupActor.Response.Fetch(channels, context.self)
@@ -810,9 +807,7 @@ object Tablo2HDHomeRun extends App {
     }
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
-        // Use WeakReference for cache to allow GC when memory pressure is high
-        var cache: (scala.concurrent.duration.Deadline, java.lang.ref.WeakReference[Seq[ChannelGuide]]) =
-          (0.seconds.fromNow, new java.lang.ref.WeakReference(Seq.empty))
+        var cache: (scala.concurrent.duration.Deadline, Seq[ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
         var scanInProgress: Boolean = false
 
         val HttpCtx = Http()
@@ -980,7 +975,7 @@ object Tablo2HDHomeRun extends App {
         Behaviors.receiveMessage {
           case Command.StoreGuide(guide) =>
             log.info(s"[guide-actor] store guide: ${guide.size} channels")
-            cache = (1.hour.fromNow, new java.lang.ref.WeakReference(guide))
+            cache = (1.hour.fromNow, guide)
             scanInProgress = false
             Behaviors.same
 
@@ -1005,15 +1000,13 @@ object Tablo2HDHomeRun extends App {
             Behaviors.same
 
           case Request.FetchGuide(replyTo) =>
-            val (_, guideRef) = cache
-            val guide = Option(guideRef.get).getOrElse(Seq.empty)
+            val (_, guide) = cache
             log.info(s"[guide-actor] guide fetch from cache: ${guide.size} channels")
             replyTo ! Response.FetchGuide(guide, context.self)
             Behaviors.same
 
           case Request.FetchChannelGuide(channelId, replyTo) =>
-            val (_, guideRef) = cache
-            val guide = Option(guideRef.get).getOrElse(Seq.empty)
+            val (_, guide) = cache
             val channelGuide = guide.find(_.channel_id == channelId).getOrElse {
               ChannelGuide(channelId, "Unknown", 0, 0, Seq.empty)
             }
