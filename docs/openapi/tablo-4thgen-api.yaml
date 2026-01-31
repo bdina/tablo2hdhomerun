@@ -1,0 +1,732 @@
+openapi: 3.0.3
+info:
+  title: Tablo 4th Gen API
+  version: 1.0.0
+  description: |
+    Complete API specification for Tablo 4th Generation devices.
+    This includes both the Lighthouse cloud service for authentication/discovery
+    and the local device API for streaming.
+
+    ## Authentication Flow
+    1. Login to Lighthouse cloud to get access token
+    2. Get account info to retrieve profiles and devices
+    3. Select profile/device to obtain Lighthouse token
+    4. Use Lighthouse token + HMAC signing for device requests
+
+servers:
+  - url: https://lighthousetv.ewscloud.com/api/v2
+    description: Lighthouse Cloud Service
+  - url: http://{deviceHost}:{port}
+    description: Local Tablo Device
+    variables:
+      deviceHost:
+        default: "192.168.1.100"
+        description: IP address of the Tablo device
+      port:
+        default: "8885"
+        description: Device port (typically 8885)
+
+tags:
+  - name: Cloud Authentication
+    description: Lighthouse cloud authentication endpoints
+  - name: Cloud Account
+    description: Account and device management
+  - name: Cloud Guide
+    description: Guide data from cloud service
+  - name: Device
+    description: Local device endpoints
+
+paths:
+  /login/:
+    post:
+      tags:
+        - Cloud Authentication
+      summary: Login to Lighthouse TV
+      operationId: login
+      description: |
+        Authenticate with Tablo account credentials.
+        Returns access token for subsequent API calls.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Successful login
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "401":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /account/:
+    get:
+      tags:
+        - Cloud Account
+      summary: Get account information
+      operationId: getAccount
+      description: |
+        Retrieve account details including profiles and registered devices.
+        Requires Bearer authentication from login.
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Account information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountInfo"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /account/select/:
+    post:
+      tags:
+        - Cloud Account
+      summary: Select profile and device
+      operationId: selectDevice
+      description: |
+        Select a profile and device combination to obtain a Lighthouse token.
+        This token is required for device API requests and guide data retrieval.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectRequest"
+      responses:
+        "200":
+          description: Lighthouse token for device session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelectResponse"
+        "401":
+          description: Unauthorized
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /account/{lighthouseToken}/guide/channels/:
+    get:
+      tags:
+        - Cloud Guide
+      summary: Get channel lineup
+      operationId: getGuideChannels
+      description: |
+        Retrieve the complete channel lineup including OTA and OTT channels.
+        Requires Lighthouse token in path and headers.
+      security:
+        - BearerAuth: []
+        - LighthouseAuth: []
+      parameters:
+        - name: lighthouseToken
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Lighthouse token from /account/select/
+      responses:
+        "200":
+          description: Channel lineup
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChannelLineup"
+        "401":
+          description: Unauthorized
+
+  /account/guide/channels/{channelId}/airings/{date}/:
+    get:
+      tags:
+        - Cloud Guide
+      summary: Get channel airings for a specific date
+      operationId: getChannelAirings
+      description: |
+        Retrieve program guide data for a specific channel and date.
+        Used to build XMLTV guide data.
+      security:
+        - BearerAuth: []
+        - LighthouseAuth: []
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Channel identifier (e.g., S122912_503_01)
+        - name: date
+          in: path
+          required: true
+          schema:
+            type: string
+            format: date
+          description: Date in YYYY-MM-DD format
+      responses:
+        "200":
+          description: Program airings for the channel
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/GuideAiring"
+        "401":
+          description: Unauthorized
+
+  /server/info:
+    get:
+      tags:
+        - Device
+      summary: Get device server information
+      operationId: getServerInfo
+      description: |
+        Retrieve information about the Tablo device including model and tuner count.
+        Requires device HMAC authentication.
+      servers:
+        - url: http://{deviceHost}:{port}
+          variables:
+            deviceHost:
+              default: "192.168.1.100"
+            port:
+              default: "8885"
+      security:
+        - DeviceAuth: []
+      parameters:
+        - name: lh
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Lighthouse indicator parameter
+      responses:
+        "200":
+          description: Server information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerInfo"
+        "401":
+          $ref: "#/components/responses/DeviceUnauthorized"
+
+  /guide/channels/{channelId}/watch:
+    post:
+      tags:
+        - Device
+      summary: Start watching a channel
+      operationId: watchChannel
+      description: |
+        Request a live stream for a channel. Returns an HLS playlist URL
+        that can be used with ffmpeg or a video player.
+      servers:
+        - url: http://{deviceHost}:{port}
+          variables:
+            deviceHost:
+              default: "192.168.1.100"
+            port:
+              default: "8885"
+      security:
+        - DeviceAuth: []
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Channel identifier
+        - name: lh
+          in: query
+          required: false
+          schema:
+            type: string
+          description: Lighthouse indicator parameter
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              $ref: "#/components/schemas/WatchRequest"
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchRequest"
+      responses:
+        "200":
+          description: Watch response with playlist URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchResponse"
+        "401":
+          $ref: "#/components/responses/DeviceUnauthorized"
+        "503":
+          description: No tuners available
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Bearer token from login response.
+        Format: "Bearer {access_token}"
+
+    LighthouseAuth:
+      type: apiKey
+      in: header
+      name: Lighthouse
+      description: |
+        Lighthouse token from /account/select/ response.
+        Used for guide data and device authentication context.
+
+    DeviceAuth:
+      type: http
+      scheme: custom
+      description: |
+        Device authentication using HMAC-MD5 signature.
+
+        Authorization header format: "tablo:{deviceKey}:{hmac}"
+
+        HMAC calculation:
+        1. Build signature string: "{METHOD}\n{PATH}\n{MD5_OF_BODY_OR_EMPTY}\n{DATE_RFC1123}"
+        2. Calculate HMAC-MD5 using HashKey
+        3. Format: "tablo:{DeviceKey}:{hmac_hex}"
+
+        Required headers:
+        - Authorization: tablo:{deviceKey}:{hmac}
+        - Date: RFC 1123 formatted date
+        - User-Agent: Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)
+
+  schemas:
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+          example: user@example.com
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+          description: JWT access token
+        token_type:
+          type: string
+          example: Bearer
+        is_verified:
+          type: boolean
+          description: Whether the account email is verified
+        code:
+          type: integer
+          description: Error code (only present on failure)
+        message:
+          type: string
+          description: Error message (only present on failure)
+
+    AccountInfo:
+      type: object
+      properties:
+        identifier:
+          type: string
+          description: Account unique identifier
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountProfile"
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountDevice"
+        code:
+          type: integer
+        message:
+          type: string
+
+    AccountProfile:
+      type: object
+      properties:
+        identifier:
+          type: string
+          description: Profile unique identifier
+        name:
+          type: string
+          description: Profile display name
+        date_joined:
+          type: string
+          format: date-time
+        preferences:
+          type: object
+          additionalProperties: true
+
+    AccountDevice:
+      type: object
+      properties:
+        serverId:
+          type: string
+          description: Device server ID (used for selection)
+        name:
+          type: string
+          description: Device friendly name
+        type:
+          type: string
+          example: tablo_gen4
+        product:
+          type: string
+        version:
+          type: string
+        buildNumber:
+          type: integer
+        registrationStatus:
+          type: string
+        lastSeen:
+          type: string
+          format: date-time
+        reachability:
+          type: string
+          enum: [local, remote, unavailable]
+        url:
+          type: string
+          format: uri
+          description: Local network URL of the device
+
+    SelectRequest:
+      type: object
+      required:
+        - pid
+        - sid
+      properties:
+        pid:
+          type: string
+          description: Profile identifier
+        sid:
+          type: string
+          description: Device server ID
+
+    SelectResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Lighthouse token for device requests
+        code:
+          type: integer
+        message:
+          type: string
+
+    ChannelLineup:
+      type: object
+      required:
+        - identifier
+        - name
+        - kind
+      properties:
+        identifier:
+          type: string
+          description: Channel unique identifier
+          example: S122912_503_01
+        name:
+          type: string
+          description: Channel name
+        kind:
+          type: string
+          enum: [ota, ott]
+          description: Channel type (over-the-air or over-the-top)
+        logos:
+          type: array
+          items:
+            $ref: "#/components/schemas/ChannelLogo"
+        ota:
+          $ref: "#/components/schemas/OtaChannelInfo"
+        ott:
+          $ref: "#/components/schemas/OttChannelInfo"
+
+    ChannelLogo:
+      type: object
+      properties:
+        kind:
+          type: string
+          enum: [lightLarge, darkLarge, lightSmall, darkSmall]
+        url:
+          type: string
+          format: uri
+
+    OtaChannelInfo:
+      type: object
+      properties:
+        major:
+          type: integer
+          description: Major channel number
+        minor:
+          type: integer
+          description: Minor channel number
+        callSign:
+          type: string
+        network:
+          type: string
+        streamUrl:
+          type: string
+        provider:
+          type: string
+        canRecord:
+          type: boolean
+
+    OttChannelInfo:
+      type: object
+      properties:
+        major:
+          type: integer
+        minor:
+          type: integer
+        callSign:
+          type: string
+        network:
+          type: string
+        streamUrl:
+          type: string
+          format: uri
+          description: Direct stream URL for OTT channels
+        provider:
+          type: string
+        canRecord:
+          type: boolean
+
+    GuideAiring:
+      type: object
+      required:
+        - identifier
+        - title
+        - channel
+        - datetime
+        - kind
+        - duration
+      properties:
+        identifier:
+          type: string
+        title:
+          type: string
+        channel:
+          type: object
+          properties:
+            identifier:
+              type: string
+        datetime:
+          type: string
+          format: date-time
+        onnow:
+          type: string
+        description:
+          type: string
+          nullable: true
+        kind:
+          type: string
+          enum: [episode, movieAiring, sportEvent]
+        qualifiers:
+          type: integer
+        genres:
+          type: array
+          items:
+            type: string
+        images:
+          type: array
+          items:
+            $ref: "#/components/schemas/AiringImage"
+        duration:
+          type: integer
+          description: Duration in seconds
+        show:
+          $ref: "#/components/schemas/ShowInfo"
+        episode:
+          $ref: "#/components/schemas/EpisodeInfo"
+        movieAiring:
+          $ref: "#/components/schemas/MovieAiringInfo"
+        sportEvent:
+          $ref: "#/components/schemas/SportEventInfo"
+
+    ShowInfo:
+      type: object
+      properties:
+        identifier:
+          type: string
+        title:
+          type: string
+        sortTitle:
+          type: string
+        sectionTitle:
+          type: string
+
+    EpisodeInfo:
+      type: object
+      properties:
+        season:
+          type: object
+          properties:
+            kind:
+              type: string
+              enum: [none, number, string]
+            number:
+              type: integer
+            string:
+              type: string
+        episodeNumber:
+          type: integer
+          nullable: true
+        originalAirDate:
+          type: string
+          format: date
+          nullable: true
+        rating:
+          type: string
+          nullable: true
+
+    MovieAiringInfo:
+      type: object
+      properties:
+        releaseYear:
+          type: integer
+        filmRating:
+          type: string
+          nullable: true
+        qualityRating:
+          type: number
+          nullable: true
+
+    SportEventInfo:
+      type: object
+      properties:
+        season:
+          type: string
+          nullable: true
+
+    AiringImage:
+      type: object
+      properties:
+        kind:
+          type: string
+        url:
+          type: string
+          format: uri
+
+    ServerInfo:
+      type: object
+      properties:
+        model:
+          type: object
+          properties:
+            name:
+              type: string
+              example: Tablo 4th Gen
+            tuners:
+              type: integer
+              minimum: 1
+              example: 4
+
+    WatchRequest:
+      type: object
+      properties:
+        device_id:
+          type: string
+          format: uuid
+          description: Client device UUID
+        bandwidth:
+          type: string
+          nullable: true
+        platform:
+          type: string
+          example: ios
+        extra:
+          type: object
+          properties:
+            limitedAdTracking:
+              type: integer
+            deviceOSVersion:
+              type: string
+              example: "16.6"
+            lang:
+              type: string
+              example: en_US
+            height:
+              type: integer
+              example: 1080
+            deviceId:
+              type: string
+              format: uuid
+            width:
+              type: integer
+              example: 1920
+            deviceModel:
+              type: string
+              example: iPhone10,1
+            deviceMake:
+              type: string
+              example: Apple
+            deviceOS:
+              type: string
+              example: iOS
+
+    WatchResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Stream session token
+        expires:
+          type: string
+          format: date-time
+        keepalive:
+          type: integer
+          description: Keepalive interval in seconds
+        playlist_url:
+          type: string
+          format: uri
+          description: HLS playlist URL for the stream
+        video_details:
+          type: object
+          properties:
+            container_format:
+              type: string
+              example: mpeg-ts
+            flags:
+              type: array
+              items:
+                type: string
+
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+
+  responses:
+    DeviceUnauthorized:
+      description: Device authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"

@@ -1,0 +1,366 @@
+openapi: 3.0.3
+info:
+  title: HDHomeRun Emulation API
+  version: 1.0.0
+  description: |
+    HDHomeRun-compatible API for Plex DVR integration.
+
+    This API emulates an HDHomeRun device, allowing Plex to discover
+    and use the service as a live TV tuner source.
+
+    ## Plex Discovery
+    Plex discovers HDHomeRun devices by:
+    1. Broadcasting UDP discovery or checking known IPs
+    2. Fetching /discover.json to get device capabilities
+    3. Fetching /lineup.json to get available channels
+    4. Fetching /lineup_status.json to check scan status
+
+    ## Streaming
+    When a user tunes to a channel, Plex requests the stream URL
+    from the lineup and connects to /channel/{channelId} to receive
+    an MPEG-TS stream.
+
+servers:
+  - url: http://{host}:{port}
+    description: HDHomeRun Emulation Server
+    variables:
+      host:
+        default: "192.168.1.100"
+        description: Server IP address
+      port:
+        default: "8181"
+        description: Server port
+
+tags:
+  - name: Discovery
+    description: Device discovery endpoints
+  - name: Lineup
+    description: Channel lineup endpoints
+  - name: Streaming
+    description: Live streaming endpoints
+  - name: Guide
+    description: Program guide endpoints
+
+paths:
+  /discover.json:
+    get:
+      tags:
+        - Discovery
+      summary: Device discovery information
+      operationId: discover
+      description: |
+        Returns device information used by Plex to identify and configure
+        the tuner. This endpoint is polled periodically by Plex.
+      responses:
+        "200":
+          description: Device discovery information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DiscoverResponse"
+              example:
+                FriendlyName: "Tablo 4th Gen Proxy"
+                Manufacturer: "tablo2plex"
+                ModelNumber: "HDHR3-US"
+                FirmwareName: "hdhomerun3_atsc"
+                FirmwareVersion: "20240101"
+                DeviceID: "12345678"
+                DeviceAuth: "tabloauth123"
+                BaseURL: "http://192.168.1.100:8181"
+                LocalIP: "http://192.168.1.100:8181"
+                LineupURL: "http://192.168.1.100:8181/lineup.json"
+                TunerCount: 4
+
+  /lineup.json:
+    get:
+      tags:
+        - Lineup
+      summary: Get channel lineup
+      operationId: getLineup
+      description: |
+        Returns the list of available channels. Each channel includes
+        a stream URL that Plex uses for tuning.
+      responses:
+        "200":
+          description: Channel lineup
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/LineupChannel"
+              example:
+                - GuideNumber: "5.1"
+                  GuideName: "NBC"
+                  ImageURL: "https://example.com/logo.png"
+                  Affiliate: "WNBC"
+                  URL: "http://192.168.1.100:8181/channel/S122912_503_01"
+                - GuideNumber: "7.1"
+                  GuideName: "ABC"
+                  ImageURL: "https://example.com/abc-logo.png"
+                  Affiliate: "WABC"
+                  URL: "http://192.168.1.100:8181/channel/S122912_701_01"
+
+  /lineup_status.json:
+    get:
+      tags:
+        - Lineup
+      summary: Get lineup scan status
+      operationId: getLineupStatus
+      description: |
+        Returns the current channel scan status. Plex uses this to
+        determine if a channel scan is in progress or possible.
+      responses:
+        "200":
+          description: Lineup scan status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LineupStatus"
+              example:
+                ScanInProgress: 0
+                ScanPossible: 1
+                Source: "Antenna"
+                SourceList:
+                  - "Antenna"
+
+  /channel/{channelId}:
+    get:
+      tags:
+        - Streaming
+      summary: Stream a channel
+      operationId: streamChannel
+      description: |
+        Initiates a live stream for the specified channel.
+        Returns an MPEG-TS video stream.
+
+        The service:
+        1. Requests a stream from the upstream tuner device
+        2. Receives the HLS playlist URL
+        3. Uses ffmpeg to transcode/remux to MPEG-TS
+        4. Streams the result to the client
+
+        Tuner limits apply - if all tuners are in use, returns 500.
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+          description: Channel identifier from lineup
+          example: S122912_503_01
+      responses:
+        "200":
+          description: MPEG-TS video stream
+          headers:
+            Content-Type:
+              schema:
+                type: string
+                example: video/mp2t
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+        "404":
+          description: Channel not found
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Channel not found
+        "500":
+          description: Failed to start stream (no tuners available or other error)
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Failed to start stream
+
+  /guide.xml:
+    get:
+      tags:
+        - Guide
+      summary: Get XMLTV guide data
+      operationId: getGuide
+      description: |
+        Returns XMLTV-formatted program guide data.
+        Only available if guide generation is enabled.
+
+        The guide includes:
+        - Channel definitions with logos
+        - Program listings with titles, descriptions, episode info
+        - Rating information
+        - Air dates and durations
+      responses:
+        "200":
+          description: XMLTV guide data
+          content:
+            application/xml:
+              schema:
+                type: string
+                format: xml
+              example: |
+                <?xml version="1.0" encoding="UTF-8"?>
+                <tv generator-info-name="HDHomeRun Proxy">
+                  <channel id="511">
+                    <display-name lang="en">NBC</display-name>
+                    <icon src="https://example.com/logo.png"/>
+                  </channel>
+                  <programme start="20250131180000 +0000" stop="20250131190000 +0000" channel="511">
+                    <title lang="en">Evening News</title>
+                    <desc lang="en">Today's top stories.</desc>
+                    <date>20250131</date>
+                  </programme>
+                </tv>
+        "404":
+          description: Guide not found or not enabled
+          content:
+            text/plain:
+              schema:
+                type: string
+                example: Guide not found
+
+  /favicon.ico:
+    get:
+      tags:
+        - Discovery
+      summary: Favicon (no-op)
+      operationId: getFavicon
+      description: Returns empty response for favicon requests
+      responses:
+        "200":
+          description: Empty response
+
+components:
+  schemas:
+    DiscoverResponse:
+      type: object
+      required:
+        - FriendlyName
+        - DeviceID
+        - BaseURL
+        - LineupURL
+        - TunerCount
+      properties:
+        FriendlyName:
+          type: string
+          description: Display name for the device
+          example: Tablo 4th Gen Proxy
+        Manufacturer:
+          type: string
+          description: Device manufacturer
+          example: tablo2plex
+        ModelNumber:
+          type: string
+          description: HDHomeRun model number to emulate
+          example: HDHR3-US
+        FirmwareName:
+          type: string
+          description: Firmware identifier
+          example: hdhomerun3_atsc
+        FirmwareVersion:
+          type: string
+          description: Firmware version string
+          example: "20240101"
+        DeviceID:
+          type: string
+          description: Unique device identifier (8 hex digits)
+          pattern: "^[0-9A-Fa-f]{8}$"
+          example: "12345678"
+        DeviceAuth:
+          type: string
+          description: Device authentication string
+          example: tabloauth123
+        BaseURL:
+          type: string
+          format: uri
+          description: Base URL of the device
+          example: http://192.168.1.100:8181
+        LocalIP:
+          type: string
+          format: uri
+          description: Local IP URL (same as BaseURL)
+          example: http://192.168.1.100:8181
+        LineupURL:
+          type: string
+          format: uri
+          description: URL to fetch channel lineup
+          example: http://192.168.1.100:8181/lineup.json
+        TunerCount:
+          type: integer
+          minimum: 1
+          description: Number of available tuners
+          example: 4
+
+    LineupChannel:
+      type: object
+      required:
+        - GuideNumber
+        - GuideName
+        - URL
+      properties:
+        GuideNumber:
+          type: string
+          description: Channel number for guide display
+          example: "5.1"
+        GuideName:
+          type: string
+          description: Channel name/network
+          example: NBC
+        ImageURL:
+          type: string
+          format: uri
+          description: Channel logo URL
+          example: https://example.com/logo.png
+        Affiliate:
+          type: string
+          description: Station call sign
+          example: WNBC
+        VideoCodec:
+          type: string
+          description: Video codec (optional)
+          example: H264
+        AudioCodec:
+          type: string
+          description: Audio codec (optional)
+          example: AAC
+        HD:
+          type: integer
+          enum: [0, 1]
+          description: Whether channel is HD (1) or SD (0)
+        URL:
+          type: string
+          format: uri
+          description: Stream URL for this channel
+          example: http://192.168.1.100:8181/channel/S122912_503_01
+
+    LineupStatus:
+      type: object
+      required:
+        - ScanInProgress
+        - ScanPossible
+        - Source
+        - SourceList
+      properties:
+        ScanInProgress:
+          type: integer
+          enum: [0, 1]
+          description: Whether a channel scan is in progress
+          example: 0
+        ScanPossible:
+          type: integer
+          enum: [0, 1]
+          description: Whether a channel scan can be initiated
+          example: 1
+        Source:
+          type: string
+          description: Current signal source
+          example: Antenna
+        SourceList:
+          type: array
+          items:
+            type: string
+          description: Available signal sources
+          example:
+            - Antenna

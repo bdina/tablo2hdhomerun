@@ -1,0 +1,164 @@
+openapi: 3.0.3
+info:
+  title: Tablo Lighthouse TV Cloud API
+  version: 1.0.0
+  description: Optional cloud service for device discovery and account/device selection.
+
+servers:
+  - url: https://lighthousetv.ewscloud.com/api/v2
+
+paths:
+  /login/:
+    post:
+      summary: Login to Lighthouse TV
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login response
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LoginResponse"
+        "4xx":
+          description: Login failed
+
+  /account/:
+    get:
+      summary: Get account information
+      operationId: getAccount
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Account information including profiles and devices
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AccountInfo"
+        "401":
+          description: Unauthorized
+
+  /account/select/:
+    post:
+      summary: Select profile and device, obtain Lighthouse token
+      operationId: selectDevice
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SelectRequest"
+      responses:
+        "200":
+          description: Lighthouse token for device session
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SelectResponse"
+        "401":
+          description: Unauthorized
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: "token_type and access_token from login, e.g. Bearer <access_token>"
+
+  schemas:
+    LoginRequest:
+      type: object
+      required:
+        - email
+        - password
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          format: password
+
+    LoginResponse:
+      type: object
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+        is_verified:
+          type: boolean
+        code:
+          type: integer
+        message:
+          type: string
+
+    AccountInfo:
+      type: object
+      properties:
+        identifier:
+          type: string
+        profiles:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountProfile"
+        devices:
+          type: array
+          items:
+            $ref: "#/components/schemas/AccountDevice"
+        code:
+          type: integer
+        message:
+          type: string
+
+    AccountProfile:
+      type: object
+      properties:
+        identifier:
+          type: string
+        name:
+          type: string
+
+    AccountDevice:
+      type: object
+      properties:
+        serverId:
+          type: string
+        name:
+          type: string
+        url:
+          type: string
+          format: uri
+
+    SelectRequest:
+      type: object
+      required:
+        - pid
+        - sid
+      properties:
+        pid:
+          type: string
+          description: Profile identifier
+        sid:
+          type: string
+          description: Device server ID
+
+    SelectResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          description: Lighthouse token for device requests
+        code:
+          type: integer
+        message:
+          type: string

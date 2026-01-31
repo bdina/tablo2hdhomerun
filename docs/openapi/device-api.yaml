@@ -1,0 +1,171 @@
+openapi: 3.0.3
+info:
+  title: Tablo Local Device API
+  version: 1.0.0
+  description: |
+    API for communicating with Tablo 4th Gen devices on local network.
+    No cloud authentication required. Uses device HMAC signing only.
+
+servers:
+  - url: http://{deviceHost}:{port}
+    variables:
+      deviceHost:
+        default: "192.168.1.100"
+      port:
+        default: "8885"
+
+paths:
+  /server/info:
+    get:
+      summary: Get server information
+      operationId: getServerInfo
+      security:
+        - DeviceAuth: []
+      parameters:
+        - name: lh
+          in: query
+          required: false
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Server information
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServerInfo"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /guide/channels/{channelId}/watch:
+    post:
+      summary: Start watching a channel
+      operationId: watchChannel
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: lh
+          in: query
+          required: false
+          schema:
+            type: string
+      security:
+        - DeviceAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/WatchRequest"
+      responses:
+        "200":
+          description: Watch response with playlist URL
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/WatchResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    DeviceAuth:
+      type: http
+      scheme: custom
+      description: |
+        Device authentication using HMAC-MD5 signature.
+        Format "tablo:{deviceKey}:{hmac}".
+        HMAC input: method + newline + path + newline + md5(body)|"" + newline + Date (RFC 1123).
+        Sent in Authorization header.
+
+  schemas:
+    ServerInfo:
+      type: object
+      required:
+        - model
+      properties:
+        model:
+          type: object
+          required:
+            - name
+            - tuners
+          properties:
+            name:
+              type: string
+            tuners:
+              type: integer
+              minimum: 1
+
+    WatchRequest:
+      type: object
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        bandwidth:
+          type: string
+          nullable: true
+        platform:
+          type: string
+          example: "ios"
+        extra:
+          type: object
+          properties:
+            limitedAdTracking:
+              type: integer
+            deviceOSVersion:
+              type: string
+            lang:
+              type: string
+            height:
+              type: integer
+            deviceId:
+              type: string
+            width:
+              type: integer
+            deviceModel:
+              type: string
+            deviceMake:
+              type: string
+            deviceOS:
+              type: string
+
+    WatchResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        expires:
+          type: string
+        keepalive:
+          type: integer
+        playlist_url:
+          type: string
+        video_details:
+          type: object
+          properties:
+            container_format:
+              type: string
+            flags:
+              type: array
+              items:
+                type: string
+
+    Error:
+      type: object
+      properties:
+        code:
+          type: integer
+        message:
+          type: string
+
+  responses:
+    Unauthorized:
+      description: Authentication failed
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
