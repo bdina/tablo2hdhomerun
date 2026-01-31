@@ -311,14 +311,19 @@ object Dependencies {
   }
 }
 
-object Tablo2HDHomeRun extends App {
+object Tablo2HDHomeRun {
   val log = LoggerFactory.getLogger(this.getClass)
 
-  private final case class FsMonitorResponse(response: FsMonitor.Response)
+  private var _args: Array[String] = Array.empty
+  def args: Array[String] = _args
 
   val media = sys.env.get("MEDIA_ROOT")
 
-  Dependencies.verify()
+  def main(args: Array[String]): Unit = {
+    _args = args
+    Dependencies.verify()
+    val _ = AppContext.system // trigger actor system initialization
+  }
 
   def apply(): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
     media.foreach { case root =>
