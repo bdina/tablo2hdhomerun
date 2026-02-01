@@ -116,6 +116,143 @@
       "allDeclaredFields": true
     },
     {
+      "type": "app.Tablo4thGen$AuthContext",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$LoginRequest",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$LoginResponse",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$AccountProfile",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$AccountDevice",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$AccountInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$SelectRequest",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$SelectResponse",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$OtaChannelInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$OttChannelInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$ChannelLineup",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$SeasonInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$EpisodeInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$MovieAiringInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$SportEventInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$AiringChannel",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$GuideAiring",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$ServerModel",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$ServerInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$Watch4thGenRequest",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$Watch4thGenResponse",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Tablo4thGen$JsonProtocol$",
+      "fields": [
+        {
+          "name": "BigDecimalJsonFormat$lzy1"
+        },
+        {
+          "name": "BigIntJsonFormat$lzy1"
+        },
+        {
+          "name": "BooleanJsonFormat$lzy1"
+        },
+        {
+          "name": "ByteJsonFormat$lzy1"
+        },
+        {
+          "name": "CharJsonFormat$lzy1"
+        },
+        {
+          "name": "DoubleJsonFormat$lzy1"
+        },
+        {
+          "name": "FloatJsonFormat$lzy1"
+        },
+        {
+          "name": "IntJsonFormat$lzy1"
+        },
+        {
+          "name": "JsValueFormat$lzy1"
+        },
+        {
+          "name": "LongJsonFormat$lzy1"
+        },
+        {
+          "name": "RootJsArrayFormat$lzy1"
+        },
+        {
+          "name": "RootJsObjectFormat$lzy1"
+        },
+        {
+          "name": "ShortJsonFormat$lzy1"
+        },
+        {
+          "name": "StringJsonFormat$lzy1"
+        },
+        {
+          "name": "SymbolJsonFormat$lzy1"
+        },
+        {
+          "name": "UnitJsonFormat$lzy1"
+        }
+      ]
+    },
+    {
       "type": "com.sun.crypto.provider.AESCipher$General",
       "methods": [
         {
@@ -180,6 +317,24 @@
     },
     {
       "type": "com.sun.crypto.provider.TlsMasterSecretGenerator",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "com.sun.crypto.provider.HmacMD5",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": []
+        }
+      ]
+    },
+    {
+      "type": "sun.security.provider.MD5",
       "methods": [
         {
           "name": "<init>",
