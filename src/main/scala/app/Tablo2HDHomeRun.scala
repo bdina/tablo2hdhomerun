@@ -28,6 +28,12 @@ import DefaultJsonProtocol._
 
 import scala.xml.{Elem, NodeSeq}
 
+@main def tablo2hdhomerunApp(args: String*): Unit = {
+  val daemon = args.contains("-d")
+  Dependencies.verify()
+  Tablo2HDHomeRun.start(daemon)
+}
+
 object FsMonitor {
   val log = LoggerFactory.getLogger(this.getClass)
 
@@ -293,7 +299,9 @@ object FsScan {
 }
 
 object AppContext {
-  implicit val system: ActorSystem[pekko.NotUsed] = ActorSystem(Tablo2HDHomeRun(), "tablo2hdhomerun-system")
+  @volatile private var _system: ActorSystem[pekko.NotUsed] = scala.compiletime.uninitialized
+  implicit def system: ActorSystem[pekko.NotUsed] = _system
+  private[app] def initialize(s: ActorSystem[pekko.NotUsed]): Unit = { _system = s }
 }
 
 object Dependencies {
@@ -314,18 +322,14 @@ object Dependencies {
 object Tablo2HDHomeRun {
   val log = LoggerFactory.getLogger(this.getClass)
 
-  private var _args: Array[String] = Array.empty
-  def args: Array[String] = _args
-
   val media = sys.env.get("MEDIA_ROOT")
 
-  def main(args: Array[String]): Unit = {
-    _args = args
-    Dependencies.verify()
-    val _ = AppContext.system // trigger actor system initialization
+  def start(daemon: Boolean): Unit = {
+    val system = ActorSystem(apply(daemon), "tablo2hdhomerun-system")
+    AppContext.initialize(system)
   }
 
-  def apply(): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
+  def apply(daemon: Boolean): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
     media.foreach { case root =>
       log.info(s"[apply] media root set -> $root")
 
@@ -346,7 +350,7 @@ object Tablo2HDHomeRun {
     }
 
     val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor")
-    startHttp(lineup)
+    startHttp(lineup, daemon)
 
     Behaviors.empty
   }
@@ -1251,7 +1255,7 @@ object Tablo2HDHomeRun {
       }
   }
 
-  def startHttp(lineupActor: ActorRef[Lineup.LineupActor.Request]): Unit = {
+  def startHttp(lineupActor: ActorRef[Lineup.LineupActor.Request], daemon: Boolean): Unit = {
     val routes =
       Discover.route ~
       Lineup.route(lineupActor) ~
@@ -1277,7 +1281,6 @@ object Tablo2HDHomeRun {
           handleRejections(loggedRejectionHandler) { routes }
         }
 
-    val daemon = if (args.length == 1) args(0) == "-d" else false
     val break = if (daemon) "CTRL-C" else "RETURN"
     val url = s"http://${PROXY_IP.getHostAddress}:${PROXY_PORT}"
     val message = s"Server now online. Please navigate to ${url}\nPress ${break} to stop..."

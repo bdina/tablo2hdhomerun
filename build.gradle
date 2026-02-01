@@ -52,7 +52,7 @@ dependencies {
 version gitVersion()
 
 application {
-    mainClass.set('app.Tablo2HDHomeRun')
+    mainClass.set('app.tablo2hdhomerunApp')
 }
 
 processResources {
