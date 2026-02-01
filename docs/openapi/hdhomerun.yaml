@@ -1,0 +1,368 @@
+openapi: 3.1.0
+info:
+  title: Tablo2HDHomeRun Proxy API
+  description: |
+    OpenAPI specification for the Tablo2HDHomeRun proxy server.
+
+    This proxy exposes a Legacy Tablo TV DVR device as an HDHomeRun-compatible tuner,
+    enabling compatibility with media applications like Plex, Jellyfin,
+    Channels DVR, and any software that supports HDHomeRun devices.
+
+    ## HDHomeRun Compatibility
+    This API follows the HDHomeRun HTTP API specification, allowing seamless
+    integration with applications that discover and use HDHomeRun devices.
+
+    ## Base URL
+    The proxy runs on port 8080 by default. Configure the `PROXY_IP` environment
+    variable to set the bind address.
+
+    ## Configuration
+    | Variable | Default | Description |
+    |----------|---------|-------------|
+    | `TABLO_IP` | `127.0.0.1` | IP address of the Legacy Tablo DVR device |
+    | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
+  version: 1.0.0
+  contact:
+    name: Tablo2HDHomeRun Project
+  license:
+    name: MIT
+
+servers:
+  - url: http://{proxyIp}:8080
+    description: Tablo2HDHomeRun Proxy Server
+    variables:
+      proxyIp:
+        default: 127.0.0.1
+        description: IP address of the proxy server
+
+tags:
+  - name: Discovery
+    description: Device discovery and identification
+  - name: Lineup
+    description: Channel lineup management
+  - name: Streaming
+    description: Live TV streaming
+  - name: Guide
+    description: Electronic program guide
+
+paths:
+  /discover.json:
+    get:
+      operationId: getDiscovery
+      summary: Device discovery information
+      description: |
+        Returns device identification and capability information in HDHomeRun format.
+        This endpoint is used by media applications to discover and identify the tuner.
+      tags:
+        - Discovery
+      responses:
+        '200':
+          description: Device discovery information
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DiscoverResponse'
+
+  /lineup.json:
+    get:
+      operationId: getLineup
+      summary: Get channel lineup
+      description: |
+        Returns the channel lineup in HDHomeRun format. Each channel includes
+        the guide number, name, streaming URL, and source information.
+
+        The lineup is cached for 24 hours to reduce load on the Legacy Tablo device.
+      tags:
+        - Lineup
+      responses:
+        '200':
+          description: Channel lineup array
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/LineupChannel'
+              example:
+                - GuideNumber: "7.1"
+                  GuideName: ABC
+                  URL: http://192.168.1.50:8080/channel/12345
+                  type: antenna
+                  srcURL: http://192.168.1.100:8885/guide/channels/12345/watch
+                - GuideNumber: "4.1"
+                  GuideName: NBC
+                  URL: http://192.168.1.50:8080/channel/12346
+                  type: antenna
+                  srcURL: http://192.168.1.100:8885/guide/channels/12346/watch
+        '500':
+          description: Unable to retrieve channel lineup
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Unable to produce channel lineup
+
+  /lineup_status.json:
+    get:
+      operationId: getLineupStatus
+      summary: Get lineup scan status
+      description: |
+        Returns the channel scan status. This endpoint is required for
+        HDHomeRun compatibility but scanning is managed by the Tablo device.
+      tags:
+        - Lineup
+      responses:
+        '200':
+          description: Lineup scan status
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LineupStatus'
+        '500':
+          description: Unable to get lineup status
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Unable to get lineup status
+
+  /channel/{channelId}:
+    get:
+      operationId: streamChannel
+      summary: Stream a channel
+      description: |
+        Streams live TV from the specified channel as MPEG-TS.
+
+        The proxy:
+        1. Checks tuner availability on the Legacy Tablo device
+        2. Initiates a watch session to get the HLS playlist URL
+        3. Spawns an FFmpeg process to convert HLS to MPEG-TS
+        4. Streams the output as chunked HTTP response
+
+        The FFmpeg process is automatically terminated when the client disconnects.
+      tags:
+        - Streaming
+      parameters:
+        - name: channelId
+          in: path
+          required: true
+          description: Channel object ID from the lineup
+          schema:
+            type: integer
+            minimum: 1
+          example: 12345
+      responses:
+        '200':
+          description: MPEG-TS video stream
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+        '500':
+          description: Unable to stream channel
+          content:
+            text/plain:
+              schema:
+                type: string
+              example: Unable to stream channel
+
+  /guide.xml:
+    get:
+      operationId: getGuide
+      summary: Get XMLTV program guide
+      description: |
+        Returns an electronic program guide in XMLTV format.
+
+        The guide includes:
+        - Channel definitions with call signs
+        - Program schedules for all channels
+        - Episode information (title, season, episode number)
+        - Genre categorization (news, sports, movies)
+
+        The guide is cached for 1 hour and streamed as chunked XML to
+        minimize memory usage.
+      tags:
+        - Guide
+      responses:
+        '200':
+          description: XMLTV program guide
+          content:
+            text/xml:
+              schema:
+                type: string
+                format: xml
+              example: |
+                <?xml version="1.0" encoding="UTF-8"?>
+                <tv>
+                  <channel id="7.1">
+                    <display-name>ABC</display-name>
+                    <display-name>7.1</display-name>
+                    <display-name>ABC (7.1)</display-name>
+                  </channel>
+                  <programme start="2025-06-18T18:00:00Z" stop="2025-06-18T18:30:00Z" channel="7.1">
+                    <title>Evening News</title>
+                    <desc>The latest news coverage</desc>
+                    <category>News</category>
+                  </programme>
+                </tv>
+        '500':
+          description: Unable to generate program guide (returns empty XMLTV)
+          content:
+            text/xml:
+              schema:
+                type: string
+              example: <tv></tv>
+
+  /favicon.ico:
+    get:
+      operationId: getFavicon
+      summary: Favicon endpoint
+      description: Returns an empty response for favicon requests.
+      tags:
+        - Discovery
+      responses:
+        '200':
+          description: Empty response
+          content:
+            text/html:
+              schema:
+                type: string
+              example: ""
+
+components:
+  schemas:
+    DiscoverResponse:
+      type: object
+      description: HDHomeRun device discovery response
+      required:
+        - FriendlyName
+        - LocalIP
+        - BaseURL
+        - LineupURL
+        - Manufacturer
+        - ModelNumber
+        - FirmwareName
+        - FirmwareVersion
+        - DeviceID
+        - DeviceAuth
+      properties:
+        FriendlyName:
+          type: string
+          description: Human-readable device name
+          example: Tablo Legacy Gen Proxy
+        LocalIP:
+          type: string
+          format: ipv4
+          description: Local IP address of the device
+          example: 192.168.1.50
+        BaseURL:
+          type: string
+          format: uri
+          description: Base URL for device API
+          example: http://192.168.1.50:8080
+        LineupURL:
+          type: string
+          format: uri
+          description: URL for channel lineup endpoint
+          example: http://192.168.1.50:8080/lineup.json
+        Manufacturer:
+          type: string
+          description: Device manufacturer
+          default: tablo2hdhomerun
+          example: tablo2hdhomerun
+        ModelNumber:
+          type: string
+          description: Device model number (emulates HDHomeRun)
+          default: HDHR3-US
+          example: HDHR3-US
+        FirmwareName:
+          type: string
+          description: Firmware identifier
+          default: hdhomerun3_atsc
+          example: hdhomerun3_atsc
+        FirmwareVersion:
+          type: string
+          description: Firmware version string
+          default: "20240101"
+          example: "20240101"
+        DeviceID:
+          type: string
+          description: Unique device identifier (8 hex digits)
+          pattern: ^[0-9A-Fa-f]{8}$
+          default: "12345678"
+          example: "12345678"
+        DeviceAuth:
+          type: string
+          description: Device authentication token
+          default: tabloauth123
+          example: tabloauth123
+
+    LineupChannel:
+      type: object
+      description: Channel entry in the lineup
+      required:
+        - GuideNumber
+        - GuideName
+        - URL
+        - type
+        - srcURL
+      properties:
+        GuideNumber:
+          type: string
+          description: Channel number in major.minor format
+          pattern: ^\d+\.\d+$
+          example: "7.1"
+        GuideName:
+          type: string
+          description: Channel call sign or name
+          example: ABC
+        URL:
+          type: string
+          format: uri
+          description: Streaming URL for this channel (via proxy)
+          example: http://192.168.1.50:8080/channel/12345
+        type:
+          type: string
+          description: Signal source type
+          enum:
+            - antenna
+            - cable
+          example: antenna
+        srcURL:
+          type: string
+          format: uri
+          description: Original Legacy Tablo watch endpoint URL
+          example: http://192.168.1.100:8885/guide/channels/12345/watch
+
+    LineupStatus:
+      type: object
+      description: Channel scan status
+      required:
+        - ScanInProgress
+        - ScanPossible
+        - Source
+        - SourceList
+      properties:
+        ScanInProgress:
+          type: integer
+          description: Whether a scan is currently running (0 or 1)
+          enum: [0, 1]
+          example: 0
+        ScanPossible:
+          type: integer
+          description: Whether a scan can be started (0 or 1)
+          enum: [0, 1]
+          example: 1
+        Source:
+          type: string
+          description: Current signal source
+          default: Antenna
+          example: Antenna
+        SourceList:
+          type: array
+          items:
+            type: string
+          description: Available signal sources
+          default: [Antenna]
+          example: [Antenna]

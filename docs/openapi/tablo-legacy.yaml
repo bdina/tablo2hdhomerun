@@ -1,0 +1,597 @@
+openapi: 3.1.0
+info:
+  title: Legacy Tablo TV Tuner API
+  description: |
+    OpenAPI specification for the Legacy Tablo TV DVR device native API.
+
+    This documents the REST API exposed by Legacy Tablo TV DVR devices (network-connected
+    models prior to the 4th generation) on port 8885. The API provides access to channel
+    information, program guides, live TV streaming, and device status.
+
+    ## Authentication
+    The Legacy Tablo API does not require authentication for local network access.
+
+    ## Base URL
+    The base URL is typically `http://<tablo-ip>:8885` where `<tablo-ip>` is the
+    IP address of your Legacy Tablo device on the local network.
+  version: 1.0.0
+  contact:
+    name: Tablo2HDHomeRun Project
+  license:
+    name: MIT
+
+servers:
+  - url: http://{tabloIp}:8885
+    description: Legacy Tablo TV DVR Device
+    variables:
+      tabloIp:
+        default: 192.168.1.100
+        description: IP address of the Legacy Tablo DVR device
+
+tags:
+  - name: Channels
+    description: Channel management and discovery
+  - name: Guide
+    description: Electronic program guide operations
+  - name: Streaming
+    description: Live TV streaming operations
+  - name: Device
+    description: Device status and tuner information
+
+paths:
+  /guide/channels:
+    get:
+      operationId: listChannels
+      summary: List all channel paths
+      description: |
+        Returns an array of channel resource paths. These paths can be used
+        with the batch endpoint to fetch detailed channel information.
+      tags:
+        - Channels
+      responses:
+        '200':
+          description: Array of channel resource paths
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  type: string
+                  pattern: ^/guide/channels/\d+$
+                example:
+                  - /guide/channels/12345
+                  - /guide/channels/12346
+                  - /guide/channels/12347
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /guide/channels/{channelId}:
+    get:
+      operationId: getChannel
+      summary: Get channel details
+      description: Returns detailed information for a specific channel.
+      tags:
+        - Channels
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      responses:
+        '200':
+          description: Channel details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelObject'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /guide/channels/{channelId}/watch:
+    post:
+      operationId: watchChannel
+      summary: Start watching a channel
+      description: |
+        Initiates a live TV streaming session for the specified channel.
+        Returns an HLS playlist URL that can be used to stream the channel.
+
+        **Note:** This requires an available tuner on the Legacy Tablo device.
+        Check `/server/tuners` before calling this endpoint to ensure a tuner is free.
+      tags:
+        - Streaming
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchRequest'
+      responses:
+        '200':
+          description: Watch session started successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/WatchResponse'
+        '400':
+          description: Invalid request parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: No available tuners
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /guide/channels/{channelId}/programs:
+    get:
+      operationId: getChannelPrograms
+      summary: Get program schedule for a channel
+      description: |
+        Returns the program schedule for a specific channel within the
+        specified time range.
+      tags:
+        - Guide
+      parameters:
+        - $ref: '#/components/parameters/channelId'
+        - name: start
+          in: query
+          description: Start time for program lookup (ISO 8601 format)
+          schema:
+            type: string
+            format: date-time
+          example: "2025-06-18T00:00:00Z"
+        - name: end
+          in: query
+          description: End time for program lookup (ISO 8601 format)
+          schema:
+            type: string
+            format: date-time
+          example: "2025-06-19T00:00:00Z"
+      responses:
+        '200':
+          description: Program schedule
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Program'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /guide/schedule:
+    get:
+      operationId: getSchedule
+      summary: Get full program schedule
+      description: |
+        Returns the program schedule for all channels within the
+        specified time range.
+      tags:
+        - Guide
+      parameters:
+        - name: start
+          in: query
+          description: Start time for schedule lookup (ISO 8601 format)
+          schema:
+            type: string
+            format: date-time
+          example: "2025-06-18T00:00:00Z"
+        - name: end
+          in: query
+          description: End time for schedule lookup (ISO 8601 format)
+          schema:
+            type: string
+            format: date-time
+          example: "2025-06-19T00:00:00Z"
+      responses:
+        '200':
+          description: Full program schedule
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: array
+                  items:
+                    $ref: '#/components/schemas/Program'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /batch:
+    post:
+      operationId: batchFetch
+      summary: Batch fetch multiple resources
+      description: |
+        Fetches detailed information for multiple resources in a single request.
+        Accepts an array of resource paths (e.g., channel paths) and returns
+        a map of path to resource object.
+
+        This is more efficient than making individual requests for each resource.
+      tags:
+        - Channels
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: array
+              items:
+                type: string
+              example:
+                - /guide/channels/12345
+                - /guide/channels/12346
+      responses:
+        '200':
+          description: Map of resource path to resource object
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  $ref: '#/components/schemas/ChannelObject'
+              example:
+                /guide/channels/12345:
+                  object_id: 12345
+                  path: /guide/channels/12345
+                  channel:
+                    call_sign: ABC
+                    call_sign_src: guide
+                    major: 7
+                    minor: 1
+                    network: ABC
+                    resolution: 1080i
+                    favourite: true
+                    tms_station_id: "10212"
+                    tms_affiliate_id: "ABC"
+                    source: antenna
+        '400':
+          description: Invalid request body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+  /server/tuners:
+    get:
+      operationId: getTuners
+      summary: Get tuner status
+      description: |
+        Returns the status of all tuners in the Legacy Tablo device.
+        Use this to check tuner availability before starting a stream.
+      tags:
+        - Device
+      responses:
+        '200':
+          description: Array of tuner status objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/Tuner'
+              example:
+                - in_use: false
+                  channel: null
+                  recording: null
+                - in_use: true
+                  channel: /guide/channels/12345
+                  recording: null
+                - in_use: true
+                  channel: null
+                  recording: /recordings/67890
+        '500':
+          $ref: '#/components/responses/InternalError'
+
+components:
+  parameters:
+    channelId:
+      name: channelId
+      in: path
+      required: true
+      description: Unique channel identifier (object_id)
+      schema:
+        type: integer
+        minimum: 1
+      example: 12345
+
+  schemas:
+    ChannelInfo:
+      type: object
+      description: Detailed channel information
+      required:
+        - call_sign
+        - call_sign_src
+        - major
+        - minor
+        - resolution
+        - favourite
+        - tms_station_id
+        - tms_affiliate_id
+        - source
+      properties:
+        call_sign:
+          type: string
+          description: Channel call sign (e.g., ABC, NBC, CBS)
+          example: ABC
+        call_sign_src:
+          type: string
+          description: Source of the call sign information
+          example: guide
+        major:
+          type: integer
+          description: Major channel number
+          example: 7
+        minor:
+          type: integer
+          description: Minor channel number (subchannel)
+          example: 1
+        network:
+          type: string
+          nullable: true
+          description: Network affiliation
+          example: ABC
+        resolution:
+          type: string
+          description: Video resolution
+          enum:
+            - 480i
+            - 480p
+            - 720p
+            - 1080i
+            - 1080p
+          example: 1080i
+        favourite:
+          type: boolean
+          description: Whether the channel is marked as a favorite
+          example: true
+        tms_station_id:
+          type: string
+          description: Tribune Media Services station identifier
+          example: "10212"
+        tms_affiliate_id:
+          type: string
+          description: Tribune Media Services affiliate identifier
+          example: ABC
+        source:
+          type: string
+          description: Signal source type
+          enum:
+            - antenna
+            - cable
+          example: antenna
+
+    ChannelObject:
+      type: object
+      description: Channel resource object
+      required:
+        - object_id
+        - path
+        - channel
+      properties:
+        object_id:
+          type: integer
+          description: Unique channel identifier
+          example: 12345
+        path:
+          type: string
+          description: Resource path for this channel
+          pattern: ^/guide/channels/\d+$
+          example: /guide/channels/12345
+        channel:
+          $ref: '#/components/schemas/ChannelInfo'
+
+    WatchRequest:
+      type: object
+      description: Request parameters for starting a watch session
+      properties:
+        bandwidth:
+          type: integer
+          description: Requested bandwidth in kbps
+          default: 1000
+          minimum: 500
+          maximum: 10000
+          example: 1000
+        no_fast_startup:
+          type: boolean
+          description: Disable fast startup optimization
+          default: false
+          example: false
+
+    WatchResponse:
+      type: object
+      description: Response containing streaming session information
+      required:
+        - token
+        - expires
+        - keepalive
+        - playlist_url
+        - video_details
+      properties:
+        token:
+          type: string
+          format: uuid
+          description: Session token
+          example: df9586a4-5548-48a9-87f2-1191a8a0df8b
+        expires:
+          type: string
+          format: date-time
+          description: Session expiration time
+          example: "2025-06-18T02:55:38Z"
+        keepalive:
+          type: integer
+          description: Keepalive interval in seconds
+          example: 120
+        playlist_url:
+          type: string
+          format: uri
+          description: HLS playlist URL for streaming
+          example: http://192.168.1.100:80/stream/pl.m3u8?-_XhOSWWP5qBhXIVMu6c7g
+        bif_url_sd:
+          type: string
+          format: uri
+          nullable: true
+          description: SD BIF thumbnail URL for trick play
+          example: http://192.168.1.100:80/stream/thumbs_sd.bif
+        bif_url_hd:
+          type: string
+          format: uri
+          nullable: true
+          description: HD BIF thumbnail URL for trick play
+          example: http://192.168.1.100:80/stream/thumbs_hd.bif
+        video_details:
+          $ref: '#/components/schemas/VideoDetails'
+
+    VideoDetails:
+      type: object
+      description: Video stream details
+      properties:
+        width:
+          type: integer
+          description: Video width in pixels
+          example: 1920
+        height:
+          type: integer
+          description: Video height in pixels
+          example: 1080
+
+    Program:
+      type: object
+      description: Program/show information
+      properties:
+        id:
+          type: string
+          description: Unique program identifier
+          example: prog_123456789
+        title:
+          type: string
+          description: Program title
+          example: Evening News
+        description:
+          type: string
+          nullable: true
+          description: Program description
+          example: The latest news coverage
+        start_time:
+          type: string
+          format: date-time
+          description: Program start time
+          example: "2025-06-18T18:00:00Z"
+        end_time:
+          type: string
+          format: date-time
+          description: Program end time
+          example: "2025-06-18T18:30:00Z"
+        episode_title:
+          type: string
+          nullable: true
+          description: Episode title (for series)
+          example: Season Premiere
+        season_number:
+          type: integer
+          nullable: true
+          description: Season number
+          example: 5
+        episode_number:
+          type: integer
+          nullable: true
+          description: Episode number
+          example: 1
+        year:
+          type: integer
+          nullable: true
+          description: Production year
+          example: 2025
+        genre:
+          type: string
+          nullable: true
+          description: Program genre
+          example: News
+        rating:
+          type: string
+          nullable: true
+          description: Content rating
+          example: TV-PG
+        is_movie:
+          type: boolean
+          description: Whether the program is a movie
+          default: false
+        is_sports:
+          type: boolean
+          description: Whether the program is sports content
+          default: false
+        is_news:
+          type: boolean
+          description: Whether the program is news content
+          default: false
+
+    Tuner:
+      type: object
+      description: Tuner status information
+      required:
+        - in_use
+      properties:
+        in_use:
+          type: boolean
+          description: Whether the tuner is currently in use
+          example: false
+        channel:
+          type: string
+          format: uri-reference
+          nullable: true
+          description: Channel path currently tuned (if watching live TV)
+          example: /guide/channels/12345
+        recording:
+          type: string
+          format: uri-reference
+          nullable: true
+          description: Recording path (if recording)
+          example: /recordings/67890
+
+    Error:
+      type: object
+      description: Error response
+      required:
+        - error
+        - message
+      properties:
+        error:
+          type: string
+          description: Error code
+          example: no_available_tuners
+        message:
+          type: string
+          description: Human-readable error message
+          example: No tuners are available for streaming
+
+  responses:
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: not_found
+            message: The requested resource was not found
+
+    InternalError:
+      description: Internal server error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: internal_error
+            message: An unexpected error occurred
