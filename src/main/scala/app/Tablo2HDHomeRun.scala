@@ -62,7 +62,7 @@ object FsNotify {
   private final case class FsQueueResponse(response: FsQueue.Response) extends Command
 
   object FsQueue {
-    implicit val system: ActorSystem[Nothing] = AppContext.system
+    implicit def system: ActorSystem[Nothing] = AppContext.system
 
     val bufferSize = 100 // Reduced buffer size to limit memory usage
 
@@ -355,9 +355,9 @@ object Tablo2HDHomeRun {
     Behaviors.empty
   }
 
-  implicit val system: ActorSystem[Nothing] = AppContext.system
+  implicit def system: ActorSystem[pekko.NotUsed] = AppContext.system
 
-  implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+  implicit def ec: scala.concurrent.ExecutionContext = system.executionContext
 
   object Response {
     object JsonProtocol {
@@ -442,7 +442,7 @@ object Tablo2HDHomeRun {
 
   import scala.concurrent.Future
 
-  val HttpCtx = Http()
+  lazy val HttpCtx = Http()
 
   object Lineup {
     case class ChannelInfo(
