@@ -31,6 +31,102 @@
       "type": "[Lscala.Tuple2;"
     },
     {
+      "type": "app.ChannelData",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.ProgramData",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.ChannelGuideData",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.TunerStatus",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.WatchSession",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.LegacyTunerBackend$LegacyChannelInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.LegacyTunerBackend$LegacyChannelObject",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.LegacyTunerBackend$LegacyTuners",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.LegacyTunerBackend$LegacyVideoDetails",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.LegacyTunerBackend$LegacyWatchResponse",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4ChannelOta",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4ChannelOtt",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4ChannelLogo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4Channel",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4Airing",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4ServerInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4ModelInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4WatchResponse",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.Gen4TunerBackend$Gen4VideoDetails",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.LighthouseCredentials",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.AccountProfile",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.AccountDevice",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.AccountInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.LighthouseSession",
+      "allDeclaredFields": true
+    },
+    {
       "type": "app.Tablo2HDHomeRun$Channel$Request$WatchRequest",
       "allDeclaredFields": true
     },
