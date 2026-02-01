@@ -78,19 +78,50 @@ task repl(type:JavaExec) {
     args '-usejavacp'
 }
 
+task mergeReferenceConf {
+    description = 'Merges all reference.conf files from Pekko dependencies'
+    doLast {
+        def outputDir = file("${buildDir}/generated-resources")
+        outputDir.mkdirs()
+
+        def referenceConf = new StringBuilder()
+        def versionConf = new StringBuilder()
+
+        configurations.runtimeClasspath.each { jar ->
+            if (jar.name.contains('pekko')) {
+                def zipFile = new java.util.zip.ZipFile(jar)
+                try {
+                    def refEntry = zipFile.getEntry('reference.conf')
+                    if (refEntry) {
+                        referenceConf.append(zipFile.getInputStream(refEntry).text)
+                        referenceConf.append('\n')
+                    }
+                    def verEntry = zipFile.getEntry('version.conf')
+                    if (verEntry) {
+                        versionConf.append(zipFile.getInputStream(verEntry).text)
+                        versionConf.append('\n')
+                    }
+                } finally {
+                    zipFile.close()
+                }
+            }
+        }
+
+        file("${outputDir}/reference.conf").text = referenceConf.toString()
+        file("${outputDir}/version.conf").text = versionConf.toString()
+    }
+}
+
+sourceSets.main.resources.srcDirs += "${buildDir}/generated-resources"
+
+processResources.dependsOn mergeReferenceConf
+
 shadowJar {
     archiveClassifier = ''
     manifest {
         attributes 'App-Version': gitVersion()
     }
-    sourceSets {
-        main {
-            resources {
-                srcDirs "src/main/resources", "src/main/app"
-            }
-        }
-    }
-    append('reference.conf')
+    mergeServiceFiles()
 }
 
 nativeImage {
