@@ -1326,6 +1326,10 @@ object Tablo4thGen {
 
   val LIGHTHOUSE_BASE_URL = "https://lighthousetv.ewscloud.com/api/v2"
   val USER_AGENT = "Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)"
+  val DefaultHashKey = "6l8jU5N43cEilqItmT3U2M2PFM3qPziilXqau9ys"
+  val DefaultDeviceKey = "ljpg6ZkwShVv8aI12E2LP55Ep8vq1uYDPvX0DdTB"
+  def deviceHashKey: String = sys.env.get("TABLO_HASH_KEY").orElse(sys.env.get("HashKey")).getOrElse(DefaultHashKey)
+  def deviceDeviceKey: String = sys.env.get("TABLO_DEVICE_KEY").orElse(sys.env.get("DeviceKey")).getOrElse(DefaultDeviceKey)
 
   case class AuthContext(
     accessToken: String
@@ -1556,8 +1560,8 @@ object Tablo4thGen {
         AuthContext(
           accessToken = accessToken
         , lighthouseToken = lighthouseToken
-        , deviceKey = device.serverId
-        , hashKey = lighthouseToken
+        , deviceKey = Tablo4thGen.deviceDeviceKey
+        , hashKey = Tablo4thGen.deviceHashKey
         , deviceUrl = deviceUrl
         , profileId = profile.identifier
         , serverId = device.serverId
