@@ -285,22 +285,25 @@ object FsScan {
     import scala.jdk.CollectionConverters._
     import scala.jdk.StreamConverters._
 
-    // Use streaming to avoid loading entire directory tree into memory
-    Files.find(root, Integer.MAX_VALUE, (_, a) => a.isRegularFile)
-      .toScala(LazyList) // Use LazyList instead of Vector for memory efficiency
+    Files
+      .find(root, Integer.MAX_VALUE, (_, a) => a.isRegularFile) // use streaming to avoid loading entire directory tree into memory
+      .toScala(LazyList) // use LazyList instead of Vector for memory efficiency
       .filter { case path =>
         val kind = ext.find(path.getFileName.toFile.getName.endsWith(_))
-        val scanned = Try {
-          Files.getFileAttributeView(path, classOf[Xattr])
-               .list
-               .asScala
-               .exists(_ == FsUtil.Attr.Key.FS_STATE)
-        }.getOrElse(false)
+        val scanned =
+          Try {
+            Files
+              .getFileAttributeView(path, classOf[Xattr])
+              .list
+              .asScala
+              .exists(_ == FsUtil.Attr.Key.FS_STATE)
+          }
+          .getOrElse(false)
         val hit = kind.isDefined && !scanned
         log.info(s"[scan] found $kind (state: $scanned) - hit $hit")
         hit
       }
-      .toSeq // Convert to Seq only at the end
+      .toSeq // convert to Seq only at the end
   }
 }
 
@@ -739,7 +742,7 @@ object Tablo2HDHomeRun {
       object Request {
         val baseUrl = discover.proxyAddress(TABLO_IP,TABLO_PORT)
 
-        // Try to discover program guide endpoints
+        // try to discover program guide endpoints
         def getProgramsUri(channelId: Int, startTime: Option[String] = None, endTime: Option[String] = None) = {
           val baseUri = baseUrl.withPath(Uri.Path(s"/guide/channels/$channelId/programs"))
           val queryParams = (startTime, endTime) match {
@@ -766,7 +769,7 @@ object Tablo2HDHomeRun {
       }
 
       object Response {
-        // Try to parse program data from various possible Tablo API response formats
+        // try to parse program data from various possible Tablo API response formats
         case class TabloProgram(
           id: Option[String]
         , title: Option[String]
@@ -896,7 +899,7 @@ object Tablo2HDHomeRun {
         }
 
         def fetchProgramsForChannel(channelId: Int): Future[Seq[Program]] = {
-          // Try multiple possible endpoints for program data
+          // try multiple possible endpoints for program data
           val endpoints = Seq(
             Proxy.Request.getProgramsUri(channelId),
             Proxy.Request.getScheduleUri().withPath(Uri.Path(s"/guide/channels/$channelId")),
@@ -909,18 +912,20 @@ object Tablo2HDHomeRun {
               if (response.status.isSuccess()) {
                 Unmarshal(response.entity).to[String].map { body =>
                   log.info(s"[guide-actor] response body: $body")
-                  // Try to parse as JSON array of programs
-                  Try {
+                  Try { // try to parse as JSON array of programs
                     import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
-                    body.parseJson.convertTo[Seq[Proxy.Response.TabloProgram]]
+                    body
+                      .parseJson
+                      .convertTo[Seq[Proxy.Response.TabloProgram]]
                       .map(Proxy.Response.convertToProgram(_, channelId))
-                  }.getOrElse {
-                    // If that fails, try to parse as a single program object
-                    Try {
+                  }
+                  .getOrElse {
+                    Try { // if that fails, try to parse as a single program object
                       import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
                       val program = body.parseJson.convertTo[Proxy.Response.TabloProgram]
                       Seq(Proxy.Response.convertToProgram(program, channelId))
-                    }.getOrElse {
+                    }
+                    .getOrElse {
                       log.warn(s"[guide-actor] could not parse program data from $uri")
                       Seq.empty
                     }
@@ -930,7 +935,8 @@ object Tablo2HDHomeRun {
                 log.info(s"[guide-actor] endpoint $uri returned ${response.status}")
                 Future.successful(Seq.empty)
               }
-            }.recover {
+            }
+            .recover {
               case ex =>
                 log.warn(s"[guide-actor] failed to fetch from $uri: ${ex.getMessage}")
                 Seq.empty
@@ -946,7 +952,8 @@ object Tablo2HDHomeRun {
                 tryEndpoint(uri)
               }
             }
-          }.map { programs =>
+          }
+          .map { programs =>
             if (programs.isEmpty) {
               log.info(s"[guide-actor] no programs found for channel $channelId, generating fallback data")
               generateFallbackPrograms(channelId, "Unknown")
@@ -982,7 +989,7 @@ object Tablo2HDHomeRun {
               }.flatMap { channelData =>
                 log.info(s"[guide-actor] channels found: ${channelData.size}")
 
-                // Fetch programs for each channel
+                // fetch programs for each channel
                 val channelFutures = channelData.map { case (_, channelObj) =>
                   fetchProgramsForChannel(channelObj.object_id).map { programs =>
                     ChannelGuide(
@@ -1001,7 +1008,8 @@ object Tablo2HDHomeRun {
               log.warn(s"[guide-actor] failed to get channels: ${response.status}")
               Future.successful(Seq.empty)
             }
-          }.recover {
+          }
+          .recover {
             case ex =>
               log.error(s"[guide-actor] scan failed: ${ex.getMessage}")
               Seq.empty
@@ -1056,16 +1064,17 @@ object Tablo2HDHomeRun {
 
     object XMLTVFormatter {
       def formatTimestamp(timeStr: String): String = {
-        // Try to parse various timestamp formats and convert to XMLTV format
-        Try {
+        Try { // try to parse various timestamp formats and convert to XMLTV format
           val instant = java.time.Instant.parse(timeStr)
           instant.toString
-        }.getOrElse {
+        }
+        .getOrElse {
           Try {
             val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
             val localDateTime = java.time.LocalDateTime.parse(timeStr, formatter)
             localDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant.toString
-          }.getOrElse {
+          }
+          .getOrElse {
             java.time.Instant.now().toString
           }
         }
