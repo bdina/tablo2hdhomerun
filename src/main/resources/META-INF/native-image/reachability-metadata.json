@@ -31,31 +31,31 @@
       "type": "[Lscala.Tuple2;"
     },
     {
-      "type": "app.Tablo2HDHomeRun$Channel$Request$WatchRequest",
+      "type": "app.tuner.TabloLegacy$Channel$Request$WatchRequest",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Channel$Response$Tuners",
+      "type": "app.tuner.TabloLegacy$Channel$Response$Tuners",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Channel$Response$VideoDetails",
+      "type": "app.tuner.TabloLegacy$Channel$Response$VideoDetails",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Channel$Response$WatchResponse",
+      "type": "app.tuner.TabloLegacy$Channel$Response$WatchResponse",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Lineup$ChannelInfo",
+      "type": "app.tuner.TabloLegacy$Lineup$ChannelInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Lineup$ChannelObject",
+      "type": "app.tuner.TabloLegacy$Lineup$ChannelObject",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Lineup$JsonProtocol$",
+      "type": "app.tuner.TabloLegacy$Lineup$JsonProtocol$",
       "fields": [
         {
           "name": "BigDecimalJsonFormat$lzy1"
@@ -108,99 +108,99 @@
       ]
     },
     {
-      "type": "app.Tablo2HDHomeRun$Lineup$Response$LineupStatus",
+      "type": "app.tuner.TabloLegacy$Lineup$Response$LineupStatus",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo2HDHomeRun$Response$Discover",
+      "type": "app.tuner.TabloLegacy$Response$Discover",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$AuthContext",
+      "type": "app.tuner.Tablo4thGen$Auth$AuthContext",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$LoginRequest",
+      "type": "app.tuner.Tablo4thGen$Auth$LoginRequest",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$LoginResponse",
+      "type": "app.tuner.Tablo4thGen$Auth$LoginResponse",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$AccountProfile",
+      "type": "app.tuner.Tablo4thGen$Auth$AccountProfile",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$AccountDevice",
+      "type": "app.tuner.Tablo4thGen$Auth$AccountDevice",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$AccountInfo",
+      "type": "app.tuner.Tablo4thGen$Auth$AccountInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$SelectRequest",
+      "type": "app.tuner.Tablo4thGen$Auth$SelectRequest",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$SelectResponse",
+      "type": "app.tuner.Tablo4thGen$Auth$SelectResponse",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$OtaChannelInfo",
+      "type": "app.tuner.Tablo4thGen$Lineup$OtaChannelInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$OttChannelInfo",
+      "type": "app.tuner.Tablo4thGen$Lineup$OttChannelInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$ChannelLineup",
+      "type": "app.tuner.Tablo4thGen$Lineup$ChannelLineup",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$SeasonInfo",
+      "type": "app.tuner.Tablo4thGen$Guide$SeasonInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$EpisodeInfo",
+      "type": "app.tuner.Tablo4thGen$Guide$EpisodeInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$MovieAiringInfo",
+      "type": "app.tuner.Tablo4thGen$Guide$MovieAiringInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$SportEventInfo",
+      "type": "app.tuner.Tablo4thGen$Guide$SportEventInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$AiringChannel",
+      "type": "app.tuner.Tablo4thGen$Guide$AiringChannel",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$GuideAiring",
+      "type": "app.tuner.Tablo4thGen$Guide$GuideAiring",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$ServerModel",
+      "type": "app.tuner.Tablo4thGen$Channel$Response$ServerModel",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$ServerInfo",
+      "type": "app.tuner.Tablo4thGen$Channel$Response$ServerInfo",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$Watch4thGenRequest",
+      "type": "app.tuner.Tablo4thGen$Channel$Request$Watch4thGenRequest",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$Watch4thGenResponse",
+      "type": "app.tuner.Tablo4thGen$Channel$Response$Watch4thGenResponse",
       "allDeclaredFields": true
     },
     {
-      "type": "app.Tablo4thGen$JsonProtocol$",
+      "type": "app.tuner.Tablo4thGen$Auth$JsonProtocol$",
       "fields": [
         {
           "name": "BigDecimalJsonFormat$lzy1"
