@@ -10,6 +10,7 @@ import pekko.http.scaladsl.server.Directives._
 import pekko.stream.scaladsl.Source
 import pekko.util.ByteString
 
+import java.util.concurrent.atomic.AtomicInteger
 import java.time.{LocalDate, ZonedDateTime, ZoneOffset}
 import java.time.format.DateTimeFormatter
 import java.security.MessageDigest
@@ -27,6 +28,7 @@ import spray.json._
 import DefaultJsonProtocol._
 
 import app.Tablo2HDHomeRun
+import app.stream.StreamBackend
 
 object Tablo4thGen {
   val log = LoggerFactory.getLogger(this.getClass)
@@ -724,7 +726,7 @@ object Tablo4thGen {
       }
     }
 
-    @volatile private var activeStreams: Int = 0
+    private val activeStreams = new AtomicInteger(0)
     @volatile private var totalTuners: Int = 4
 
     def route(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]) = {
@@ -776,7 +778,7 @@ object Tablo4thGen {
           val headers = Hmac.signedHeaders("POST", s"/guide/channels/$channelId/watch", Some(watchBody), authContext)
 
           val tunerCheckFuture = fetchServerInfo().map { tuners =>
-            val available = tuners - activeStreams
+            val available = tuners - activeStreams.get()
             log.info(s"[4thgen-channel] available tuners - $available/$tuners")
             available > 0
           }
@@ -803,39 +805,21 @@ object Tablo4thGen {
             }
           }
 
-          def stream(playlistUrl: String): Source[ByteString, ?] = Source.lazySource { () =>
-            activeStreams += 1
-            log.info(s"[4thgen-channel] active streams: $activeStreams")
-
-            val ffmpegCmd = Array(
-              "ffmpeg"
-            , "-i", playlistUrl
-            , "-c", "copy"
-            , "-f", "mpegts"
-            , "-v", "repeat+level+panic"
-            , "pipe:1"
-            )
-
-            val process = scala.sys.runtime.exec(ffmpegCmd)
-            log.info(s"[4thgen-channel] execute command line - ${ffmpegCmd.mkString(" ")} => spawn ${process.pid}")
-
-            import pekko.stream.scaladsl.StreamConverters
-            StreamConverters
-              .fromInputStream(() => process.getInputStream)
-              .watchTermination() { (_, done) =>
-                log.info(s"[4thgen-channel] started http stream - ffmpeg (pid ${process.pid})")
+          def streamWithTunerTracking(playlistUrl: String): Source[ByteString, ?] =
+            Source.lazySource { () =>
+              val n = activeStreams.incrementAndGet()
+              log.info(s"[4thgen-channel] active streams: $n")
+              StreamBackend().stream(playlistUrl).watchTermination() { (_, done) =>
                 done.onComplete {
                   case Success(_) =>
-                    activeStreams -= 1
-                    log.info(s"[4thgen-channel] terminating ffmpeg (kill pid ${process.pid}), active streams: $activeStreams")
-                    process.destroy()
+                    val m = activeStreams.decrementAndGet()
+                    log.info(s"[4thgen-channel] stream ended, active streams: $m")
                   case Failure(ex) =>
-                    activeStreams -= 1
-                    log.info(s"[4thgen-channel] stream failed: ${ex.getMessage} (kill pid ${process.pid}), active streams: $activeStreams")
-                    process.destroy()
+                    val m = activeStreams.decrementAndGet()
+                    log.info(s"[4thgen-channel] stream failed: ${ex.getMessage}, active streams: $m")
                 }
               }
-          }
+            }
 
           onComplete(watchFuture) {
             case Success(data) =>
@@ -843,7 +827,7 @@ object Tablo4thGen {
                 case Some(url) =>
                   log.info(s"[4thgen-channel] tuned to channel - playlist: $url")
                   val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-                  complete(HttpEntity.Chunked.fromData(pekko.http.scaladsl.model.ContentType(`video/mp2t`), stream(url)))
+                  complete(HttpEntity.Chunked.fromData(pekko.http.scaladsl.model.ContentType(`video/mp2t`), streamWithTunerTracking(url)))
                 case None =>
                   log.info(s"[4thgen-channel] no playlist URL in response")
                   complete(HttpResponse(StatusCodes.InternalServerError, entity = "No playlist URL returned"))

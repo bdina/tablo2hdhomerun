@@ -37,10 +37,12 @@ object Dependencies {
   val devNull = ProcessLogger(_ => {}, _ => {})
 
   def verify() = {
-    val ffmpegCheck = Try { "ffmpeg -version".!<(devNull) }.getOrElse(-1)
-    if (ffmpegCheck != 0) {
-      log.info("[dependencies] missing dependency -> ffmpeg (check installation)")
-      System.exit(1)
+    if (Tablo2HDHomeRun.STREAM_BACKEND != "hls") {
+      val ffmpegCheck = Try { "ffmpeg -version".!<(devNull) }.getOrElse(-1)
+      if (ffmpegCheck != 0) {
+        log.info("[dependencies] missing dependency -> ffmpeg (check installation)")
+        System.exit(1)
+      }
     }
   }
 }
@@ -117,6 +119,7 @@ object Tablo2HDHomeRun {
   val TABLO_EMAIL = scala.sys.env.get("TABLO_EMAIL")
   val TABLO_PASSWORD = scala.sys.env.get("TABLO_PASSWORD")
   val TABLO_DEVICE_NAME = scala.sys.env.get("TABLO_DEVICE_NAME")
+  val STREAM_BACKEND = scala.sys.env.getOrElse("STREAM_BACKEND", "ffmpeg")
 
   import Response.Discover
   val discoverFriendlyName = TABLO_GEN match {

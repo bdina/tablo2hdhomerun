@@ -12,8 +12,7 @@ import pekko.http.scaladsl.marshalling.Marshal
 import pekko.http.scaladsl.model._
 import pekko.http.scaladsl.server.Directives._
 import pekko.http.scaladsl.unmarshalling.Unmarshal
-import pekko.stream.scaladsl.{Source, StreamConverters}
-import pekko.util.ByteString
+import pekko.stream.scaladsl.Source
 
 import org.slf4j.LoggerFactory
 
@@ -26,6 +25,7 @@ import spray.json._
 import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
+import app.stream.StreamBackend
 
 object TabloLegacy {
   val log = Tablo2HDHomeRun.log
@@ -864,39 +864,11 @@ object TabloLegacy {
               }
             }
 
-            def stream(playlist_url: Uri): Source[ByteString, ?] = Source.lazySource { () =>
-              val ffmpegCmd = Array(
-                "ffmpeg"
-              , "-i", playlist_url.toString
-              , "-c", "copy"
-              , "-f", "mpegts"
-              , "-v", "repeat+level+panic"
-              , "pipe:1"
-              )
-
-              val process = sys.runtime.exec(ffmpegCmd)
-              log.info(s"[channel] execute command line - ${ffmpegCmd.mkString(" ")} => spawn ${process.pid}")
-
-              StreamConverters
-                .fromInputStream(() => process.getInputStream) // stream the stdout of ffmpeg
-                .watchTermination() { (_, done) =>
-                  log.info(s"[channel] started http stream - ffmpeg (pid ${process.pid})")
-                  done.onComplete {
-                    case Success(_) =>
-                      log.info(s"[channel] terminating ffmpeg (kill pid ${process.pid})")
-                      process.destroy()
-                    case Failure(ex) =>
-                      log.info(s"[channel] stream failed: ${ex.getMessage} (kill pid ${process.pid})")
-                      process.destroy()
-                  }
-                }
-            }
-
             onComplete (watchFuture) {
               case Success(data) =>
                 log.info(s"[channel] tuned to channel - $data")
                 val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-                complete(HttpEntity.Chunked.fromData(ContentType(`video/mp2t`), stream(data.playlist_url)))
+                complete(HttpEntity.Chunked.fromData(ContentType(`video/mp2t`), StreamBackend().stream(data.playlist_url.toString)))
               case Failure(ex) =>
                 log.info(s"[channel] failed to start stream - ${ex.getMessage}")
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))

@@ -154,6 +154,7 @@ compileScala {
       , '-language:noAutoTupling'
 //      , '-language:strictEquality'
       , '-Werror'
+      , '-Wconf:msg=Implicit parameters should be provided with a `using` clause:s'  // project-wide; new code may use `using`
       , '-Wnonunit-statement'
       , '-Wsafe-init'
       , '-Wunused:all'

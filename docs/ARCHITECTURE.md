@@ -33,8 +33,8 @@ Tablo2HDHomeRun is an HTTP proxy server that exposes a TabloTV DVR device as an 
 │  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────────────┐ │
 │  │   HTTP Routes   │  │   Actor System   │  │   Stream Processing         │ │
 │  │  ─────────────  │  │  ──────────────  │  │  ─────────────────────────  │ │
-│  │  /discover.json │  │  LineupActor     │  │  FFmpeg subprocess          │ │
-│  │  /lineup.json   │  │  GuideActor      │  │  MPEG-TS transcoding        │ │
+│  │  /discover.json │  │  LineupActor     │  │  FFmpeg or HLS backend     │ │
+│  │  /lineup.json   │  │  GuideActor      │  │  (STREAM_BACKEND env)      │ │
 │  │  /lineup_status │  │  FsMonitor       │  │  Chunked HTTP streaming     │ │
 │  │  /channel/{id}  │  │  FsNotify        │  │                             │ │
 │  │  /guide.xml     │  │  FFMpegDelegate  │  │                             │ │
@@ -97,10 +97,15 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 
 ### Stream Processing Pipeline
 
+The live channel stream can use one of two backends, selected by `STREAM_BACKEND`:
+
+- **ffmpeg** (default): Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH.
+- **hls**: Fetches M3U8 playlists and TS segments directly via HTTP; no external process. No FFmpeg required.
+
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Tablo Device    │────▶│  HLS Playlist    │────▶│  FFmpeg Process  │
-│  /watch endpoint │     │  (M3U8 stream)   │     │  (-c copy)       │
+│  Tablo Device    │────▶│  HLS Playlist    │────▶│  Stream Backend  │
+│  /watch endpoint │     │  (M3U8 stream)   │     │  (ffmpeg or hls)  │
 └──────────────────┘     └──────────────────┘     └──────────────────┘
                                                            │
                                                            ▼
@@ -135,10 +140,9 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 3. If tuner available:
    a. POST /guide/channels/{id}/watch to Tablo
    b. Receive watch response with HLS playlist URL
-   c. Spawn FFmpeg subprocess:
-      ffmpeg -i {playlist_url} -c copy -f mpegts pipe:1
-   d. Stream FFmpeg stdout as chunked HTTP response
-   e. On client disconnect, destroy FFmpeg process
+   c. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
+   d. Stream output as chunked HTTP response
+   e. On client disconnect, clean up backend resources
 4. If no tuners: return 500 error
 ```
 
@@ -177,6 +181,7 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 |----------|---------|-------------|
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
+| `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### Fixed Configuration
@@ -227,7 +232,13 @@ tablo2hdhomerun/
 │           └── ScalaNative.groovy    # Scala native support
 ├── src/main/
 │   ├── scala/app/
-│   │   └── Tablo2HDHomeRun.scala     # Main application
+│   │   ├── Tablo2HDHomeRun.scala     # Main application
+│   │   ├── stream/                    # Stream backends
+│   │   │   ├── StreamBackend.scala   # Trait and factory
+│   │   │   ├── FFmpegBackend.scala   # FFmpeg subprocess backend
+│   │   │   ├── HlsBackend.scala      # HLS-native backend
+│   │   │   └── M3U8.scala            # M3U8 playlist parser
+│   │   └── tuner/                     # Tablo legacy/4th gen
 │   └── resources/META-INF/
 │       └── native-image/             # GraalVM configuration
 │           └── reachability-metadata.json

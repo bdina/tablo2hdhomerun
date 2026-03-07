@@ -3,7 +3,7 @@
 ## Prerequisites
 
 1. **Tablo DVR** - A networked Tablo device (Legacy or 4th Generation) with an active antenna connection
-2. **FFmpeg** - Must be installed and available in PATH
+2. **FFmpeg** - Required when using default stream backend (`STREAM_BACKEND=ffmpeg`). Optional when `STREAM_BACKEND=hls`
 3. **Java 24** (JVM mode) or GraalVM CE (native image)
 4. **Network access** between proxy host and Tablo device
 5. **Tablo Account** (4th Gen only) - Email and password for Lighthouse cloud authentication
@@ -151,6 +151,7 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 | `TABLO_GEN` | `legacy` | Tablo generation: `legacy` or `4thgen` |
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
+| `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### 4th Generation Variables
@@ -264,7 +265,7 @@ docker run -d \
 ### Stream Won't Start
 
 1. Check tuner availability: `curl http://<tablo-ip>:8885/server/tuners`
-2. Verify FFmpeg is installed: `ffmpeg -version`
+2. If using default backend: verify FFmpeg is installed (`ffmpeg -version`). Or set `STREAM_BACKEND=hls` to use the HLS-native backend (no FFmpeg)
 3. Check for concurrent recording conflicts
 
 ### Container Issues

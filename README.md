@@ -17,7 +17,7 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 
 - Java 24 and Scala 3.7.4 (JVM mode)
 - GraalVM CE 24 (native image mode)
-- FFmpeg (required for streaming)
+- FFmpeg (required for streaming when using default backend; optional when `STREAM_BACKEND=hls`)
 - Network access to TabloTV device
 
 ## Quick Start
@@ -76,6 +76,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 |---------------------|---------|-------------|
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR |
 | `PROXY_IP` | `127.0.0.1` | IP address for proxy to bind |
+| `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 
 ## API Endpoints
