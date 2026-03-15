@@ -7,6 +7,7 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 ## Features
 
 - HDHomeRun device emulation for TabloTV
+- 4th Generation Tablo support (Tablo account / Lighthouse auth)
 - Live TV streaming via MPEG-TS
 - XMLTV program guide generation
 - Channel lineup in HDHomeRun format
@@ -15,8 +16,8 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 
 ## Requirements
 
-- Java 24 and Scala 3.7.4 (JVM mode)
-- GraalVM CE 24 (native image mode)
+- Java 11+ and Scala 3.8.1 (JVM mode)
+- GraalVM CE (native image mode; Docker uses GraalVM CE 25)
 - FFmpeg (required for streaming when using default backend; optional when `STREAM_BACKEND=hls`)
 - Network access to TabloTV device
 
@@ -29,6 +30,8 @@ export TABLO_IP=192.168.1.100    # Your Tablo device IP
 export PROXY_IP=0.0.0.0          # Bind to all interfaces
 ./tablo2hdhomerun -d
 ```
+
+For 4th Generation Tablo set `TABLO_GEN=4thgen` and `TABLO_EMAIL` / `TABLO_PASSWORD`; see [Usage Guide](docs/USAGE.md).
 
 ### Using Docker
 
@@ -43,6 +46,8 @@ docker run -d \
 ```
 
 ## Building
+
+Use `gradle` or `./gradlew` if using the Gradle wrapper.
 
 ### Create Shadow JAR
 
@@ -75,6 +80,10 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR |
+| `TABLO_GEN` | `legacy` | Tablo generation: `legacy` or `4thgen` |
+| `TABLO_EMAIL` | (none) | Tablo account email (required for 4th Gen) |
+| `TABLO_PASSWORD` | (none) | Tablo account password (required for 4th Gen) |
+| `TABLO_DEVICE_NAME` | (none) | Optional filter for 4th Gen device by name |
 | `PROXY_IP` | `127.0.0.1` | IP address for proxy to bind |
 | `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
@@ -94,6 +103,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 - [Architecture Guide](docs/ARCHITECTURE.md) - System design, components, and data flows
 - [Usage Guide](docs/USAGE.md) - Deployment, configuration, and troubleshooting
 - [OpenAPI: Legacy Tablo API](docs/openapi/tablo-legacy.yaml) - Legacy Tablo TV device native API specification
+- [OpenAPI: Tablo 4th Gen API](docs/openapi/tablo-4thgen.yaml) - Tablo 4th Generation device API specification
 - [OpenAPI: HDHomeRun API](docs/openapi/hdhomerun.yaml) - HDHomeRun-compatible proxy API specification
 
 ## Integration
