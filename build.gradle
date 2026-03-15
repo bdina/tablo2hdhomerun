@@ -47,6 +47,26 @@ dependencies {
 
     testImplementation group: 'junit', name: 'junit', version: '4.13.2'
     testImplementation group: 'org.scalatestplus', name: "junit-4-13_${scala_maj}", version: "${scala_test}.0"
+
+    testImplementation group: 'org.apache.pekko', name: "pekko-actor-testkit-typed_${scala_maj}", version: pekko_core
+    testImplementation group: 'org.apache.pekko', name: "pekko-stream-testkit_${scala_maj}", version: pekko_core
+    testImplementation group: 'org.apache.pekko', name: "pekko-http-testkit_${scala_maj}", version: pekko_http
+}
+
+test {
+  useJUnit()
+  testLogging {
+    events "passed", "skipped", "failed"
+    showStandardStreams = false
+    exceptionFormat "full"
+  }
+  afterSuite { desc, result ->
+    if (desc.parent == null) {
+      println "\nTest result: ${result.resultType}"
+      println "Tests: ${result.testCount}, succeeded: ${result.successfulTestCount}, failed: ${result.failedTestCount}, skipped: ${result.skippedTestCount}"
+      println "Time: ${(result.endTime - result.startTime) / 1000.0} s"
+    }
+  }
 }
 
 version gitVersion()
@@ -145,21 +165,32 @@ scalaCli {
     maxHeap 8
 }
 
-compileScala {
-    scalaCompileOptions.deprecation = true
-    scalaCompileOptions.additionalParameters = [
-        '-feature'
-      , '-no-indent'
-      , '-explain'
-      , '-language:noAutoTupling'
-//      , '-language:strictEquality'
-      , '-Werror'
-      , '-Wconf:msg=Implicit parameters should be provided with a `using` clause:s'  // project-wide; new code may use `using`
-      , '-Wnonunit-statement'
-      , '-Wsafe-init'
-      , '-Wunused:all'
-      , '-Wvalue-discard'
-//      , '-Yexplicit-nulls'
-      , "-Xunchecked-java-output-version:17"
-    ]
+def javaOutputVersion = {
+  def v = JavaVersion.current()
+  if (v.isCompatibleWith(JavaVersion.VERSION_17)) return 17
+  if (v.isCompatibleWith(JavaVersion.VERSION_11)) return 11
+  return 11
+}()
+
+def scalaCompilerParams = [
+    '-feature'
+  , '-no-indent'
+  , '-explain'
+  , '-language:noAutoTupling'
+  , '-Werror'
+  , '-Wconf:msg=Implicit parameters should be provided with a `using` clause:s'
+  , '-Wnonunit-statement'
+  , '-Wsafe-init'
+  , '-Wunused:all'
+  , '-Wvalue-discard'
+  , "-Xunchecked-java-output-version:${javaOutputVersion}".toString()
+]
+
+tasks.withType(org.gradle.api.tasks.scala.ScalaCompile).configureEach {
+  scalaCompileOptions.deprecation = true
+  scalaCompileOptions.additionalParameters = scalaCompilerParams
+}
+tasks.named('compileTestScala').configure {
+  def testParams = scalaCompilerParams.collect { it == '-Werror' ? '-Wconf:any:w' : it }
+  scalaCompileOptions.additionalParameters = testParams
 }

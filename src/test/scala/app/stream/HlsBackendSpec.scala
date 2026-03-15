@@ -1,8 +1,11 @@
 package app.stream
 
+import org.junit.runner.RunWith
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class HlsBackendSpec extends AnyFlatSpec with Matchers {
 
   "HlsBackend" should "have name hls" in {

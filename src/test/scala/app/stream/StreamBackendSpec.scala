@@ -1,8 +1,11 @@
 package app.stream
 
+import org.junit.runner.RunWith
 import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class StreamBackendSpec extends AnyFlatSpec with Matchers {
 
   "StreamBackend.apply()" should "return a StreamBackend instance" in {
@@ -11,13 +14,13 @@ class StreamBackendSpec extends AnyFlatSpec with Matchers {
 
   "StreamBackend.apply(backendName)" should "return FFmpegBackend for ffmpeg" in {
     val backend = StreamBackend("ffmpeg")
-    backend.eq(FFmpegBackend) shouldBe true
+    val _ = backend.eq(FFmpegBackend) shouldBe true
     backend.name shouldBe "ffmpeg"
   }
 
   it should "return HlsBackend for hls" in {
     val backend = StreamBackend("hls")
-    backend.eq(HlsBackend) shouldBe true
+    val _ = backend.eq(HlsBackend) shouldBe true
     backend.name shouldBe "hls"
   }
 
