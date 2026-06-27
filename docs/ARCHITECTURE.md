@@ -99,16 +99,18 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 
 The live channel stream can use one of two backends, selected by `STREAM_BACKEND`:
 
-- **ffmpeg** (default): Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH.
-- **hls**: Fetches M3U8 playlists and TS segments directly via HTTP; no external process. No FFmpeg required.
+- **ffmpeg** (default): Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH. Includes reconnect and error-detect flags to survive transient stream drops.
+- **hls**: Fetches M3U8 playlists and TS segments directly via HTTP; no external process. Includes retry logic for segment fetches.
+
+The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a robust Pekko Streams `Flow`. If the stream backend fails or the connection to the Tablo drops, this wrapper automatically injects MPEG-TS null packets (PID 0x1FFF) to keep the HTTP chunked transfer alive, preventing downstream players like Plex from disconnecting. It also implements an `idleTimeout` and `RestartSource.withBackoff` to retry connection to the backend and enforce a maximum outage gap.
 
 ```
-┌──────────────────┐     ┌──────────────────┐     ┌──────────────────┐
-│  Tablo Device    │────▶│  HLS Playlist    │────▶│  Stream Backend  │
-│  /watch endpoint │     │  (M3U8 stream)   │     │  (ffmpeg or hls)  │
-└──────────────────┘     └──────────────────┘     └──────────────────┘
-                                                           │
-                                                           ▼
+┌──────────────────┐     ┌──────────────────┐     ┌────────────────────────┐
+│  Tablo Device    │────▶│  Stream Backend  │────▶│ ResilientHlsSource │
+│  /watch endpoint │     │  (ffmpeg or hls) │     │ (Padding & Retry Flow) │
+└──────────────────┘     └──────────────────┘     └────────────────────────┘
+                                                            │
+                                                            ▼
                                                   ┌──────────────────┐
                                                   │  MPEG-TS Output  │
                                                   │  (Chunked HTTP)  │

@@ -837,6 +837,7 @@ object TabloLegacy {
         path("channel" / LongNumber) { channelId =>
           get {
             import Response.JsonProtocol._
+            import app.stream.ResilientHlsSource
 
             val streamId = java.util.UUID.randomUUID.toString.take(8)
 
@@ -852,25 +853,71 @@ object TabloLegacy {
                 Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[Response.Tuners]])
               }
 
-            val watchFuture: Future[Response.WatchResponse] = tunersFuture.flatMap { tuners =>
-              val available = tuners.filterNot(_.in_use).size
-              log.debug("[channel] tuners available={} total={}", available, tuners.size)
-              if (available > 0) {
-                HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
-                  log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
-                  Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
-                }
-              } else {
-                log.warn("[channel] no tuners available total={}", tuners.size)
-                Future.failed(Response.NoAvailableTunersError)
+            def watchChannel(): Future[Response.WatchResponse] = {
+              HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
+                log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
+                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
               }
             }
 
-            onComplete (watchFuture) {
+            def startWatchSession(checkTuners: Boolean): Future[Response.WatchResponse] = {
+              val availableFuture =
+                if (checkTuners) {
+                  tunersFuture.map { tuners =>
+                    val available = tuners.filterNot(_.in_use).size
+                    log.info(s"[channel] available tuners - $available")
+                    if (available > 0) {
+                      true
+                    } else {
+                      log.info(s"[channel] no available tuners (0/${tuners.size})")
+                      false
+                    }
+                  }
+                } else {
+                  Future.successful(true)
+                }
+              availableFuture.flatMap { available =>
+                if (available) {
+                  watchChannel()
+                } else {
+                  Future.failed(Response.NoAvailableTunersError)
+                }
+              }
+            }
+
+            def streamWithResilience(firstPlaylistUrl: String) =
+              Source.lazySource { () =>
+                var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
+                def streamFactory() = {
+                  nextPlaylistUrl match {
+                    case Some(url) =>
+                      nextPlaylistUrl = None
+                      StreamBackend().stream(url)
+                    case None =>
+                      Source.futureSource(
+                        startWatchSession(checkTuners = false).map { data =>
+                          log.info(s"[channel] recovered tune - playlist: ${data.playlist_url}")
+                          StreamBackend().stream(data.playlist_url.toString)
+                        }
+                      )
+                  }
+                }
+                ResilientHlsSource(
+                  streamFactory = () => streamFactory(),
+                  streamName = s"legacy-channel-$channelId"
+                )
+              }
+
+            onComplete(startWatchSession(checkTuners = true)) {
               case Success(data) =>
                 log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, data.playlist_url)
                 val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-                complete(HttpEntity.Chunked.fromData(ContentType(`video/mp2t`), StreamBackend().stream(data.playlist_url.toString)))
+                complete(
+                  HttpEntity.Chunked.fromData(
+                    ContentType(`video/mp2t`),
+                    streamWithResilience(data.playlist_url.toString)
+                  )
+                )
               case Failure(ex) =>
                 log.warn("[channel] stream start failed streamId={} channelId={}", streamId, channelId, ex)
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))

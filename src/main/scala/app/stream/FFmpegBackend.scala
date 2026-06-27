@@ -19,10 +19,15 @@ object FFmpegBackend extends StreamBackend {
     Source.lazySource { () =>
       val ffmpegCmd = Array(
         "ffmpeg"
+      , "-reconnect", "1"
+      , "-reconnect_streamed", "1"
+      , "-reconnect_delay_max", "10"
+      , "-err_detect", "ignore_err"
       , "-i", playlistUrl
       , "-c", "copy"
       , "-f", "mpegts"
-      , "-v", "repeat+level+panic"
+      , "-mpegts_flags", "+initial_discontinuity"
+      , "-v", "warning"
       , "pipe:1"
       )
       val process = scala.sys.runtime.exec(ffmpegCmd)

@@ -47,19 +47,37 @@ object HlsBackend extends StreamBackend {
         }
       }
     def fetchSegmentSource(url: String, byteRange: Option[(Long, Long)]): Source[ByteString, ?] = {
-      val request = byteRange match {
-        case Some((offset, length)) => HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
-        case None => HttpRequest(uri = url)
+      val maxSegmentRetries = 3
+      val segmentRetryDelay = 500.millis
+      val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
+      def retryAfter(retriesLeft: Int, message: String, nextSource: => Source[ByteString, ?]): Source[ByteString, ?] = {
+        log.warn(s"[stream:hls] $message, retries left: $retriesLeft")
+        Source
+          .futureSource(after(segmentRetryDelay, scheduler)(Future.successful(nextSource)))
+          .mapMaterializedValue(_ => pekko.NotUsed)
       }
-      Source.futureSource(
-        http.singleRequest(request).map { response =>
-          if (response.status.isSuccess()) response.entity.dataBytes
-          else {
-            val _ = response.entity.discardBytes()
-            Source.failed(HlsError.SegmentFetchError(response.status))
-          }
+      def attemptFetch(retriesLeft: Int): Source[ByteString, ?] = {
+        val request = byteRange match {
+          case Some((offset, length)) => HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
+          case None => HttpRequest(uri = url)
         }
-      ).mapMaterializedValue(_ => pekko.NotUsed)
+        Source.futureSource(
+          http.singleRequest(request).map { response =>
+            if (response.status.isSuccess()) response.entity.dataBytes
+            else {
+              val _ = response.entity.discardBytes()
+              if (retriesLeft > 0) {
+                retryAfter(retriesLeft, s"segment fetch failed (${response.status})", attemptFetch(retriesLeft - 1))
+              } else {
+                Source.failed(HlsError.SegmentFetchError(response.status))
+              }
+            }
+          }.recover { case ex if retriesLeft > 0 =>
+            retryAfter(retriesLeft, s"segment fetch error: ${ex.getMessage}", attemptFetch(retriesLeft - 1))
+          }
+        ).mapMaterializedValue(_ => pekko.NotUsed)
+      }
+      attemptFetch(maxSegmentRetries)
     }
     def resolveMediaPlaylistUrl(url: String)(implicit mat: pekko.stream.Materializer): Future[String] =
       fetchPlaylistBody(url).flatMap { body =>
@@ -94,7 +112,7 @@ object HlsBackend extends StreamBackend {
           }
         }
       }
-    val maxConsecutiveFailures = 10
+    val maxConsecutiveFailures = 60
     type SegmentInfo = (String, Option[(Long, Long)])
     type State = (String, Int, Boolean, Int, Int, Boolean)
     def pollIntervalSecFromTarget(targetSec: Int): Int = (targetSec / 2).max(1)
@@ -131,7 +149,8 @@ object HlsBackend extends StreamBackend {
           }
         }
         val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
-        val delaySec = if (lastSeq == 0) 0 else pollIntervalSecFromTarget(if (lastTargetDuration > 0) lastTargetDuration else defaultPollSec)
+        val pollTarget = if (lastTargetDuration > 0) lastTargetDuration else defaultPollSec
+        val delaySec = if (lastSeq == 0) 0 else pollIntervalSecFromTarget(pollTarget)
         if (delaySec <= 0) {
           doFetch()
         } else {

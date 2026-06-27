@@ -148,6 +148,8 @@ object Tablo2HDHomeRun {
   val TABLO_PASSWORD = scala.sys.env.get("TABLO_PASSWORD")
   val TABLO_DEVICE_NAME = scala.sys.env.get("TABLO_DEVICE_NAME")
   val STREAM_BACKEND = scala.sys.env.getOrElse("STREAM_BACKEND", "ffmpeg")
+  val STREAM_MAX_GAP_SEC = scala.sys.env.get("STREAM_MAX_GAP_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
+  val STREAM_RETRY_DELAY_SEC = scala.sys.env.get("STREAM_RETRY_DELAY_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(5)
 
   import Response.Discover
   val discoverFriendlyName = TABLO_GEN match {

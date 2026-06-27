@@ -152,6 +152,8 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
+| `STREAM_MAX_GAP_SEC` | `60` | Maximum gap (in seconds) to inject null packets when stream is dropped |
+| `STREAM_RETRY_DELAY_SEC` | `5` | Reconnection attempt delay (in seconds) |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### 4th Generation Variables

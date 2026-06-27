@@ -777,7 +777,6 @@ object Tablo4thGen {
           val watchUri = authContext.deviceUrl.withPath(Uri.Path(s"/guide/channels/$channelId/watch")).withQuery(Uri.Query("lh" -> "1"))
           val deviceId = java.util.UUID.randomUUID.toString
           val watchBody = Request.Watch4thGenRequest(device_id = deviceId, bandwidth = None, platform = "ios").toJson.compactPrint
-          val headers = Hmac.signedHeaders("POST", s"/guide/channels/$channelId/watch", Some(watchBody), authContext)
 
           val tunerCheckFuture = fetchServerInfo().map { tuners =>
             val available = tuners - activeStreams.get()
@@ -785,33 +784,67 @@ object Tablo4thGen {
             available > 0
           }
 
-          val watchFuture: Future[Response.Watch4thGenResponse] = tunerCheckFuture.flatMap { available =>
-            if (available) {
-              log.debug("[channel] http POST /guide/channels/{}/watch streamId={}", channelId, streamId)
-              val request = HttpRequest(
-                method = HttpMethods.POST
-              , uri = watchUri
-              , headers = headers.toList
-              , entity = HttpEntity(ContentTypes.`application/json`, watchBody)
-              )
-              HttpCtx.singleRequest(request).flatMap { response =>
-                log.debug("[channel] watch status={} streamId={}", response.status.intValue(), streamId)
-                Unmarshal(response.entity).to[String].map { body =>
-                  log.debug("[channel] watch body={} streamId={}", LogConfig.truncate(body), streamId)
-                  body.parseJson.convertTo[Response.Watch4thGenResponse]
-                }
+          def watchChannel(): Future[Response.Watch4thGenResponse] = {
+            val headers =
+              Hmac.signedHeaders("POST", s"/guide/channels/$channelId/watch", Some(watchBody), authContext)
+            val request = HttpRequest(
+              method = HttpMethods.POST
+            , uri = watchUri
+            , headers = headers.toList
+            , entity = HttpEntity(ContentTypes.`application/json`, watchBody)
+            )
+            HttpCtx.singleRequest(request).flatMap { response =>
+              log.debug("[channel] watch status={} streamId={}", response.status.intValue(), streamId)
+              Unmarshal(response.entity).to[String].map { body =>
+                log.debug("[channel] watch body={} streamId={}", LogConfig.truncate(body), streamId)
+                body.parseJson.convertTo[Response.Watch4thGenResponse]
               }
-            } else {
-              log.warn("[channel] no tuners available streamId={}", streamId)
-              Future.failed(Error.NoAvailableTuners)
             }
           }
 
-          def streamWithTunerTracking(playlistUrl: String): Source[ByteString, ?] =
+          def startWatchSession(checkAvailability: Boolean): Future[Response.Watch4thGenResponse] = {
+            val availableFuture = if (checkAvailability) tunerCheckFuture else Future.successful(true)
+            availableFuture.flatMap { available =>
+              if (available) {
+                log.info(s"[4thgen-channel] guide/channels/$channelId/watch (POST) - $watchUri")
+                watchChannel()
+              } else {
+                log.info(s"[4thgen-channel] no available tuners")
+                Future.failed(Error.NoAvailableTuners)
+              }
+            }
+          }
+
+          import app.stream.ResilientHlsSource
+
+          def streamFromWatchResponse(data: Response.Watch4thGenResponse): Source[ByteString, ?] = {
+            data.playlist_url match {
+              case Some(url) =>
+                log.info(s"[4thgen-channel] recovered tune - playlist: $url")
+                StreamBackend().stream(url)
+              case None =>
+                Source.failed[ByteString](new RuntimeException("No playlist URL returned"))
+            }
+          }
+
+          def streamWithTunerTracking(firstPlaylistUrl: String): Source[ByteString, ?] =
             Source.lazySource { () =>
+              var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
+              def streamFactory(): Source[ByteString, ?] = {
+                nextPlaylistUrl match {
+                  case Some(url) =>
+                    nextPlaylistUrl = None
+                    StreamBackend().stream(url)
+                  case None =>
+                    Source.futureSource(startWatchSession(checkAvailability = false).map(streamFromWatchResponse))
+                }
+              }
               val n = activeStreams.incrementAndGet()
               log.info("[channel] stream start streamId={} channelId={} active={}", streamId, channelId, n)
-              StreamBackend().stream(playlistUrl).watchTermination() { (_, done) =>
+              ResilientHlsSource(
+                streamFactory = () => streamFactory()
+              , streamName = s"4thgen-channel-$channelId"
+              ).watchTermination() { (_, done) =>
                 done.onComplete {
                   case Success(_) =>
                     val m = activeStreams.decrementAndGet()
@@ -823,13 +856,18 @@ object Tablo4thGen {
               }
             }
 
-          onComplete(watchFuture) {
+          onComplete(startWatchSession(checkAvailability = true)) {
             case Success(data) =>
               data.playlist_url match {
                 case Some(url) =>
                   log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, url)
                   val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-                  complete(HttpEntity.Chunked.fromData(pekko.http.scaladsl.model.ContentType(`video/mp2t`), streamWithTunerTracking(url)))
+                  complete(
+                    HttpEntity.Chunked.fromData(
+                      pekko.http.scaladsl.model.ContentType(`video/mp2t`),
+                      streamWithTunerTracking(url)
+                    )
+                  )
                 case None =>
                   log.warn("[channel] no playlist streamId={} channelId={}", streamId, channelId)
                   complete(HttpResponse(StatusCodes.InternalServerError, entity = "No playlist URL returned"))
