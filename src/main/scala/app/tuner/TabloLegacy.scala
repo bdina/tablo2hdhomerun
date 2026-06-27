@@ -26,6 +26,7 @@ import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
 import app.stream.StreamBackend
+import app.sys.LogConfig
 
 object TabloLegacy {
   val log = Tablo2HDHomeRun.log
@@ -94,7 +95,7 @@ object TabloLegacy {
             get {
               import Discover.JsonProtocol.discoverFormat
               val response = Tablo2HDHomeRun.discover.toJson
-              log.info(s"[discover] discover.json (GET) - $response")
+              log.debug("[discover] served")
               complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
             }
           }
@@ -195,7 +196,7 @@ object TabloLegacy {
             HttpCtx
               .singleRequest(Proxy.Request.httpRequest)
               .flatMap { response =>
-                log.info(s"[lineup-actor] guide/channels (GET) - $response")
+                log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
                 Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
               }
               .flatMap { paths =>
@@ -205,17 +206,17 @@ object TabloLegacy {
                   .to[RequestEntity]
                   .flatMap { entity =>
                     HttpCtx.singleRequest(Proxy.Request.postRequest(entity)).flatMap { response =>
-                      log.info(s"[lineup-actor] batch (POST) - $response")
+                      log.debug("[lineup] http POST /batch status={}", response.status.intValue())
                       Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
                     }
                   }
               }
               .map { data =>
-                log.info(s"[lineup-actor] channels found: ${data.size}")
+                log.info("[lineup] scan complete count={}", data.size)
                 val channels =
                   data
                     .map { case (path,obj) =>
-                      log.info(s"[lineup-actor] $path => ${obj.channel.call_sign}, ${obj.channel.network.getOrElse("None")}")
+                      log.debug("[lineup] channel path={} callSign={}", path, obj.channel.call_sign)
                       Proxy.Response.ChannelObject.jsValue(obj)
                     }
                     .toSeq
@@ -229,7 +230,7 @@ object TabloLegacy {
 
           Behaviors.receiveMessage {
             case Command.Store(channels) =>
-              log.info(s"[lineup-actor] store channels: ${channels.size}")
+              log.info("[lineup] store count={}", channels.size)
 
               cache = (1.day.fromNow, channels)
               scanInProgress = false
@@ -237,20 +238,19 @@ object TabloLegacy {
               Behaviors.same
 
             case Command.Scan if scanInProgress =>
-              log.info("[lineup-actor] channel scan requested ; already in progress (suppress)")
+              log.debug("[lineup] scan already in progress")
 
               Behaviors.same
 
             case Command.Scan =>
-              log.info("[lineup-actor] channel scan requested")
-
+              log.info("[lineup] scan requested")
               scanInProgress = true
               scan() : Unit
 
               Behaviors.same
 
             case Request.Status(sender) =>
-              log.info("[lineup-actor] channel status requested")
+              log.debug("[lineup] status requested")
 
               val (scanning,possible) = if (scanInProgress) (1,0) else (0,1)
               sender ! Response.Status(scanInProgress=scanning, scanPossible=possible, replyTo=context.self)
@@ -258,7 +258,7 @@ object TabloLegacy {
               Behaviors.same
 
             case Request.Fetch(replyTo) if cache._1.isOverdue() =>
-              log.info("[lineup-actor] channel fetch")
+              log.debug("[lineup] fetch cache expired")
 
               val sender = replyTo
 
@@ -272,7 +272,7 @@ object TabloLegacy {
             case Request.Fetch(sender) =>
               val (_,channels) = cache
 
-              log.info(s"[lineup-actor] channels found: ${channels.size}")
+              log.debug("[lineup] fetch cache count={}", channels.size)
               sender ! LineupActor.Response.Fetch(channels, context.self)
 
               Behaviors.same
@@ -305,7 +305,7 @@ object TabloLegacy {
               case Success(LineupActor.Response.Fetch(channels,_)) =>
                 complete(HttpEntity(ContentTypes.`application/json`, channels.toJson.compactPrint))
               case Failure(ex) =>
-                log.info(s"[lineup] Failed: ${ex.getMessage}")
+                log.warn("[lineup] request failed", ex)
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce channel lineup"))
             }
           }
@@ -320,10 +320,10 @@ object TabloLegacy {
               case Success(LineupActor.Response.Status(scanInProgress,scanPossible,_)) =>
                 import Response.LineupStatus.JsonProtocol.lineupStatusFormat
                 val response = Response.LineupStatus(ScanInProgress=scanInProgress,ScanPossible=scanPossible).toJson
-                log.info(s"[lineup_status] lineup_status.json (GET) - $response")
+                log.debug("[lineup] lineup_status served scanInProgress={} scanPossible={}", scanInProgress, scanPossible)
                 complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
               case Failure(ex) =>
-                log.info(s"[lineup_status] Failed: ${ex.getMessage}")
+                log.warn("[lineup] lineup_status failed", ex)
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to get lineup status"))
             }
           }
@@ -532,10 +532,10 @@ object TabloLegacy {
 
           def tryEndpoint(uri: Uri): Future[Seq[Program]] = {
             HttpCtx.singleRequest(Proxy.Request.httpRequest(uri)).flatMap { response =>
-              log.info(s"[guide-actor] trying endpoint $uri - $response")
+              log.debug("[guide] http GET {} status={}", uri, response.status.intValue())
               if (response.status.isSuccess()) {
                 Unmarshal(response.entity).to[String].map { body =>
-                  log.info(s"[guide-actor] response body: $body")
+                  log.debug("[guide] response body={}", LogConfig.truncate(body))
                   Try { // try to parse as JSON array of programs
                     import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
                     body
@@ -550,19 +550,19 @@ object TabloLegacy {
                       Seq(Proxy.Response.convertToProgram(program, channelId))
                     }
                     .getOrElse {
-                      log.warn(s"[guide-actor] could not parse program data from $uri")
+                      log.warn("[guide] parse failed uri={}", uri)
                       Seq.empty
                     }
                   }
                 }
               } else {
-                log.info(s"[guide-actor] endpoint $uri returned ${response.status}")
+                log.debug("[guide] http GET {} status={}", uri, response.status.intValue())
                 Future.successful(Seq.empty)
               }
             }
             .recover {
               case ex =>
-                log.warn(s"[guide-actor] failed to fetch from $uri: ${ex.getMessage}")
+                log.warn("[guide] fetch failed uri={}", uri, ex)
                 Seq.empty
             }
           }
@@ -579,7 +579,7 @@ object TabloLegacy {
           }
           .map { programs =>
             if (programs.isEmpty) {
-              log.info(s"[guide-actor] no programs found for channel $channelId, generating fallback data")
+              log.debug("[guide] fallback programs channelId={}", channelId)
               generateFallbackPrograms(channelId, "Unknown")
             } else {
               programs
@@ -591,7 +591,7 @@ object TabloLegacy {
           // First get the list of channels
           val channelsUri = Proxy.Request.baseUrl.withPath(Uri.Path("/guide/channels"))
           HttpCtx.singleRequest(Proxy.Request.httpRequest(channelsUri)).flatMap { response =>
-            log.info(s"[guide-actor] guide/channels (GET) - $response")
+            log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
             if (response.status.isSuccess()) {
               Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]]).flatMap { paths =>
                 import Lineup.JsonProtocol._
@@ -606,12 +606,12 @@ object TabloLegacy {
                       entity = entity.withContentType(ContentTypes.`application/json`)
                     )
                     HttpCtx.singleRequest(batchRequest).flatMap { batchResponse =>
-                      log.info(s"[guide-actor] batch (POST) - $batchResponse")
+                      log.debug("[guide] http POST /batch status={}", batchResponse.status.intValue())
                       Unmarshal(batchResponse.entity).to[String].map(_.parseJson.convertTo[Map[String, Lineup.ChannelObject]])
                     }
                   }
               }.flatMap { channelData =>
-                log.info(s"[guide-actor] channels found: ${channelData.size}")
+                log.info("[guide] scan channels count={}", channelData.size)
 
                 // fetch programs for each channel
                 val channelFutures = channelData.map { case (_, channelObj) =>
@@ -629,13 +629,13 @@ object TabloLegacy {
                 Future.sequence(channelFutures.toSeq)
               }
             } else {
-              log.warn(s"[guide-actor] failed to get channels: ${response.status}")
+              log.warn("[guide] channels fetch failed status={}", response.status.intValue())
               Future.successful(Seq.empty)
             }
           }
           .recover {
             case ex =>
-              log.error(s"[guide-actor] scan failed: ${ex.getMessage}")
+              log.error("[guide] scan failed", ex)
               Seq.empty
           }
         }
@@ -644,17 +644,17 @@ object TabloLegacy {
 
         Behaviors.receiveMessage {
           case Command.StoreGuide(guide) =>
-            log.info(s"[guide-actor] store guide: ${guide.size} channels")
+            log.info("[guide] store count={}", guide.size)
             cache = (1.hour.fromNow, guide)
             scanInProgress = false
             Behaviors.same
 
           case Command.Scan if scanInProgress =>
-            log.info("[guide-actor] guide scan requested ; already in progress (suppress)")
+            log.debug("[guide] scan already in progress")
             Behaviors.same
 
           case Command.Scan =>
-            log.info("[guide-actor] guide scan requested")
+            log.info("[guide] scan requested")
             scanInProgress = true
             scan().foreach { guide =>
               context.self ! Command.StoreGuide(guide)
@@ -662,7 +662,7 @@ object TabloLegacy {
             Behaviors.same
 
           case Request.FetchGuide(replyTo) if cache._1.isOverdue() =>
-            log.info("[guide-actor] guide fetch - cache expired")
+            log.debug("[guide] fetch cache expired")
             scanInProgress = true
             scan().foreach { guide =>
               replyTo ! Response.FetchGuide(guide, context.self)
@@ -671,7 +671,7 @@ object TabloLegacy {
 
           case Request.FetchGuide(replyTo) =>
             val (_, guide) = cache
-            log.info(s"[guide-actor] guide fetch from cache: ${guide.size} channels")
+            log.debug("[guide] fetch cache count={}", guide.size)
             replyTo ! Response.FetchGuide(guide, context.self)
             Behaviors.same
 
@@ -755,7 +755,7 @@ object TabloLegacy {
 
             onComplete(guideF) {
               case Success(GuideActor.Response.FetchGuide(guide, _)) =>
-                log.info(s"[guide] guide.xml (GET) - ${guide.size} channels")
+                log.debug("[guide] served count={}", guide.size)
 
                 // stream XML generation to avoid loading entire response in memory
                 import pekko.util.ByteString
@@ -775,7 +775,7 @@ object TabloLegacy {
 
                 complete(HttpEntity.Chunked.fromData(ContentTypes.`text/xml(UTF-8)`, xmlStream))
               case Failure(ex) =>
-                log.info(s"[guide] Failed: ${ex.getMessage}")
+                log.warn("[guide] request failed", ex)
                 val emptyGuide = <tv></tv> // return empty XMLTV format on failure
                 complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, emptyGuide.toString))
             }
@@ -838,6 +838,8 @@ object TabloLegacy {
           get {
             import Response.JsonProtocol._
 
+            val streamId = java.util.UUID.randomUUID.toString.take(8)
+
             val watchUri =
               Tablo2HDHomeRun.discover
                 .proxyAddress(Tablo2HDHomeRun.TABLO_IP,Tablo2HDHomeRun.TABLO_PORT)
@@ -846,31 +848,31 @@ object TabloLegacy {
             val tunersFuture: Future[Seq[Response.Tuners]] =
               HttpCtx.singleRequest(Request.Tuners.httpRequest).flatMap { response =>
                 import Response.Tuners.JsonProtocol.tunersFormat
-                log.info(s"[channel] server/tuners (POST) - $response")
+                log.debug("[channel] http GET /server/tuners status={}", response.status.intValue())
                 Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[Response.Tuners]])
               }
 
             val watchFuture: Future[Response.WatchResponse] = tunersFuture.flatMap { tuners =>
               val available = tuners.filterNot(_.in_use).size
-              log.info(s"[channel] available tuners - $available")
+              log.debug("[channel] tuners available={} total={}", available, tuners.size)
               if (available > 0) {
                 HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
-                  log.info(s"[channel] guide/channels/$channelId/watch (POST) - $response")
+                  log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
                   Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
                 }
               } else {
-                log.info(s"[channel] no available tuners (0/${tuners.size})")
+                log.warn("[channel] no tuners available total={}", tuners.size)
                 Future.failed(Response.NoAvailableTunersError)
               }
             }
 
             onComplete (watchFuture) {
               case Success(data) =>
-                log.info(s"[channel] tuned to channel - $data")
+                log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, data.playlist_url)
                 val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
                 complete(HttpEntity.Chunked.fromData(ContentType(`video/mp2t`), StreamBackend().stream(data.playlist_url.toString)))
               case Failure(ex) =>
-                log.info(s"[channel] failed to start stream - ${ex.getMessage}")
+                log.warn("[channel] stream start failed streamId={} channelId={}", streamId, channelId, ex)
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
             }
           }
@@ -881,7 +883,7 @@ object TabloLegacy {
       val route =
         path("favicon.ico") {
           get {
-            log.info("[favicon] favicon.ico (no-op) (GET)")
+            log.debug("[http] favicon served")
             complete(HttpEntity(ContentTypes.`text/html(UTF-8)`, ""))
           }
         }

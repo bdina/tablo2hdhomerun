@@ -57,18 +57,17 @@ object FsScan {
     case (context, message) =>
       message match {
         case Scan(root,replyTo) =>
-          context.log.info(s"[standby] scan $root (replyTo $replyTo)")
+          context.log.debug("[scan] start root={}", root)
           val self = context.self
-          scan(root=root,ext=ext)(using context.log).foreach {
+          scan(root=root,ext=ext)(using log).foreach {
             case result =>
-              log.info(s"[standby] scanned $root with result $result - tell $replyTo")
+              log.info("[scan] complete root={} queued={}", root, result.size)
               replyTo ! Ack(paths=result,from=self)
               self ! Stop
           }
-          context.log.info(s"[standby] scan in future space")
           Behaviors.same
         case Stop =>
-          context.log.info(s"[standby] shutting down")
+          context.log.debug("[scan] shutdown")
           Behaviors.stopped
       }
   }
@@ -79,10 +78,12 @@ object FsScan {
     import scala.jdk.CollectionConverters._
     import scala.jdk.StreamConverters._
 
-    Files
+    var examined = 0
+    val result = Files
       .find(root, Integer.MAX_VALUE, (_, a) => a.isRegularFile)
       .toScala(LazyList)
       .filter { case path =>
+        examined += 1
         val kind = ext.find(path.getFileName.toFile.getName.endsWith(_))
         val scanned =
           Try {
@@ -94,10 +95,12 @@ object FsScan {
           }
           .getOrElse(false)
         val hit = kind.isDefined && !scanned
-        log.info(s"[scan] found $kind (state: $scanned) - hit $hit")
+        log.debug("[scan] file path={} hit={}", path, hit)
         hit
       }
       .toSeq
+    log.debug("[scan] examined root={} count={}", root, examined)
+    result
   }
 }
 
@@ -132,16 +135,18 @@ case class FFMpegDelegate(
   import FFMpegDelegate._
   import scala.sys.process._
 
-  val pLog = ProcessLogger(line => log.info(line), line => log.info(line))
+  val pLog = ProcessLogger(
+    line => log.debug("[transcode] ffmpeg stdout: {}", line)
+  , line => log.debug("[transcode] ffmpeg stderr: {}", line)
+  )
 
   def cmd(in: Path) = {
-    log.info("[transcode] in - '{}'", in)
+    log.debug("[transcode] input path={}", in)
     val parent = in.getParent.toString
     val root = getBaseName(in.toFile).getOrElse("")
-    log.info("[transcode] root - '{}'", root)
     val out = s"${parent}/${root}.mp4"
     val cmd = s"ffmpeg -hwaccel qsv -c:v h264_qsv -i ${in} -c:v h264_qsv -global_quality 30 ${out}"
-    log.info("[transcode] command - {}", cmd)
+    log.info("[transcode] command file={}", in.getFileName)
     cmd
   }
 
@@ -151,64 +156,59 @@ case class FFMpegDelegate(
 
   override def onMessage(message: Request): Behavior[Request] = message match {
     case Request.Status(sender) =>
-      log.info("[transcode] received status request from {}", sender)
+      log.debug("[transcode] status request")
       val code = proc.fold (0) (p => if (!p.isAlive()) p.exitValue() else 1)
       sender ! Response.Status(code=code,replyTo=context.self)
       Behaviors.same
     case Request.Start(sender) if proc.isEmpty =>
-      log.info("[transcode] request start for {}", sender)
+      log.info("[transcode] start file={}", file)
       prepare(file) match {
         case Success(path) =>
-          log.info("[transcode] convert path {}", path)
           proc = Some(cmd(path).run(pLog))
           sender ! Response.Status(code=1,replyTo=context.self)
-        case other =>
-          log.info("[transcode] fail wth {}", other)
+        case Failure(ex) =>
+          log.warn("[transcode] start skipped file={} reason={}", file, ex.getMessage)
           sender ! Response.Status(code=0,replyTo=context.self)
       }
       Behaviors.same
     case Request.Stop(sender) if proc.nonEmpty =>
-      log.info("[transcode] received stop from {}", sender)
+      log.info("[transcode] stop file={}", file)
       proc.foreach(_.destroy())
       proc = None
       release(file) match {
         case Success(_) =>
+          log.info("[transcode] complete file={}", file)
           sender ! Response.Status(code=0,replyTo=context.self)
         case Failure(t) =>
-          log.error("[transcode] failure - {}", t.getMessage)
+          log.error("[transcode] release failed file={}", file, t)
           sender ! Response.Status(code=1,replyTo=context.self)
       }
       Behaviors.same
     case other =>
-      log.info("[transcode] unhandled {}", other)
+      log.debug("[transcode] unhandled message={}", other)
       Behaviors.same
   }
 
   def getBaseName(file: File): Option[String] = {
-    log.info("[getBaseName] incoming file {}", file)
     val name = file.getName
-    val result = if (!name.contains(".")) {
+    if (!name.contains(".")) {
       None
     } else {
       val ext = name.substring(name.lastIndexOf(".") + 1)
       Some(name.substring(0, name.length - ext.length - 1))
     }
-    log.info(s"[getBaseName] base name $result")
-    result
   }
 
   val destExt = "mp4"
 
   def prepare(file: File): Try[Path] = {
-    log.info("[prepare] incoming {}", file)
     val path = file.toPath
 
     val result = FsUtil.Attr.lock(path)
-    log.info(s"[prepare] set state on path $path ? $result")
+    log.debug("[transcode] lock path={} success={}", path, result.isSuccess)
 
     val rootPath = file.getParentFile.toPath
 
-    log.info("[prepare] root path {}", rootPath)
     val destName =
       getBaseName(file)
         .map(n => s"${n}.${destExt}")
@@ -216,10 +216,10 @@ case class FFMpegDelegate(
 
     val destFile = Paths.get(rootPath.toString, destName)
     if (destFile.toFile.exists) {
-      log.info(s"[prepare] destination already exists: $destFile")
+      log.warn("[transcode] duplicate destination file={}", file)
       Failure(Error.DuplicateFile(file))
     } else if (file.lastModified > System.currentTimeMillis - 30000) {
-      log.info(s"The file $file was modified less than 30 seconds ago. It may still be in state of being copied to this location. Skipping it for now.")
+      log.warn("[transcode] file still copying file={}", file)
       Failure(Error.IncompleteFile(file))
     } else {
       Success(file.toPath)
@@ -228,7 +228,7 @@ case class FFMpegDelegate(
 
   def release(file: File): Try[Unit] = {
     val path = file.toPath
-    log.info(s"[release] drop state of $path")
+    log.debug("[transcode] release path={}", path)
     FsUtil.Attr.encoded(path)
   }
 }
@@ -260,13 +260,13 @@ object FsNotify {
       val worker = {
         val uuid = java.util.UUID.randomUUID
         val worker = context.spawn(FFMpegDelegate(file), s"ffmpeg-delegate-${uuid}")
-        log.info(s"[queue:proxy] send convert message to worker $worker")
+        log.debug("[transcode] worker spawned file={}", file)
         worker ! FFMpegDelegate.Request.Start(replyTo=ffmpegResponseMapper)
         worker
       }
 
       val killSwitch = KillSwitches.shared(s"queue-proxy-killswitch-${java.util.UUID.randomUUID}")
-      log.info("[queue:proxy] via kill switch {}", killSwitch)
+      log.debug("[transcode] proxy started file={}", file)
       val _ =
         Source
           .tick(10.second, 10.second, ())
@@ -283,13 +283,12 @@ object FsNotify {
           parent = Some(replyTo)
           Behaviors.same
         case QueueProxy.FFMpegResponse(resp) =>
-          log.info(s"[queue:proxy] received response -> $resp")
+          log.debug("[transcode] proxy response resp={}", resp)
           resp match {
             case FFMpegDelegate.Response.Status(code,_) if code != 0 =>
-              log.info(s"[queue:proxy] status -> $code")
               Behaviors.same
             case FFMpegDelegate.Response.Status(code,replyTo) =>
-              log.info(s"[queue:proxy] signal stop -> $replyTo")
+              log.debug("[transcode] proxy stopping exitCode={}", code)
               replyTo ! FFMpegDelegate.Request.Stop(replyTo=ffmpegResponseMapper)
               parent.foreach (ref => ref ! QueueProxy.Response.Complete)
               killSwitch.shutdown()
@@ -335,7 +334,7 @@ object FsNotify {
           case Enqueue(p,replyTo) =>
             val uuid = java.util.UUID.randomUUID
             val proxy = system.systemActorOf(QueueProxy(p.toFile), s"ffmpeg-proxy-${uuid}")
-            system.log.info(s"[queue] send convert message to proxy $proxy")
+            log.debug("[transcode] queue proxy file={}", p)
 
             implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
             implicit val timeout: Timeout = 10.minutes
@@ -344,7 +343,7 @@ object FsNotify {
 
             status.onComplete {
               case Success(QueueProxy.Response.Complete) =>
-                system.log.info(s"[queue] task complete")
+                log.info("[transcode] queue complete file={}", p)
                 replyTo ! FsQueue.Response.Complete(p)
               case Success(QueueProxy.Response.Pending) =>
                 ()
@@ -354,7 +353,7 @@ object FsNotify {
 
             Future.successful(p.toFile)
         }
-        .toMat(Sink.foreach(p => system.log.info(s"[queue] completed $p")))(Keep.left)
+        .toMat(Sink.foreach(p => log.debug("[transcode] queue processed file={}", p)))(Keep.left)
         .run()
 
     def +=(e: FsQueue.Enqueue): Unit = queue.offer(e) : Unit
@@ -370,7 +369,7 @@ object FsNotify {
       Behaviors.receive { case (context, message) =>
         message match {
           case Poll =>
-            context.log.info(s"[fsnotify:schedule] received signal to start poll")
+            context.log.debug("[scan] poll scheduled root={}", path)
             implicit val system = AppContext.system
             val _ =
               Source
@@ -378,20 +377,19 @@ object FsNotify {
                 .map { case _ =>
                   val uuid = java.util.UUID.randomUUID
                   val worker = system.systemActorOf(FsScan(ext), s"FsScan-scan-${uuid}")
-                  system.log.info(s"[fsnotify:schedule] send scan message to worker $worker")
                   worker ! FsScan.Scan(root=path,replyTo=fsResponseMapper)
                 }
                 .runWith(Sink.ignore)
             Behaviors.same
-          case FsScanResponse(resp @ FsScan.Ack(paths,_)) =>
-            context.log.info(s"[fsnotify:schedule] received $resp message")
-            paths.foreach { case path =>
-              context.log.info(s"[fsnotify:schedule] put $path in queue")
-              FsQueue += FsQueue.Enqueue(p=path,replyTo=fsQueueResponseMapper)
+          case FsScanResponse(FsScan.Ack(paths,_)) =>
+            if (paths.nonEmpty) log.info("[scan] enqueue count={} root={}", paths.size, path)
+            paths.foreach { case queuedPath =>
+              log.debug("[scan] enqueue path={}", queuedPath)
+              FsQueue += FsQueue.Enqueue(p=queuedPath,replyTo=fsQueueResponseMapper)
             }
             Behaviors.same
           case FsQueueResponse(FsQueue.Response.Complete(p)) =>
-            context.log.info(s"[fsnotify:schedule] remove $p from cache")
+            log.info("[transcode] finished path={}", p)
             Behaviors.same
         }
       }
@@ -410,7 +408,7 @@ object FsMonitor {
   def apply(): Behavior[Watch] = Behaviors.receive {
     case (context, message) =>
       val worker = context.spawn(FsNotify(message.path, message.ext), "FsNotify-worker")
-      context.log.info(s"[fsmonitor:exec] created new worker $worker for path ${message.path}")
+      context.log.info("[scan] monitor started root={}", message.path)
       worker ! FsNotify.Poll
       Behaviors.same
   }

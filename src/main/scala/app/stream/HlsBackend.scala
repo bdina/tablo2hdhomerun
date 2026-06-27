@@ -75,7 +75,7 @@ object HlsBackend extends StreamBackend {
           variantUriOpt match {
             case Some(relative) =>
               val resolved = M3U8.resolveSegmentUri(relative, url)
-              log.info(s"[stream:hls] master playlist -> variant: $resolved")
+              log.debug("[stream:hls] master playlist variant={}", resolved)
               resolveMediaPlaylistUrl(resolved)(mat)
             case None => Future.successful(url)
           }
@@ -115,7 +115,7 @@ object HlsBackend extends StreamBackend {
             val segmentInfos = toEmit.map { seg => (M3U8.resolveSegmentUri(seg.uri, baseUrl), seg.byteRange) }
             if (segmentInfos.nonEmpty && !hasLoggedFirstSegment) {
               val rangeDesc = segmentInfos.head._2.map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
-              log.info(s"[stream:hls] streaming ${segmentInfos.size} segments (skipped $startIndex), first: ${segmentInfos.head._1}$rangeDesc")
+              log.info("[stream:hls] segments count={} skipped={} first={}{}", segmentInfos.size, startIndex, segmentInfos.head._1, rangeDesc)
             }
             val newLastSeq = playlist.mediaSequence + playlist.segments.size
             val nowDone = playlist.isEndList
@@ -123,9 +123,9 @@ object HlsBackend extends StreamBackend {
             val nextState: State = (baseUrl, newLastSeq, nowDone, nextTarget, 0, hasLoggedFirstSegment || segmentInfos.nonEmpty)
             Some((nextState, segmentInfos.toSeq))
           }.recover { case ex =>
-            log.warn(s"[stream:hls] step failed: ${ex.getMessage}, retrying next poll")
+            log.warn("[stream:hls] poll failed retrying error={}", ex.getMessage)
             if (failures + 1 >= maxConsecutiveFailures) {
-              log.error(s"[stream:hls] exceeded $maxConsecutiveFailures consecutive failures, ending stream")
+              log.error("[stream:hls] poll exhausted failures={}", maxConsecutiveFailures)
               None
             } else Some(((baseUrl, lastSeq, done, lastTargetDuration, failures + 1, hasLoggedFirstSegment), Seq.empty))
           }
@@ -141,10 +141,10 @@ object HlsBackend extends StreamBackend {
       }
     }
     Source.lazySource { () =>
-      log.info(s"[stream:hls] stream materialized, resolving: $playlistUrl")
+      log.info("[stream:hls] materialized playlistUrl={}", playlistUrl)
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
-          log.info(s"[stream:hls] resolved media playlist: $url")
+          log.debug("[stream:hls] resolved media playlist={}", url)
           Source.unfoldAsync((url, 0, false, 0, 0, false): State)(s => step(s)(mat)).flatMapConcat {
             (segments: Seq[SegmentInfo]) =>
               if (segments.isEmpty) Source.empty
@@ -153,8 +153,8 @@ object HlsBackend extends StreamBackend {
         }
       ).watchTermination() { (_, done) =>
         done.onComplete {
-          case Success(_) => log.info("[stream:hls] stream completed")
-          case Failure(ex) => log.info(s"[stream:hls] stream failed: ${ex.getMessage}")
+          case Success(_) => log.info("[stream:hls] complete")
+          case Failure(ex) => log.warn("[stream:hls] failed", ex)
         }
       }
     }

@@ -26,17 +26,16 @@ object FFmpegBackend extends StreamBackend {
       , "pipe:1"
       )
       val process = scala.sys.runtime.exec(ffmpegCmd)
-      log.info(s"[stream:ffmpeg] execute - ${ffmpegCmd.mkString(" ")} => spawn ${process.pid}")
+      log.info("[stream:ffmpeg] start pid={} playlistUrl={}", process.pid, playlistUrl)
       StreamConverters
         .fromInputStream(() => process.getInputStream)
         .watchTermination() { (_, done) =>
-          log.info(s"[stream:ffmpeg] started (pid ${process.pid})")
           done.onComplete {
             case Success(_) =>
-              log.info(s"[stream:ffmpeg] terminating (pid ${process.pid})")
+              log.info("[stream:ffmpeg] complete pid={}", process.pid)
               process.destroy()
             case Failure(ex) =>
-              log.info(s"[stream:ffmpeg] failed: ${ex.getMessage} (kill pid ${process.pid})")
+              log.warn("[stream:ffmpeg] failed pid={}", process.pid, ex)
               process.destroy()
           }
         }

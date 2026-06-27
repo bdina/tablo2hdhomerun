@@ -7,8 +7,8 @@ import pekko.actor.typed.{ActorSystem, Behavior}
 import pekko.http.scaladsl.Http
 import pekko.http.scaladsl.model.{HttpResponse, StatusCodes}
 import pekko.http.scaladsl.server.Directives.{complete, extractRequest, handleRejections}
-import pekko.http.scaladsl.server.RouteConcatenation._
 import pekko.http.scaladsl.server.{RejectionHandler, Route}
+import pekko.http.scaladsl.server.RouteConcatenation._
 
 import java.net.InetAddress
 import java.nio.file.Paths
@@ -18,7 +18,10 @@ import org.slf4j.LoggerFactory
 import scala.io.StdIn
 import scala.util.{Failure, Success, Try}
 
+import app.sys.LogConfig
+
 @main def tablo2hdhomerunApp(args: String*): Unit = {
+  LogConfig.configure()
   val daemon = args.contains("-d")
   Dependencies.verify()
   Tablo2HDHomeRun.start(daemon)
@@ -40,7 +43,7 @@ object Dependencies {
     if (Tablo2HDHomeRun.STREAM_BACKEND != "hls") {
       val ffmpegCheck = Try { "ffmpeg -version".!<(devNull) }.getOrElse(-1)
       if (ffmpegCheck != 0) {
-        log.info("[dependencies] missing dependency -> ffmpeg (check installation)")
+        log.error("[startup] missing dependency name=ffmpeg")
         System.exit(1)
       }
     }
@@ -57,37 +60,62 @@ object Tablo2HDHomeRun {
     AppContext.initialize(system)
   }
 
+  private def appVersion: String = {
+    Option(getClass.getPackage.getImplementationVersion)
+      .orElse {
+        Try {
+          val source = getClass.getProtectionDomain.getCodeSource
+          if (source == null) None
+          else {
+            val jar = new java.util.jar.JarFile(source.getLocation.getPath)
+            try Option(jar.getManifest.getMainAttributes.getValue("App-Version"))
+            finally jar.close()
+          }
+        }.toOption.flatten
+      }
+      .getOrElse("dev")
+  }
+
+  def logStartupConfig(): Unit = {
+    log.info(
+      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} mediaRoot={}"
+    , appVersion
+    , TABLO_GEN
+    , TABLO_IP.getHostAddress
+    , PROXY_IP.getHostAddress
+    , PROXY_PORT
+    , STREAM_BACKEND
+    , media.getOrElse("none")
+    )
+  }
+
   def apply(daemon: Boolean): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
     media.foreach { case root =>
-      log.info(s"[apply] media root set -> $root")
-
       val monitor = context.spawn(app.sys.FsMonitor(), "monitor-actor", pekko.actor.typed.Props.empty)
-      context.log.info(s"[apply] created monitor actor $monitor")
+      context.log.debug("[scan] monitor spawned root={}", root)
 
       implicit val timeout: pekko.util.Timeout = pekko.util.Timeout(3, java.util.concurrent.TimeUnit.SECONDS)
 
       val path = Paths.get(root)
       context.ask[app.sys.FsMonitor.Watch,app.sys.FsMonitor.Ack](monitor, ref => app.sys.FsMonitor.Watch(path=path,ext=Seq("ts,","mkv"),replyTo=ref)) {
         case Success(app.sys.FsMonitor.Ack(p,_)) =>
-          context.log.info(s"[apply] received ACK($p)")
+          context.log.debug("[scan] monitor ack path={}", p)
           pekko.NotUsed
         case Failure(ex) =>
-          context.log.info(s"[apply] received FAILURE with ${ex.getMessage}")
+          log.warn("[scan] monitor failed root={}", root, ex)
           pekko.NotUsed
       }
     }
 
-    log.info(s"[apply] TABLO_GEN = $TABLO_GEN")
+    logStartupConfig()
 
     val routes = TABLO_GEN match {
       case "4thgen" =>
-        log.info("[apply] initializing 4th generation Tablo support")
         implicit val sys: ActorSystem[?] = context.system
         val authContext = app.tuner.Tablo4thGen.Auth.initialize()
         val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
         app.tuner.Tablo4thGen.routes(lineup, authContext)
       case _ =>
-        log.info("[apply] initializing legacy Tablo support")
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
         Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route ~ Guide.route ~ Favicon.route
     }
@@ -135,7 +163,7 @@ object Tablo2HDHomeRun {
         .newBuilder()
         .handleNotFound { // Handle the case where no route matched (empty rejections)
           extractRequest { request =>
-            log.info(s"[NotFound] unknown path - $request")
+            log.warn("[http] not found method={} path={}", request.method.value, request.uri.path)
             complete(HttpResponse(StatusCodes.NotFound, entity = "Resource not found"))
           }
         }

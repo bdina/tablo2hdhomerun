@@ -29,6 +29,7 @@ import DefaultJsonProtocol._
 
 import app.Tablo2HDHomeRun
 import app.stream.StreamBackend
+import app.sys.LogConfig
 
 object Tablo4thGen {
   val log = LoggerFactory.getLogger(this.getClass)
@@ -94,15 +95,15 @@ object Tablo4thGen {
       val HttpCtx = Http()
 
       val email = Tablo2HDHomeRun.TABLO_EMAIL.getOrElse {
-        log.error("[4thgen-auth] TABLO_EMAIL environment variable is required for 4th gen mode")
+        log.error("[auth] missing env name=TABLO_EMAIL")
         throw Tablo4thGen.Error.MissingEmail
       }
       val password = Tablo2HDHomeRun.TABLO_PASSWORD.getOrElse {
-        log.error("[4thgen-auth] TABLO_PASSWORD environment variable is required for 4th gen mode")
+        log.error("[auth] missing env name=TABLO_PASSWORD")
         throw Tablo4thGen.Error.MissingPassword
       }
 
-      log.info(s"[4thgen-auth] initializing authentication for $email")
+      log.info("[auth] initialize email={}", email)
 
       import JsonProtocol._
       implicit val ec = system.executionContext
@@ -111,14 +112,14 @@ object Tablo4thGen {
         loginResp <- {
           val loginUri = Uri(s"$LIGHTHOUSE_BASE_URL/login/")
           val loginBody = LoginRequest(email, password).toJson.compactPrint
-          log.info(s"[4thgen-auth] login (POST) - $loginUri")
+          log.debug("[auth] http POST /login/")
           val request = HttpRequest(
             method = HttpMethods.POST
           , uri = loginUri
           , entity = HttpEntity(ContentTypes.`application/json`, loginBody)
           )
           HttpCtx.singleRequest(request).flatMap { response =>
-            log.info(s"[4thgen-auth] login response - ${response.status}")
+            log.debug("[auth] login status={}", response.status.intValue())
             Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[LoginResponse])
           }
         }
@@ -127,7 +128,7 @@ object Tablo4thGen {
         }
         accountInfo <- {
           val accountUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/")
-          log.info(s"[4thgen-auth] account (GET) - $accountUri")
+          log.debug("[auth] http GET /account/")
           import pekko.http.scaladsl.model.headers._
           val request = HttpRequest(
             method = HttpMethods.GET
@@ -135,7 +136,7 @@ object Tablo4thGen {
           , headers = Seq(Authorization(OAuth2BearerToken(accessToken)))
           )
           HttpCtx.singleRequest(request).flatMap { response =>
-            log.info(s"[4thgen-auth] account response - ${response.status}")
+            log.debug("[auth] account status={}", response.status.intValue())
             Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[AccountInfo])
           }
         }
@@ -156,11 +157,11 @@ object Tablo4thGen {
               }
           }
         }
-        _ = log.info(s"[4thgen-auth] selected device: ${device.name} (${device.serverId})")
+        _ = log.info("[auth] device selected name={} serverId={}", device.name, device.serverId)
         selectResp <- {
           val selectUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/select/")
           val selectBody = SelectRequest(pid = profile.identifier, sid = device.serverId).toJson.compactPrint
-          log.info(s"[4thgen-auth] select (POST) - $selectUri")
+          log.debug("[auth] http POST /account/select/")
           import pekko.http.scaladsl.model.headers._
           val request = HttpRequest(
             method = HttpMethods.POST
@@ -169,9 +170,9 @@ object Tablo4thGen {
           , entity = HttpEntity(ContentTypes.`application/json`, selectBody)
           )
           HttpCtx.singleRequest(request).flatMap { response =>
-            log.info(s"[4thgen-auth] select response - ${response.status}")
+            log.debug("[auth] select status={}", response.status.intValue())
             Unmarshal(response.entity).to[String].map { body =>
-              log.info(s"[4thgen-auth] select body - $body")
+              log.debug("[auth] select body={}", LogConfig.truncate(body))
               body.parseJson.convertTo[SelectResponse]
             }
           }
@@ -196,7 +197,7 @@ object Tablo4thGen {
 
       val ctx = Await.result(authFuture, 30.seconds)
       _authContext = Some(ctx)
-      log.info(s"[4thgen-auth] authentication complete - device URL: ${ctx.deviceUrl}")
+      log.info("[auth] complete deviceUrl={}", ctx.deviceUrl)
       ctx
     }
   }
@@ -226,7 +227,7 @@ object Tablo4thGen {
       val signatureString = s"$method\n$path\n$bodyMd5\n$date"
       val hmac = hmacMd5Hex(signatureString, hashKey)
       val authHeader = s"tablo:$deviceKey:$hmac"
-      log.debug("[4thgen-hmac] signature for {} {}", method, path)
+      log.debug("[auth] hmac sign method={} path={}", method, path)
       (authHeader, date)
     }
 
@@ -311,7 +312,7 @@ object Tablo4thGen {
           import pekko.http.scaladsl.unmarshalling.Unmarshal
 
           val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
-          log.info(s"[4thgen-lineup] guide/channels (GET) - $channelsUri")
+          log.debug("[lineup] http GET /guide/channels")
 
           import pekko.http.scaladsl.model.headers._
           val request = HttpRequest(
@@ -324,17 +325,17 @@ object Tablo4thGen {
           )
 
           HttpCtx.singleRequest(request).flatMap { response =>
-            log.info(s"[4thgen-lineup] guide/channels response - ${response.status}")
+            log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
             Unmarshal(response.entity).to[String].map { body =>
               val channels = body.parseJson.convertTo[Seq[ChannelLineup]]
-              log.info(s"[4thgen-lineup] channels found: ${channels.size}")
+              log.info("[lineup] scan complete count={}", channels.size)
               val jsChannels = channels.map(channelToJsValue)
               context.self ! Command.Store(jsChannels)
               jsChannels
             }
           }.recover {
             case ex =>
-              log.error(s"[4thgen-lineup] scan failed: ${ex.getMessage}")
+              log.error("[lineup] scan failed", ex)
               Seq.empty
           }
         }
@@ -343,29 +344,29 @@ object Tablo4thGen {
 
         Behaviors.receiveMessage {
           case Command.Store(channels) =>
-            log.info(s"[4thgen-lineup] store channels: ${channels.size}")
+            log.info("[lineup] store count={}", channels.size)
             cache = (1.day.fromNow, channels)
             scanInProgress = false
             Behaviors.same
 
           case Command.Scan if scanInProgress =>
-            log.info("[4thgen-lineup] channel scan requested ; already in progress (suppress)")
+            log.debug("[lineup] scan already in progress")
             Behaviors.same
 
           case Command.Scan =>
-            log.info("[4thgen-lineup] channel scan requested")
+            log.info("[lineup] scan requested")
             scanInProgress = true
             scan() : Unit
             Behaviors.same
 
           case Request.Status(sender) =>
-            log.info("[4thgen-lineup] channel status requested")
+            log.debug("[lineup] status requested")
             val (scanning, possible) = if (scanInProgress) (1, 0) else (0, 1)
             sender ! Response.Status(scanInProgress = scanning, scanPossible = possible, replyTo = context.self)
             Behaviors.same
 
           case Request.Fetch(replyTo) if cache._1.isOverdue() =>
-            log.info("[4thgen-lineup] channel fetch - cache expired")
+            log.debug("[lineup] fetch cache expired")
             val sender = replyTo
             scanInProgress = true
             scan().foreach { channels =>
@@ -375,7 +376,7 @@ object Tablo4thGen {
 
           case Request.Fetch(sender) =>
             val (_, channels) = cache
-            log.info(s"[4thgen-lineup] channels found: ${channels.size}")
+            log.debug("[lineup] fetch cache count={}", channels.size)
             sender ! Response.Fetch(channels, context.self)
             Behaviors.same
         }
@@ -399,7 +400,7 @@ object Tablo4thGen {
             case Success(LineupActor.Response.Fetch(channels, _)) =>
               complete(HttpEntity(ContentTypes.`application/json`, channels.toJson.compactPrint))
             case Failure(ex) =>
-              log.info(s"[4thgen-lineup] Failed: ${ex.getMessage}")
+              log.warn("[lineup] request failed", ex)
               complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce channel lineup"))
           }
         }
@@ -413,10 +414,10 @@ object Tablo4thGen {
             case Success(LineupActor.Response.Status(scanInProgress, scanPossible, _)) =>
               import Lineup.Response.LineupStatus.JsonProtocol.lineupStatusFormat
               val response = Lineup.Response.LineupStatus(ScanInProgress = scanInProgress, ScanPossible = scanPossible).toJson
-              log.info(s"[4thgen-lineup] lineup_status.json (GET) - $response")
+              log.debug("[lineup] lineup_status served scanInProgress={} scanPossible={}", scanInProgress, scanPossible)
               complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
             case Failure(ex) =>
-              log.info(s"[4thgen-lineup] Failed: ${ex.getMessage}")
+              log.warn("[lineup] lineup_status failed", ex)
               complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to get lineup status"))
           }
         }
@@ -467,7 +468,7 @@ object Tablo4thGen {
 
           onComplete(guideF) {
             case Success(GuideActor.Response.FetchGuide(guide, _)) =>
-              log.info(s"[4thgen-guide] guide.xml (GET) - ${guide.size} channels")
+              log.debug("[guide] served count={}", guide.size)
 
               import pekko.util.ByteString
               val xmlStream =
@@ -486,7 +487,7 @@ object Tablo4thGen {
 
               complete(HttpEntity.Chunked.fromData(ContentTypes.`text/xml(UTF-8)`, xmlStream))
             case Failure(ex) =>
-              log.info(s"[4thgen-guide] Failed: ${ex.getMessage}")
+              log.warn("[guide] request failed", ex)
               val emptyGuide = <tv></tv>
               complete(HttpEntity(ContentTypes.`text/xml(UTF-8)`, emptyGuide.toString))
           }
@@ -578,7 +579,7 @@ object Tablo4thGen {
 
         val airingsFutures = dates.map { date =>
           val airingsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/guide/channels/$channelId/airings/$date/")
-          log.info(s"[4thgen-guide] airings (GET) - $airingsUri")
+          log.debug("[guide] http GET /airings channelId={} date={}", channelId, date)
 
           val request = HttpRequest(
             method = HttpMethods.GET
@@ -595,13 +596,13 @@ object Tablo4thGen {
                 Try(body.parseJson.convertTo[Seq[Guide.GuideAiring]]).getOrElse(Seq.empty)
               }
             } else {
-              log.info(s"[4thgen-guide] airings response - ${response.status}")
+              log.debug("[guide] airings status={} channelId={} date={}", response.status.intValue(), channelId, date)
               val _ = response.entity.discardBytes()
               Future.successful(Seq.empty[Guide.GuideAiring])
             }
           }.recover {
             case ex =>
-              log.warn(s"[4thgen-guide] failed to fetch airings for $channelId/$date: ${ex.getMessage}")
+              log.warn("[guide] airings failed channelId={} date={}", channelId, date, ex)
               Seq.empty[Guide.GuideAiring]
           }
         }
@@ -624,7 +625,7 @@ object Tablo4thGen {
         import pekko.http.scaladsl.model.headers._
 
         val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
-        log.info(s"[4thgen-guide] guide/channels (GET) - $channelsUri")
+        log.debug("[guide] http GET /guide/channels")
 
         val request = HttpRequest(
           method = HttpMethods.GET
@@ -636,10 +637,10 @@ object Tablo4thGen {
         )
 
         HttpCtx.singleRequest(request).flatMap { response =>
-          log.info(s"[4thgen-guide] guide/channels response - ${response.status}")
+          log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
           Unmarshal(response.entity).to[String].flatMap { body =>
             val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
-            log.info(s"[4thgen-guide] channels found: ${channels.size}")
+            log.info("[guide] scan channels count={}", channels.size)
 
             val guideFutures = channels.map { channel =>
               val (major, minor, callSign) = channel.kind match {
@@ -659,7 +660,7 @@ object Tablo4thGen {
           }
         }.recover {
           case ex =>
-            log.error(s"[4thgen-guide] scan failed: ${ex.getMessage}")
+            log.error("[guide] scan failed", ex)
             Seq.empty
         }
       }
@@ -668,17 +669,17 @@ object Tablo4thGen {
 
       Behaviors.receiveMessage {
         case Command.StoreGuide(guide) =>
-          log.info(s"[4thgen-guide] store guide: ${guide.size} channels")
+          log.info("[guide] store count={}", guide.size)
           cache = (1.hour.fromNow, guide)
           scanInProgress = false
           Behaviors.same
 
         case Command.Scan if scanInProgress =>
-          log.info("[4thgen-guide] guide scan requested ; already in progress (suppress)")
+          log.debug("[guide] scan already in progress")
           Behaviors.same
 
         case Command.Scan =>
-          log.info("[4thgen-guide] guide scan requested")
+          log.info("[guide] scan requested")
           scanInProgress = true
           scan().foreach { guide =>
             context.self ! Command.StoreGuide(guide)
@@ -686,7 +687,7 @@ object Tablo4thGen {
           Behaviors.same
 
         case Request.FetchGuide(replyTo) if cache._1.isOverdue() =>
-          log.info("[4thgen-guide] guide fetch - cache expired")
+          log.debug("[guide] fetch cache expired")
           scanInProgress = true
           scan().foreach { guide =>
             replyTo ! Response.FetchGuide(guide, context.self)
@@ -695,7 +696,7 @@ object Tablo4thGen {
 
         case Request.FetchGuide(replyTo) =>
           val (_, guide) = cache
-          log.info(s"[4thgen-guide] guide fetch from cache: ${guide.size} channels")
+          log.debug("[guide] fetch cache count={}", guide.size)
           replyTo ! Response.FetchGuide(guide, context.self)
           Behaviors.same
       }
@@ -740,7 +741,7 @@ object Tablo4thGen {
         val serverInfoUri = authContext.deviceUrl.withPath(Uri.Path("/server/info")).withQuery(Uri.Query("lh" -> "1"))
         val headers = Hmac.signedHeaders("GET", "/server/info", None, authContext)
 
-        log.info(s"[4thgen-channel] server/info (GET) - $serverInfoUri")
+        log.debug("[channel] http GET /server/info")
         val request = HttpRequest(
           method = HttpMethods.GET
         , uri = serverInfoUri
@@ -748,7 +749,7 @@ object Tablo4thGen {
         )
 
         HttpCtx.singleRequest(request).flatMap { response =>
-          log.info(s"[4thgen-channel] server/info response - ${response.status}")
+          log.debug("[channel] server/info status={}", response.status.intValue())
           if (response.status.isSuccess()) {
             Unmarshal(response.entity).to[String].map { body =>
               val serverInfo = body.parseJson.convertTo[Response.ServerInfo]
@@ -762,7 +763,7 @@ object Tablo4thGen {
           }
         }.recover {
           case ex =>
-            log.warn(s"[4thgen-channel] failed to get server info: ${ex.getMessage}")
+            log.warn("[channel] server info failed", ex)
             totalTuners
         }
       }
@@ -772,6 +773,7 @@ object Tablo4thGen {
           import Channel.Request.Watch4thGenRequest.JsonProtocol.watch4thGenRequestFormat
           import Channel.Response.JsonProtocol.watch4thGenResponseFormat
 
+          val streamId = java.util.UUID.randomUUID.toString.take(8)
           val watchUri = authContext.deviceUrl.withPath(Uri.Path(s"/guide/channels/$channelId/watch")).withQuery(Uri.Query("lh" -> "1"))
           val deviceId = java.util.UUID.randomUUID.toString
           val watchBody = Request.Watch4thGenRequest(device_id = deviceId, bandwidth = None, platform = "ios").toJson.compactPrint
@@ -779,13 +781,13 @@ object Tablo4thGen {
 
           val tunerCheckFuture = fetchServerInfo().map { tuners =>
             val available = tuners - activeStreams.get()
-            log.info(s"[4thgen-channel] available tuners - $available/$tuners")
+            log.debug("[channel] tuners available={} total={} streamId={}", available, tuners, streamId)
             available > 0
           }
 
           val watchFuture: Future[Response.Watch4thGenResponse] = tunerCheckFuture.flatMap { available =>
             if (available) {
-              log.info(s"[4thgen-channel] guide/channels/$channelId/watch (POST) - $watchUri")
+              log.debug("[channel] http POST /guide/channels/{}/watch streamId={}", channelId, streamId)
               val request = HttpRequest(
                 method = HttpMethods.POST
               , uri = watchUri
@@ -793,14 +795,14 @@ object Tablo4thGen {
               , entity = HttpEntity(ContentTypes.`application/json`, watchBody)
               )
               HttpCtx.singleRequest(request).flatMap { response =>
-                log.info(s"[4thgen-channel] watch response - ${response.status}")
+                log.debug("[channel] watch status={} streamId={}", response.status.intValue(), streamId)
                 Unmarshal(response.entity).to[String].map { body =>
-                  log.info(s"[4thgen-channel] watch body - $body")
+                  log.debug("[channel] watch body={} streamId={}", LogConfig.truncate(body), streamId)
                   body.parseJson.convertTo[Response.Watch4thGenResponse]
                 }
               }
             } else {
-              log.info(s"[4thgen-channel] no available tuners")
+              log.warn("[channel] no tuners available streamId={}", streamId)
               Future.failed(Error.NoAvailableTuners)
             }
           }
@@ -808,15 +810,15 @@ object Tablo4thGen {
           def streamWithTunerTracking(playlistUrl: String): Source[ByteString, ?] =
             Source.lazySource { () =>
               val n = activeStreams.incrementAndGet()
-              log.info(s"[4thgen-channel] active streams: $n")
+              log.info("[channel] stream start streamId={} channelId={} active={}", streamId, channelId, n)
               StreamBackend().stream(playlistUrl).watchTermination() { (_, done) =>
                 done.onComplete {
                   case Success(_) =>
                     val m = activeStreams.decrementAndGet()
-                    log.info(s"[4thgen-channel] stream ended, active streams: $m")
+                    log.info("[channel] stream end streamId={} active={}", streamId, m)
                   case Failure(ex) =>
                     val m = activeStreams.decrementAndGet()
-                    log.info(s"[4thgen-channel] stream failed: ${ex.getMessage}, active streams: $m")
+                    log.warn("[channel] stream failed streamId={} active={}", streamId, m, ex)
                 }
               }
             }
@@ -825,15 +827,15 @@ object Tablo4thGen {
             case Success(data) =>
               data.playlist_url match {
                 case Some(url) =>
-                  log.info(s"[4thgen-channel] tuned to channel - playlist: $url")
+                  log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, url)
                   val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
                   complete(HttpEntity.Chunked.fromData(pekko.http.scaladsl.model.ContentType(`video/mp2t`), streamWithTunerTracking(url)))
                 case None =>
-                  log.info(s"[4thgen-channel] no playlist URL in response")
+                  log.warn("[channel] no playlist streamId={} channelId={}", streamId, channelId)
                   complete(HttpResponse(StatusCodes.InternalServerError, entity = "No playlist URL returned"))
               }
             case Failure(ex) =>
-              log.info(s"[4thgen-channel] failed to start stream - ${ex.getMessage}")
+              log.warn("[channel] tune failed streamId={} channelId={}", streamId, channelId, ex)
               complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
           }
         }

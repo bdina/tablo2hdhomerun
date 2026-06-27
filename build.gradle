@@ -36,6 +36,7 @@ dependencies {
     implementation group: 'org.slf4j', name: 'slf4j-simple', version: '2.0.18'
 
     implementation group: 'org.apache.pekko', name: "pekko-actor-typed_${scala_maj}", version: pekko_core
+    implementation group: 'org.apache.pekko', name: "pekko-slf4j_${scala_maj}", version: pekko_core
     implementation group: 'org.apache.pekko', name: "pekko-stream_${scala_maj}", version: pekko_core
     implementation group: 'org.apache.pekko', name: "pekko-http_${scala_maj}", version: pekko_http
     implementation group: 'org.apache.pekko', name: "pekko-http-spray-json_${scala_maj}", version: pekko_http
