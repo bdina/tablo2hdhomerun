@@ -226,7 +226,7 @@ object Tablo4thGen {
       val signatureString = s"$method\n$path\n$bodyMd5\n$date"
       val hmac = hmacMd5Hex(signatureString, hashKey)
       val authHeader = s"tablo:$deviceKey:$hmac"
-      log.debug(s"[4thgen-hmac] signature for $method $path")
+      log.debug("[4thgen-hmac] signature for {} {}", method, path)
       (authHeader, date)
     }
 
