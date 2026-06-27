@@ -3,8 +3,14 @@ package app.stream
 import org.apache.pekko
 
 import pekko.actor.typed.ActorSystem
-import pekko.http.scaladsl.Http
-import pekko.http.scaladsl.model.HttpRequest
+
+import pekko.http.scaladsl
+
+import scaladsl.Http
+import scaladsl.model.{HttpRequest, StatusCode}
+import scaladsl.model.headers.{ByteRange, Range}
+import scaladsl.unmarshalling.Unmarshal
+
 import pekko.stream.scaladsl.Source
 import pekko.util.ByteString
 
@@ -20,29 +26,29 @@ object HlsBackend extends StreamBackend {
   override def name: String = "hls"
   val defaultPollSec: Int = 2
 
+  sealed trait HlsError extends Throwable
+  object HlsError {
+    case class PlaylistFetchError(status: StatusCode) extends RuntimeException(s"playlist fetch failed: ${status}") with HlsError
+    case class SegmentFetchError(status: StatusCode) extends RuntimeException(s"segment fetch failed: ${status}") with HlsError
+  }
+
   override def stream(playlistUrl: String)(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
     val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
     val http = Http(system.toClassic)
-    def fetchPlaylistBody(url: String)(implicit mat: pekko.stream.Materializer): Future[String] = {
+    def fetchPlaylistBody(url: String)(implicit mat: pekko.stream.Materializer): Future[String] =
       http.singleRequest(HttpRequest(uri = url)).flatMap { response =>
         if (response.status.isSuccess()) {
-          pekko.http.scaladsl.unmarshalling.Unmarshal(response.entity).to[String]
+          Unmarshal(response.entity).to[String]
         } else {
           val _ = response.entity.discardBytes()
-          Future.failed(new RuntimeException(s"playlist fetch failed: ${response.status}"))
+          Future.failed(HlsError.PlaylistFetchError(response.status))
         }
       }
-    }
     def fetchSegmentSource(url: String, byteRange: Option[(Long, Long)]): Source[ByteString, ?] = {
       val request = byteRange match {
-        case Some((offset, length)) =>
-          HttpRequest(uri = url).addHeader(
-            pekko.http.scaladsl.model.headers.Range(
-              pekko.http.scaladsl.model.headers.ByteRange(offset, offset + length - 1)
-            )
-          )
+        case Some((offset, length)) => HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
         case None => HttpRequest(uri = url)
       }
       Source.futureSource(
@@ -50,12 +56,12 @@ object HlsBackend extends StreamBackend {
           if (response.status.isSuccess()) response.entity.dataBytes
           else {
             val _ = response.entity.discardBytes()
-            Source.failed(new RuntimeException(s"segment fetch failed: ${response.status}"))
+            Source.failed(HlsError.SegmentFetchError(response.status))
           }
         }
       ).mapMaterializedValue(_ => pekko.NotUsed)
     }
-    def resolveMediaPlaylistUrl(url: String)(implicit mat: pekko.stream.Materializer): Future[String] = {
+    def resolveMediaPlaylistUrl(url: String)(implicit mat: pekko.stream.Materializer): Future[String] =
       fetchPlaylistBody(url).flatMap { body =>
         val lines = body.linesIterator.map(_.trim).filter(_.nonEmpty).toVector
         val isMaster = lines.exists(_.startsWith("#EXT-X-STREAM-INF"))
@@ -88,7 +94,6 @@ object HlsBackend extends StreamBackend {
           }
         }
       }
-    }
     val maxConsecutiveFailures = 10
     type SegmentInfo = (String, Option[(Long, Long)])
     type State = (String, Int, Boolean, Int, Int, Boolean)
@@ -107,13 +112,10 @@ object HlsBackend extends StreamBackend {
             else
               (lastSeq - playlist.mediaSequence).max(0)
             val toEmit = playlist.segments.drop(startIndex)
-            val segmentInfos = toEmit.map { seg =>
-              (M3U8.resolveSegmentUri(seg.uri, baseUrl), seg.byteRange)
-            }
+            val segmentInfos = toEmit.map { seg => (M3U8.resolveSegmentUri(seg.uri, baseUrl), seg.byteRange) }
             if (segmentInfos.nonEmpty && !hasLoggedFirstSegment) {
               val rangeDesc = segmentInfos.head._2.map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
-              log.info(s"[stream:hls] streaming ${segmentInfos.size} segments (skipped $startIndex)," +
-                s" first: ${segmentInfos.head._1}$rangeDesc")
+              log.info(s"[stream:hls] streaming ${segmentInfos.size} segments (skipped $startIndex), first: ${segmentInfos.head._1}$rangeDesc")
             }
             val newLastSeq = playlist.mediaSequence + playlist.segments.size
             val nowDone = playlist.isEndList
@@ -140,7 +142,7 @@ object HlsBackend extends StreamBackend {
     }
     Source.lazySource { () =>
       log.info(s"[stream:hls] stream materialized, resolving: $playlistUrl")
-      val inner = Source.futureSource(
+      Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
           log.info(s"[stream:hls] resolved media playlist: $url")
           Source.unfoldAsync((url, 0, false, 0, 0, false): State)(s => step(s)(mat)).flatMapConcat {
@@ -149,8 +151,7 @@ object HlsBackend extends StreamBackend {
               else Source(segments).flatMapConcat { case (u, br) => fetchSegmentSource(u, br) }
           }
         }
-      )
-      inner.watchTermination() { (_, done) =>
+      ).watchTermination() { (_, done) =>
         done.onComplete {
           case Success(_) => log.info("[stream:hls] stream completed")
           case Failure(ex) => log.info(s"[stream:hls] stream failed: ${ex.getMessage}")
