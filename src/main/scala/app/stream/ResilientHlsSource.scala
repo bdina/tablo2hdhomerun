@@ -1,11 +1,15 @@
 package app.stream
 
-import org.apache.pekko.stream.scaladsl.{RestartSource, Source}
+import org.apache.pekko.NotUsed
+import org.apache.pekko.stream.{Attributes, FlowShape, Inlet, Outlet}
+import org.apache.pekko.stream.scaladsl.{Flow, RestartSource, Source}
 import org.apache.pekko.stream.RestartSettings
+import org.apache.pekko.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler, TimerGraphStageLogic}
 import org.apache.pekko.util.ByteString
 
 import org.slf4j.LoggerFactory
 
+import scala.compiletime.uninitialized
 import scala.concurrent.duration._
 
 object ResilientHlsSource {
@@ -13,7 +17,6 @@ object ResilientHlsSource {
 
   // Configuration (from environment variables)
   def maxGapSec: Int = app.Tablo2HDHomeRun.STREAM_MAX_GAP_SEC
-  def retryDelaySec: Int = app.Tablo2HDHomeRun.STREAM_RETRY_DELAY_SEC
   val nullPacketIntervalMs: Int = 80
 
   // MPEG-TS null packet constant (188 bytes, sync byte 0x47, PID 0x1FFF)
@@ -26,21 +29,81 @@ object ResilientHlsSource {
     ByteString(arr)
   }
 
+  private sealed trait Elem
+  private final case class Real(data: ByteString) extends Elem
+  private case object GapFill extends Elem
+
   def apply(
-    streamFactory: () => Source[ByteString, ?],
-    streamName: String
+    streamFactory: () => Source[ByteString, ?]
+  , streamName: String
+  , recoveryTimeout: FiniteDuration = app.Tablo2HDHomeRun.STREAM_RECOVERY_TIMEOUT_SEC.seconds
+  , minBackoff: FiniteDuration = app.Tablo2HDHomeRun.STREAM_RETRY_MIN_BACKOFF_SEC.seconds
+  , maxBackoff: FiniteDuration = app.Tablo2HDHomeRun.STREAM_RETRY_MAX_BACKOFF_SEC.seconds
   ): Source[ByteString, ?] = {
 
     val restartSettings = RestartSettings(
-      minBackoff = retryDelaySec.seconds,
-      maxBackoff = retryDelaySec.seconds,
-      randomFactor = 0.0
+      minBackoff = minBackoff
+    , maxBackoff = maxBackoff
+    , randomFactor = 0.2
     )
-
+    val attempts = new java.util.concurrent.atomic.AtomicInteger(0)
     RestartSource.withBackoff(restartSettings) { () =>
-      log.info(s"[$streamName] attempting stream connection")
-      streamFactory().idleTimeout(maxGapSec.seconds)
+      val n = attempts.incrementAndGet()
+      if (n == 1) log.info(s"[$streamName] stream connect attempt=$n")
+      else log.warn(s"[$streamName] stream recovery retune attempt=$n")
+      streamFactory().idleTimeout(maxGapSec.seconds).map(Real(_))
     }
-    .keepAlive(nullPacketIntervalMs.millis, () => MPEGTS_NULL_PACKET)
+    .keepAlive(nullPacketIntervalMs.millis, () => GapFill)
+    .via(RecoveryTimeout.flow(recoveryTimeout, streamName))
+    .map {
+      case Real(data) => data
+      case GapFill => MPEGTS_NULL_PACKET
+    }
+  }
+
+  // After keepAlive: only Real backend bytes reset the timer; null keepalive does not.
+  private object RecoveryTimeout {
+    def flow(timeout: FiniteDuration, streamName: String): Flow[Elem, Elem, NotUsed] =
+      Flow.fromGraph(new Stage(timeout, streamName))
+
+    private final class Stage(timeout: FiniteDuration, streamName: String)
+        extends GraphStage[FlowShape[Elem, Elem]] {
+      val in: Inlet[Elem] = Inlet("RecoveryTimeout.in")
+      val out: Outlet[Elem] = Outlet("RecoveryTimeout.out")
+      override val shape: FlowShape[Elem, Elem] = FlowShape(in, out)
+
+      override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) {
+        private var lastRealNanos = System.nanoTime()
+        private val checkInterval = (timeout / 4).max(50.millis)
+        private var failAsync: org.apache.pekko.stream.stage.AsyncCallback[Throwable] = uninitialized
+
+        override def preStart(): Unit = {
+          failAsync = getAsyncCallback(failStage)
+          scheduleWithFixedDelay("recovery-check", checkInterval, checkInterval)
+        }
+
+        override protected def onTimer(timerKey: Any): Unit = {
+          if (System.nanoTime() - lastRealNanos > timeout.toNanos) {
+            log.error(s"[$streamName] recovery timeout ${timeout.toSeconds}s with no real data, ending stream")
+            failAsync.invoke(new java.util.concurrent.TimeoutException(s"$streamName recovery timeout"))
+          }
+        }
+
+        setHandler(in, new InHandler {
+          override def onPush(): Unit = {
+            val elem = grab(in)
+            elem match {
+              case Real(_) => lastRealNanos = System.nanoTime()
+              case GapFill => ()
+            }
+            push(out, elem)
+          }
+        })
+
+        setHandler(out, new OutHandler {
+          override def onPull(): Unit = pull(in)
+        })
+      }
+    }
   }
 }

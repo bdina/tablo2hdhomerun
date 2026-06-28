@@ -152,9 +152,28 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
-| `STREAM_MAX_GAP_SEC` | `60` | Maximum gap (in seconds) to inject null packets when stream is dropped |
-| `STREAM_RETRY_DELAY_SEC` | `5` | Reconnection attempt delay (in seconds) |
+| `STREAM_MAX_GAP_SEC` | `60` | Maximum gap (in seconds) before a single HLS attempt is retuned |
+| `STREAM_RETRY_DELAY_SEC` | `5` | Legacy fixed retry delay (superseded by min/max backoff when using HLS recovery) |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
+
+### Weak OTA / Plex recovery (HLS backend)
+
+Recovery retunes automatically on stalls, session end, or degraded MPEG-TS. Playback stays active while real video flows; null packets keep the HTTP connection alive during gaps. The stream ends when you stop it from the remote, or when `STREAM_RECOVERY_TIMEOUT_SEC` elapses with no real backend data (unattended TV on a dead channel).
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STREAM_RETRY_MIN_BACKOFF_SEC` | `2` | Minimum delay between retune attempts |
+| `STREAM_RETRY_MAX_BACKOFF_SEC` | `30` | Maximum delay between retune attempts |
+| `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | End stream after this many seconds without real backend data |
+| `STREAM_HLS_STALL_POLLS` | `3` | Playlist polls with no media-sequence advance before retune |
+| `STREAM_HLS_SEGMENT_GAP_SEC` | `15` | Reserved; single-attempt stall uses `STREAM_MAX_GAP_SEC` |
+| `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
+| `STREAM_HLS_HEALTH_WINDOW_SEC` | `10` | MPEG-TS health metric sliding window |
+| `STREAM_HLS_CC_ERROR_MAX` | `30` | Continuity-counter errors per window before degraded |
+| `STREAM_HLS_SYNC_LOSS_MAX` | `10` | Sync-byte misalignments per window before degraded |
+| `STREAM_HLS_NULL_RATIO_MAX` | `0.6` | Null-packet fraction per window before degraded |
+| `STREAM_HLS_HEALTH_ENFORCE` | `false` | When `true`, degraded TS fails the stream and triggers retune |
+| `STREAM_HLS_POLL_FAILURES_MAX` | `60` | Consecutive playlist fetch failures before retune |
 
 ### 4th Generation Variables
 

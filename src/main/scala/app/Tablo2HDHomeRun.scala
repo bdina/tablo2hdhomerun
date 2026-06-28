@@ -150,6 +150,18 @@ object Tablo2HDHomeRun {
   val STREAM_BACKEND = scala.sys.env.getOrElse("STREAM_BACKEND", "ffmpeg")
   val STREAM_MAX_GAP_SEC = scala.sys.env.get("STREAM_MAX_GAP_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
   val STREAM_RETRY_DELAY_SEC = scala.sys.env.get("STREAM_RETRY_DELAY_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(5)
+  val STREAM_RETRY_MIN_BACKOFF_SEC = scala.sys.env.get("STREAM_RETRY_MIN_BACKOFF_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(2)
+  val STREAM_RETRY_MAX_BACKOFF_SEC = scala.sys.env.get("STREAM_RETRY_MAX_BACKOFF_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(30)
+  val STREAM_RECOVERY_TIMEOUT_SEC = scala.sys.env.get("STREAM_RECOVERY_TIMEOUT_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
+  val STREAM_HLS_STALL_POLLS = scala.sys.env.get("STREAM_HLS_STALL_POLLS").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(3)
+  val STREAM_HLS_SEGMENT_GAP_SEC = scala.sys.env.get("STREAM_HLS_SEGMENT_GAP_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(15)
+  val STREAM_HLS_HEARTBEAT_SEC = scala.sys.env.get("STREAM_HLS_HEARTBEAT_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
+  val STREAM_HLS_HEALTH_WINDOW_SEC = scala.sys.env.get("STREAM_HLS_HEALTH_WINDOW_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(10)
+  val STREAM_HLS_CC_ERROR_MAX = scala.sys.env.get("STREAM_HLS_CC_ERROR_MAX").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(30)
+  val STREAM_HLS_SYNC_LOSS_MAX = scala.sys.env.get("STREAM_HLS_SYNC_LOSS_MAX").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(10)
+  val STREAM_HLS_NULL_RATIO_MAX = scala.sys.env.get("STREAM_HLS_NULL_RATIO_MAX").flatMap(s => scala.util.Try(s.toDouble).toOption).getOrElse(0.6)
+  val STREAM_HLS_HEALTH_ENFORCE = scala.sys.env.get("STREAM_HLS_HEALTH_ENFORCE").map(_ == "true").getOrElse(false)
+  val STREAM_HLS_POLL_FAILURES_MAX = scala.sys.env.get("STREAM_HLS_POLL_FAILURES_MAX").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
 
   import Response.Discover
   val discoverFriendlyName = TABLO_GEN match {

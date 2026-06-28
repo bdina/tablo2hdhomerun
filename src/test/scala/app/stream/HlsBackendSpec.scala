@@ -27,4 +27,11 @@ class HlsBackendSpec extends AnyFlatSpec with Matchers {
     val p = M3U8.Playlist(targetDuration = 6, mediaSequence = 0, segments = Seq.empty, isEndList = false)
     p.targetDuration shouldBe 6
   }
+
+  "HlsBackend.HlsError" should "include recovery error types" in {
+    val _ = HlsBackend.HlsError.SessionEnded shouldBe a[HlsBackend.HlsError]
+    val _ = HlsBackend.HlsError.PlaylistStall shouldBe a[HlsBackend.HlsError]
+    val _ = HlsBackend.HlsError.PollExhausted shouldBe a[HlsBackend.HlsError]
+    HlsBackend.HlsError.TsHealthDegraded("x") shouldBe a[HlsBackend.HlsError]
+  }
 }

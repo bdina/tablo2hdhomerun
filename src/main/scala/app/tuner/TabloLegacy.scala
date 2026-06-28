@@ -905,7 +905,14 @@ object TabloLegacy {
                 ResilientHlsSource(
                   streamFactory = () => streamFactory(),
                   streamName = s"legacy-channel-$channelId"
-                )
+                ).watchTermination() { (_, done) =>
+                  done.onComplete {
+                    case Success(_) =>
+                      log.info("[channel] stream end streamId={} channelId={}", streamId, channelId)
+                    case Failure(ex) =>
+                      log.warn("[channel] stream failed streamId={} channelId={}", streamId, channelId, ex)
+                  }
+                }
               }
 
             onComplete(startWatchSession(checkTuners = true)) {
