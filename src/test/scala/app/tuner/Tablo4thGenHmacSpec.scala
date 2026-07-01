@@ -49,4 +49,14 @@ class Tablo4thGenHmacSpec extends AnyFlatSpec with Matchers {
     val (authPost, _) = Hmac.sign("POST", "/p", None, "hk", "dk")
     authGet should not equal authPost
   }
+
+  it should "differ for session GET vs keepalive POST without query in path" in {
+    val sessionPath = "/player/sessions/abc"
+    val keepalivePath = "/player/sessions/abc/keepalive"
+    val (authGet, _) = Hmac.sign("GET", sessionPath, None, "hk", "dk")
+    val (authPost, _) = Hmac.sign("POST", keepalivePath, None, "hk", "dk")
+    authGet should not equal authPost
+    val _ = sessionPath should not include "?lh=1"
+    val _ = keepalivePath should not include "?lh=1"
+  }
 }

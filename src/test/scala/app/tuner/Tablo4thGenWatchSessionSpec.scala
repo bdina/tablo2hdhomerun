@@ -11,16 +11,25 @@ import java.time.Instant
 class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers {
 
   private def response(
-    expires: Option[String] = Some("2024-12-31T23:59:59Z")
+    token: Option[String] = Some("watch-token")
+  , expires: Option[String] = Some("2024-12-31T23:59:59Z")
   , keepalive: Option[Int] = Some(30)
   , playlistUrl: Option[String] = Some("http://example.com/playlist.m3u8")
   ): Tablo4thGen.Channel.Response.Watch4thGenResponse =
     Tablo4thGen.Channel.Response.Watch4thGenResponse(
-      token = Some("watch-token")
+      token = token
     , expires = expires
     , keepalive = keepalive
     , playlist_url = playlistUrl
     )
+
+  "WatchSession.sessionPath" should "build player session path" in {
+    Tablo4thGen.Channel.WatchSession.sessionPath("abc") shouldBe "/player/sessions/abc"
+  }
+
+  "WatchSession.keepalivePath" should "build keepalive path" in {
+    Tablo4thGen.Channel.WatchSession.keepalivePath("abc") shouldBe "/player/sessions/abc/keepalive"
+  }
 
   "WatchSession.fromResponse" should "build a session from watch response" in {
     Tablo4thGen.Channel.WatchSession.fromResponse(response()) match {
@@ -34,6 +43,45 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers {
 
   it should "fail when playlist url is missing" in {
     Tablo4thGen.Channel.WatchSession.fromResponse(response(playlistUrl = None)) shouldBe Left("No playlist URL returned")
+  }
+
+  it should "preserve fallback token when response omits token" in {
+    Tablo4thGen.Channel.WatchSession.fromResponse(response(token = None), Some("abc")) match {
+      case Right(session) => session.token shouldBe Some("abc")
+      case Left(_) => fail("expected session")
+    }
+  }
+
+  "WatchSession.keepaliveDelaySec" should "return None when token is missing" in {
+    val session = Tablo4thGen.Channel.WatchSession.Session(None, None, Some(165), "http://example.com/pl.m3u8")
+    Tablo4thGen.Channel.WatchSession.keepaliveDelaySec(session) shouldBe None
+  }
+
+  it should "return None when keepalive is missing" in {
+    val session = Tablo4thGen.Channel.WatchSession.Session(Some("abc"), None, None, "http://example.com/pl.m3u8")
+    Tablo4thGen.Channel.WatchSession.keepaliveDelaySec(session) shouldBe None
+  }
+
+  it should "schedule before the tablo keepalive interval" in {
+    val now = Instant.parse("2026-06-30T19:46:00Z")
+    val session = Tablo4thGen.Channel.WatchSession.Session(
+      Some("abc")
+    , Some(Instant.parse("2026-06-30T19:49:15Z"))
+    , Some(165)
+    , "http://example.com/pl.m3u8"
+    )
+    Tablo4thGen.Channel.WatchSession.keepaliveDelaySec(session, now) shouldBe Some(135)
+  }
+
+  it should "clamp when expires is sooner than keepalive interval" in {
+    val now = Instant.parse("2026-06-30T19:48:50Z")
+    val session = Tablo4thGen.Channel.WatchSession.Session(
+      Some("abc")
+    , Some(Instant.parse("2026-06-30T19:49:15Z"))
+    , Some(165)
+    , "http://example.com/pl.m3u8"
+    )
+    Tablo4thGen.Channel.WatchSession.keepaliveDelaySec(session, now) shouldBe Some(5)
   }
 
   "WatchSession.shouldRefreshSession" should "refresh when expiry is missing" in {

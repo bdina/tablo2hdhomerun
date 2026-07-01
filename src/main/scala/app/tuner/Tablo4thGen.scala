@@ -5,12 +5,12 @@ import org.apache.pekko
 import pekko.actor.typed.scaladsl.Behaviors
 import pekko.actor.typed.{ActorRef, ActorSystem, Behavior}
 import pekko.http.scaladsl.Http
-import pekko.http.scaladsl.model.{ContentTypes, HttpEntity, HttpMethods, HttpRequest, HttpResponse, MediaType, StatusCodes, Uri}
+import pekko.http.scaladsl.model.{ContentTypes, HttpEntity, HttpMethod, HttpMethods, HttpRequest, HttpResponse, MediaType, StatusCodes, Uri}
 import pekko.http.scaladsl.server.Directives._
 import pekko.stream.scaladsl.Source
 import pekko.util.ByteString
 
-import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 import java.time.{LocalDate, ZonedDateTime, ZoneOffset}
 import java.time.format.DateTimeFormatter
 import java.security.MessageDigest
@@ -729,6 +729,7 @@ object Tablo4thGen {
 
     object WatchSession {
       val expiryRetuneLeadSec: Int = 30
+      val keepaliveRetrySec: Int = 10
 
       case class Session(
         token: Option[String]
@@ -737,16 +738,37 @@ object Tablo4thGen {
       , playlistUrl: String
       )
 
+      def sessionPath(token: String): String = s"/player/sessions/$token"
+
+      def keepalivePath(token: String): String = s"${sessionPath(token)}/keepalive"
+
       def fromResponse(response: Response.Watch4thGenResponse): Either[String, Session] =
+        fromResponse(response, None)
+
+      def fromResponse(response: Response.Watch4thGenResponse, fallbackToken: Option[String]): Either[String, Session] =
         response.playlist_url match {
           case Some(url) =>
             Right(Session(
-              token = response.token
+              token = response.token.orElse(fallbackToken)
             , expires = response.expires.flatMap(value => scala.util.Try(java.time.Instant.parse(value)).toOption)
             , keepalive = response.keepalive
             , playlistUrl = url
             ))
           case None => Left("No playlist URL returned")
+        }
+
+      def keepaliveDelaySec(session: Session, now: java.time.Instant = java.time.Instant.now()): Option[Int] =
+        (session.token, session.keepalive) match {
+          case (Some(_), Some(keepalive)) =>
+            val lead = math.min(expiryRetuneLeadSec, math.max(1, keepalive / 3))
+            var delay = math.max(5, keepalive - lead)
+            session.expires.foreach { exp =>
+              val untilExpiry = java.time.Duration.between(now, exp).getSeconds.toInt
+              val expiryDelay = math.max(5, untilExpiry - expiryRetuneLeadSec)
+              if (expiryDelay < delay) delay = expiryDelay
+            }
+            Some(delay)
+          case _ => None
         }
 
       def isNearExpiry(session: Session, now: java.time.Instant = java.time.Instant.now()): Boolean =
@@ -844,6 +866,48 @@ object Tablo4thGen {
             }
           }
 
+          def parseSessionResponse(body: String, fallbackToken: Option[String]): Either[String, WatchSession.Session] =
+            WatchSession.fromResponse(body.parseJson.convertTo[Response.Watch4thGenResponse], fallbackToken)
+
+          def requestSession(
+            path: String
+          , method: HttpMethod
+          , fallbackToken: Option[String]
+          ): Future[WatchSession.Session] = {
+            val uri = authContext.deviceUrl.withPath(Uri.Path(path)).withQuery(Uri.Query("lh" -> "1"))
+            val headers = Hmac.signedHeaders(method.value, path, None, authContext)
+            val request = HttpRequest(method = method, uri = uri, headers = headers.toList)
+            HttpCtx.singleRequest(request).flatMap { response =>
+              if (response.status.isSuccess()) {
+                Unmarshal(response.entity).to[String].flatMap { body =>
+                  parseSessionResponse(body, fallbackToken) match {
+                    case Right(session) => Future.successful(session)
+                    case Left(message) => Future.failed(new RuntimeException(message))
+                  }
+                }
+              } else {
+                val _ = response.entity.discardBytes()
+                Future.failed(new RuntimeException(s"session ${method.value} failed: ${response.status.intValue()}"))
+              }
+            }
+          }
+
+          def keepaliveSession(session: WatchSession.Session): Future[WatchSession.Session] =
+            session.token match {
+              case Some(token) =>
+                log.debug("[channel] keepalive POST {} streamId={}", WatchSession.keepalivePath(token), streamId)
+                requestSession(WatchSession.keepalivePath(token), HttpMethods.POST, Some(token))
+              case None => Future.failed(new RuntimeException("session token missing"))
+            }
+
+          def fetchSession(session: WatchSession.Session): Future[WatchSession.Session] =
+            session.token match {
+              case Some(token) =>
+                log.debug("[channel] session GET {} streamId={}", WatchSession.sessionPath(token), streamId)
+                requestSession(WatchSession.sessionPath(token), HttpMethods.GET, Some(token))
+              case None => Future.failed(new RuntimeException("session token missing"))
+            }
+
           import app.stream.ResilientHlsSource
 
           def streamFromWatchSession(session: WatchSession.Session): Source[ByteString, ?] = {
@@ -856,36 +920,98 @@ object Tablo4thGen {
             StreamBackend().stream(session.playlistUrl)
           }
 
-          def streamFromWatchResponse(data: Response.Watch4thGenResponse): Source[ByteString, ?] =
-            WatchSession.fromResponse(data) match {
-              case Right(session) => streamFromWatchSession(session)
-              case Left(message) => Source.failed[ByteString](new RuntimeException(message))
-            }
-
           def streamWithTunerTracking(firstSession: WatchSession.Session): Source[ByteString, ?] =
             Source.lazySource { () =>
-              var nextSession: Option[WatchSession.Session] = Some(firstSession)
-              def streamFactory(): Source[ByteString, ?] = {
-                nextSession match {
-                  case Some(session) if !WatchSession.shouldRefreshSession(session) =>
-                    nextSession = None
-                    streamFromWatchSession(session)
-                  case _ =>
-                    nextSession = None
-                    Source.futureSource(startWatchSession(checkAvailability = false).map(streamFromWatchResponse))
-                }
+              import org.apache.pekko.actor.typed.scaladsl.adapter._
+              val currentSession = new AtomicReference[WatchSession.Session](firstSession)
+              @volatile var keepaliveTask: Option[org.apache.pekko.actor.Cancellable] = None
+              val leaseStopped = new AtomicBoolean(false)
+              var keepaliveMissingLogged = false
+              val scheduler = system.toClassic.scheduler
+
+              def cancelKeepalive(): Unit = {
+                leaseStopped.set(true)
+                keepaliveTask.foreach(_.cancel())
+                keepaliveTask = None
               }
+
+              def scheduleKeepaliveRetry(): Unit =
+                if (!leaseStopped.get())
+                  keepaliveTask = Some(
+                    scheduler.scheduleOnce(WatchSession.keepaliveRetrySec.seconds) { runKeepalive() }(ec)
+                  )
+
+              def runKeepalive(): Unit =
+                if (!leaseStopped.get())
+                  keepaliveSession(currentSession.get()).onComplete {
+                    case Success(updated) =>
+                      if (!leaseStopped.get()) {
+                        currentSession.set(updated)
+                        log.debug(
+                          "[channel] keepalive ok streamId={} expires={} keepalive={}"
+                        , streamId
+                        , updated.expires.map(_.toString).getOrElse("unknown")
+                        , updated.keepalive.map(_.toString).getOrElse("unknown")
+                        )
+                        scheduleKeepalive()
+                      }
+                    case Failure(ex) =>
+                      if (!leaseStopped.get()) {
+                        log.warn("[channel] keepalive failed streamId={}", streamId, ex)
+                        fetchSession(currentSession.get()).onComplete {
+                          case Success(updated) =>
+                            if (!leaseStopped.get()) currentSession.set(updated)
+                          case Failure(_) => ()
+                        }(ec)
+                        scheduleKeepaliveRetry()
+                      }
+                  }(ec)
+
+              def scheduleKeepalive(): Unit =
+                if (!leaseStopped.get())
+                  WatchSession.keepaliveDelaySec(currentSession.get()) match {
+                    case Some(delaySec) =>
+                      keepaliveTask = Some(
+                        scheduler.scheduleOnce(delaySec.seconds) { runKeepalive() }(ec)
+                      )
+                    case None =>
+                      if (!keepaliveMissingLogged) {
+                        keepaliveMissingLogged = true
+                        log.debug("[channel] keepalive disabled streamId={} missing token or interval", streamId)
+                      }
+                  }
+
+              def streamFactory(): Source[ByteString, ?] = {
+                val session = currentSession.get()
+                if (!WatchSession.shouldRefreshSession(session))
+                  streamFromWatchSession(session)
+                else
+                  Source.futureSource(
+                    startWatchSession(checkAvailability = false).map { data =>
+                      WatchSession.fromResponse(data) match {
+                        case Right(newSession) =>
+                          currentSession.set(newSession)
+                          streamFromWatchSession(newSession)
+                        case Left(message) => Source.failed[ByteString](new RuntimeException(message))
+                      }
+                    }
+                  )
+              }
+
               val n = activeStreams.incrementAndGet()
               log.info("[channel] stream start streamId={} channelId={} active={}", streamId, channelId, n)
+              scheduleKeepalive()
               ResilientHlsSource(
                 streamFactory = () => streamFactory()
               , streamName = s"4thgen-channel-$channelId"
               ).watchTermination() { (_, done) =>
                 done.onComplete {
                   case Success(_) =>
+                    cancelKeepalive()
                     val m = activeStreams.decrementAndGet()
                     log.info("[channel] stream end streamId={} active={}", streamId, m)
                   case Failure(ex) =>
+                    cancelKeepalive()
                     val m = activeStreams.decrementAndGet()
                     log.warn("[channel] stream failed streamId={} active={}", streamId, m, ex)
                 }

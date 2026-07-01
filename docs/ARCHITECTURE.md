@@ -143,9 +143,10 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
    a. POST /guide/channels/{id}/watch to Tablo
    b. Receive watch response with HLS playlist URL, expiry, and keepalive metadata
    c. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
-   d. 4th gen recovery retunes via `/watch` when the HLS session stalls, expires, or degrades
-   e. Stream output as chunked HTTP response
-   f. On client disconnect, clean up backend resources
+   d. 4th gen: periodically POST /player/sessions/{token}/keepalive while the client stream is active
+   e. 4th gen recovery retunes via `/watch` when the HLS session stalls, expires, or degrades
+   f. Stream output as chunked HTTP response
+   g. On client disconnect, clean up backend resources and cancel session keepalive
 4. If no tuners: return 500 error
 ```
 

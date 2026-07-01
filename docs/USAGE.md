@@ -168,6 +168,9 @@ The native HLS backend (`STREAM_BACKEND=hls`) adds:
 - Strict validation of ranged segment responses (`206` + `Content-Range`)
 - Distinct recovery errors for playlist stalls, segment-not-ready races, and auth failures
 - 4th gen watch-session expiry awareness before recovery retune
+- 4th gen Tablo player-session keepalive (`POST /player/sessions/{token}/keepalive`) while client playback is active
+
+MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session keepalive are separate mechanisms: the former keeps the HTTP chunked response alive during HLS gaps; the latter renews the Tablo watch session token on the device.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
