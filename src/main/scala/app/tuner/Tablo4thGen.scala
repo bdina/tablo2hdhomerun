@@ -727,6 +727,35 @@ object Tablo4thGen {
       }
     }
 
+    object WatchSession {
+      val expiryRetuneLeadSec: Int = 30
+
+      case class Session(
+        token: Option[String]
+      , expires: Option[java.time.Instant]
+      , keepalive: Option[Int]
+      , playlistUrl: String
+      )
+
+      def fromResponse(response: Response.Watch4thGenResponse): Either[String, Session] =
+        response.playlist_url match {
+          case Some(url) =>
+            Right(Session(
+              token = response.token
+            , expires = response.expires.flatMap(value => scala.util.Try(java.time.Instant.parse(value)).toOption)
+            , keepalive = response.keepalive
+            , playlistUrl = url
+            ))
+          case None => Left("No playlist URL returned")
+        }
+
+      def isNearExpiry(session: Session, now: java.time.Instant = java.time.Instant.now()): Boolean =
+        session.expires.exists(exp => !now.isBefore(exp.minusSeconds(expiryRetuneLeadSec.toLong)))
+
+      def shouldRefreshSession(session: Session, now: java.time.Instant = java.time.Instant.now()): Boolean =
+        session.expires.isEmpty || isNearExpiry(session, now)
+    }
+
     private val activeStreams = new AtomicInteger(0)
     @volatile private var totalTuners: Int = 4
 
@@ -817,25 +846,32 @@ object Tablo4thGen {
 
           import app.stream.ResilientHlsSource
 
-          def streamFromWatchResponse(data: Response.Watch4thGenResponse): Source[ByteString, ?] = {
-            data.playlist_url match {
-              case Some(url) =>
-                log.info(s"[4thgen-channel] recovered tune - playlist: $url")
-                StreamBackend().stream(url)
-              case None =>
-                Source.failed[ByteString](new RuntimeException("No playlist URL returned"))
-            }
+          def streamFromWatchSession(session: WatchSession.Session): Source[ByteString, ?] = {
+            log.info(
+              "[4thgen-channel] stream session expires={} keepalive={} playlist={}"
+            , session.expires.map(_.toString).getOrElse("unknown")
+            , session.keepalive.map(_.toString).getOrElse("unknown")
+            , LogConfig.truncate(session.playlistUrl)
+            )
+            StreamBackend().stream(session.playlistUrl)
           }
 
-          def streamWithTunerTracking(firstPlaylistUrl: String): Source[ByteString, ?] =
+          def streamFromWatchResponse(data: Response.Watch4thGenResponse): Source[ByteString, ?] =
+            WatchSession.fromResponse(data) match {
+              case Right(session) => streamFromWatchSession(session)
+              case Left(message) => Source.failed[ByteString](new RuntimeException(message))
+            }
+
+          def streamWithTunerTracking(firstSession: WatchSession.Session): Source[ByteString, ?] =
             Source.lazySource { () =>
-              var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
+              var nextSession: Option[WatchSession.Session] = Some(firstSession)
               def streamFactory(): Source[ByteString, ?] = {
-                nextPlaylistUrl match {
-                  case Some(url) =>
-                    nextPlaylistUrl = None
-                    StreamBackend().stream(url)
-                  case None =>
+                nextSession match {
+                  case Some(session) if !WatchSession.shouldRefreshSession(session) =>
+                    nextSession = None
+                    streamFromWatchSession(session)
+                  case _ =>
+                    nextSession = None
                     Source.futureSource(startWatchSession(checkAvailability = false).map(streamFromWatchResponse))
                 }
               }
@@ -858,17 +894,23 @@ object Tablo4thGen {
 
           onComplete(startWatchSession(checkAvailability = true)) {
             case Success(data) =>
-              data.playlist_url match {
-                case Some(url) =>
-                  log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, url)
+              WatchSession.fromResponse(data) match {
+                case Right(session) =>
+                  log.info(
+                    "[channel] tuned streamId={} channelId={} expires={} keepalive={}"
+                  , streamId
+                  , channelId
+                  , session.expires.map(_.toString).getOrElse("unknown")
+                  , session.keepalive.map(_.toString).getOrElse("unknown")
+                  )
                   val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
                   complete(
                     HttpEntity.Chunked.fromData(
                       pekko.http.scaladsl.model.ContentType(`video/mp2t`),
-                      streamWithTunerTracking(url)
+                      streamWithTunerTracking(session)
                     )
                   )
-                case None =>
+                case Left(_) =>
                   log.warn("[channel] no playlist streamId={} channelId={}", streamId, channelId)
                   complete(HttpResponse(StatusCodes.InternalServerError, entity = "No playlist URL returned"))
               }

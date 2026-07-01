@@ -1,7 +1,14 @@
 package app.stream
 
 object HlsPlaylistPoller {
-  type SegmentInfo = (String, Option[(Long, Long)])
+  val liveEdgeSegmentCount: Int = 3
+
+  final case class SegmentInfo(
+    url: String
+  , byteRange: Option[(Long, Long)]
+  , sequence: Int
+  , duration: Double
+  )
 
   final case class PollState(
     baseUrl: String
@@ -10,6 +17,10 @@ object HlsPlaylistPoller {
   , stallPolls: Int
   , fetchFailures: Int
   , loggedFirstSegment: Boolean
+  , emittedKeys: Set[String] = Set.empty
+  , lastAdvanced: Boolean = false
+  , etag: Option[String] = None
+  , lastModified: Option[String] = None
   )
 
   sealed trait Outcome
@@ -18,6 +29,39 @@ object HlsPlaylistPoller {
 
   def initial(baseUrl: String): PollState =
     PollState(baseUrl, 0, 0, 0, 0, false)
+
+  val pollDelayMinSec: Int = 1
+  val pollDelayMaxSec: Int = 10
+
+  def pollDelaySec(
+    state: PollState
+  , playlistAdvanced: Boolean
+  , targetDurationSec: Int
+  , defaultPollSec: Int
+  ): Int = {
+    if (state.lastSeq == 0) 0
+    else {
+      val target = if (targetDurationSec > 0) targetDurationSec else defaultPollSec
+      val raw = if (playlistAdvanced) target else (target / 2).max(1)
+      raw.max(pollDelayMinSec).min(pollDelayMaxSec)
+    }
+  }
+
+  def segmentKey(info: SegmentInfo): String =
+    info.byteRange match {
+      case Some((offset, length)) => s"${info.sequence}|${info.url}|$offset|$length"
+      case None => s"${info.sequence}|${info.url}"
+    }
+
+  private def segmentInfos(baseUrl: String, playlist: M3U8.Playlist): Seq[SegmentInfo] =
+    playlist.segments.zipWithIndex.map { case (seg, idx) =>
+      SegmentInfo(
+        url = M3U8.resolveSegmentUri(seg.uri, baseUrl)
+      , byteRange = seg.byteRange
+      , sequence = playlist.mediaSequence + idx
+      , duration = seg.duration
+      )
+    }
 
   def onPlaylist(
     state: PollState
@@ -29,12 +73,12 @@ object HlsPlaylistPoller {
       Fail(HlsBackend.HlsError.SessionEnded)
     } else {
       val isFirstPoll = state.lastSeq == 0
-      val startIndex = if (isFirstPoll)
-        (playlist.segments.size - 3).max(0)
+      val allSegments = segmentInfos(state.baseUrl, playlist)
+      val candidates = if (isFirstPoll)
+        allSegments.takeRight(liveEdgeSegmentCount)
       else
-        (state.lastSeq - playlist.mediaSequence).max(0)
-      val toEmit = playlist.segments.drop(startIndex)
-      val segments = toEmit.map(seg => (M3U8.resolveSegmentUri(seg.uri, state.baseUrl), seg.byteRange))
+        allSegments.filter(_.sequence >= state.lastSeq)
+      val segments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
       val newLastSeq = playlist.mediaSequence + playlist.segments.size
       val advanced = newLastSeq > state.lastSeq
       val nextStall = if (advanced) 0 else state.stallPolls + 1
@@ -42,6 +86,7 @@ object HlsPlaylistPoller {
         Fail(HlsBackend.HlsError.PlaylistStall)
       } else {
         val nextTarget = if (playlist.targetDuration > 0) playlist.targetDuration else defaultPollSec
+        val newEmittedKeys = state.emittedKeys ++ segments.map(segmentKey)
         Emit(
           state.copy(
             lastSeq = newLastSeq
@@ -49,6 +94,8 @@ object HlsPlaylistPoller {
           , stallPolls = nextStall
           , fetchFailures = 0
           , loggedFirstSegment = state.loggedFirstSegment || segments.nonEmpty
+          , emittedKeys = newEmittedKeys
+          , lastAdvanced = advanced
           )
           , segments
         )
@@ -62,6 +109,22 @@ object HlsPlaylistPoller {
       Fail(HlsBackend.HlsError.PollExhausted)
     } else {
       Emit(state.copy(fetchFailures = n), Seq.empty)
+    }
+  }
+
+  def onPlaylistNotModified(state: PollState, maxStallPolls: Int): Outcome = {
+    val nextStall = state.stallPolls + 1
+    if (nextStall >= maxStallPolls) {
+      Fail(HlsBackend.HlsError.PlaylistStall)
+    } else {
+      Emit(
+        state.copy(
+          stallPolls = nextStall
+        , fetchFailures = 0
+        , lastAdvanced = false
+        )
+      , Seq.empty
+      )
     }
   }
 }

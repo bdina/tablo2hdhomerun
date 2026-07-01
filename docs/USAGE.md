@@ -158,7 +158,16 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 
 ### Weak OTA / Plex recovery (HLS backend)
 
-Recovery retunes automatically on stalls, session end, or degraded MPEG-TS. Playback stays active while real video flows; null packets keep the HTTP connection alive during gaps. The stream ends when you stop it from the remote, or when `STREAM_RECOVERY_TIMEOUT_SEC` elapses with no real backend data (unattended TV on a dead channel).
+Recovery retunes automatically on stalls, session end, unauthorized segment responses, range mismatches, or degraded MPEG-TS. Playback stays active while real video flows; null packets keep the HTTP connection alive during gaps. The stream ends when you stop it from the remote, or when `STREAM_RECOVERY_TIMEOUT_SEC` elapses with no real backend data (unattended TV on a dead channel).
+
+The native HLS backend (`STREAM_BACKEND=hls`) adds:
+
+- HLS v4 `#EXT-X-BYTERANGE` support with HTTP range requests
+- Adaptive playlist polling based on `#EXT-X-TARGETDURATION`
+- Conditional playlist requests when the Tablo device returns `ETag` or `Last-Modified`
+- Strict validation of ranged segment responses (`206` + `Content-Range`)
+- Distinct recovery errors for playlist stalls, segment-not-ready races, and auth failures
+- 4th gen watch-session expiry awareness before recovery retune
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -166,7 +175,7 @@ Recovery retunes automatically on stalls, session end, or degraded MPEG-TS. Play
 | `STREAM_RETRY_MAX_BACKOFF_SEC` | `30` | Maximum delay between retune attempts |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | End stream after this many seconds without real backend data |
 | `STREAM_HLS_STALL_POLLS` | `3` | Playlist polls with no media-sequence advance before retune |
-| `STREAM_HLS_SEGMENT_GAP_SEC` | `15` | Reserved; single-attempt stall uses `STREAM_MAX_GAP_SEC` |
+| `STREAM_HLS_SEGMENT_GAP_SEC` | `15` | Unused legacy setting; idle timeout uses `STREAM_MAX_GAP_SEC` |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
 | `STREAM_HLS_HEALTH_WINDOW_SEC` | `10` | MPEG-TS health metric sliding window |
 | `STREAM_HLS_CC_ERROR_MAX` | `30` | Continuity-counter errors per window before degraded |

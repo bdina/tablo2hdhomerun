@@ -11,6 +11,7 @@ object M3U8 {
   , mediaSequence: Int
   , segments: Seq[Segment]
   , isEndList: Boolean
+  , version: Option[Int] = None
   )
 
   def parse(raw: String): Playlist = {
@@ -18,6 +19,7 @@ object M3U8 {
     var targetDuration = 10
     var mediaSequence = 0
     var isEndList = false
+    var version: Option[Int] = None
     var pendingByteRange: Option[(Long, Long)] = None
     var nextImplicitOffset: Long = 0
     val segmentBuilder = Seq.newBuilder[Segment]
@@ -40,6 +42,9 @@ object M3U8 {
     while (i < lines.length) {
       val line = lines(i)
       if (line == "#EXTM3U") {
+        i += 1
+      } else if (line.startsWith("#EXT-X-VERSION:")) {
+        version = Try(line.substring("#EXT-X-VERSION:".length).trim.toInt).toOption
         i += 1
       } else if (line.startsWith("#EXT-X-TARGETDURATION:")) {
         targetDuration = Try(line.substring("#EXT-X-TARGETDURATION:".length).trim.toInt).toOption.getOrElse(10)
@@ -79,8 +84,11 @@ object M3U8 {
       }
     }
     Playlist(
-      targetDuration = targetDuration, mediaSequence = mediaSequence
-    , segments = segmentBuilder.result(), isEndList = isEndList
+      targetDuration = targetDuration
+    , mediaSequence = mediaSequence
+    , segments = segmentBuilder.result()
+    , isEndList = isEndList
+    , version = version
     )
   }
 

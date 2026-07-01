@@ -163,4 +163,57 @@ class M3U8Spec extends AnyFlatSpec with Matchers {
     val _ = p.segments(0).duration shouldBe 0.0
     p.segments(0).title shouldBe None
   }
+
+  it should "parse EXT-X-VERSION 4" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-VERSION:4
+        |#EXT-X-TARGETDURATION:6
+        |#EXTINF:6.0,
+        |a.ts
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.version shouldBe Some(4)
+    p.targetDuration shouldBe 6
+  }
+
+  it should "leave version None when EXT-X-VERSION is missing" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-TARGETDURATION:6
+        |#EXTINF:6.0,
+        |a.ts
+        |""".stripMargin
+    M3U8.parse(raw).version shouldBe None
+  }
+
+  it should "leave version None when EXT-X-VERSION is malformed" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-VERSION:abc
+        |#EXTINF:6.0,
+        |a.ts
+        |""".stripMargin
+    M3U8.parse(raw).version shouldBe None
+  }
+
+  it should "parse version 4 with byte ranges" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-VERSION:4
+        |#EXT-X-TARGETDURATION:10
+        |#EXT-X-MEDIA-SEQUENCE:0
+        |#EXTINF:10.0,
+        |#EXT-X-BYTERANGE:1000
+        |seg0.ts
+        |#EXTINF:10.0,
+        |#EXT-X-BYTERANGE:2000
+        |seg1.ts
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.version shouldBe Some(4)
+    val _ = p.segments should have size 2
+    val _ = p.segments(0).byteRange shouldBe Some((0L, 1000L))
+    p.segments(1).byteRange shouldBe Some((1000L, 2000L))
+  }
 }

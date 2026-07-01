@@ -32,6 +32,9 @@ class HlsBackendSpec extends AnyFlatSpec with Matchers {
     val _ = HlsBackend.HlsError.SessionEnded shouldBe a[HlsBackend.HlsError]
     val _ = HlsBackend.HlsError.PlaylistStall shouldBe a[HlsBackend.HlsError]
     val _ = HlsBackend.HlsError.PollExhausted shouldBe a[HlsBackend.HlsError]
+    val _ = HlsBackend.HlsError.SegmentNotReady shouldBe a[HlsBackend.HlsError]
+    val _ = HlsBackend.HlsError.SegmentRangeMismatch("x") shouldBe a[HlsBackend.HlsError]
+    val _ = HlsBackend.HlsError.Unauthorized(org.apache.pekko.http.scaladsl.model.StatusCodes.Unauthorized) shouldBe a[HlsBackend.HlsError]
     HlsBackend.HlsError.TsHealthDegraded("x") shouldBe a[HlsBackend.HlsError]
   }
 }
