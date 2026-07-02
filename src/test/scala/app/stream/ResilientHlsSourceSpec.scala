@@ -10,6 +10,7 @@ import org.scalatest.wordspec.AnyWordSpecLike
 import org.scalatestplus.junit.JUnitRunner
 
 import scala.concurrent.duration._
+import java.util.concurrent.atomic.AtomicBoolean
 
 @RunWith(classOf[JUnitRunner])
 class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with Matchers {
@@ -64,6 +65,37 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
         , recoveryTimeout = 300.millis
         , minBackoff = 50.millis
         , maxBackoff = 50.millis
+      )
+      val failed = wrappedSource.runWith(Sink.ignore).failed.futureValue
+      failed shouldBe a[java.util.concurrent.TimeoutException]
+    }
+
+    "stay alive when real data arrives faster than recovery timeout" in {
+      val factory = () => Source.tick(80.millis, 80.millis, ByteString("x"))
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-timer-reset"
+      , recoveryTimeout = 400.millis
+      , minBackoff = 1.second
+      , maxBackoff = 1.second
+      )
+      val result = wrappedSource.takeWithin(600.millis).runWith(Sink.seq).futureValue
+      result.size should be > 3
+    }
+
+    "timeout when only null keepalive follows initial real data" in {
+      val sentReal = new AtomicBoolean(false)
+      val factory = () =>
+        if (sentReal.compareAndSet(false, true))
+          Source.single(ByteString("once"))
+        else
+          Source.never
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-null-no-reset"
+      , recoveryTimeout = 300.millis
+      , minBackoff = 1.second
+      , maxBackoff = 1.second
       )
       val failed = wrappedSource.runWith(Sink.ignore).failed.futureValue
       failed shouldBe a[java.util.concurrent.TimeoutException]

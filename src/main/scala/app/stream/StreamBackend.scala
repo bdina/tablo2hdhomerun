@@ -9,7 +9,7 @@ import pekko.util.ByteString
 import app.Tablo2HDHomeRun
 
 trait StreamBackend {
-  def stream(playlistUrl: String)(implicit system: ActorSystem[?]): Source[ByteString, ?]
+  def stream(playlistUrl: String, label: String = "")(implicit system: ActorSystem[?]): Source[ByteString, ?]
   def name: String
 }
 

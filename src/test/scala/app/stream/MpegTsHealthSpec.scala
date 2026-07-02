@@ -56,5 +56,29 @@ class MpegTsHealthSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike wi
         .futureValue
       out shouldBe p
     }
+
+    "fail when enforce is true and continuity-counter errors exceed threshold" in {
+      val settings = MpegTsHealth.Settings(windowSec = 1, ccMax = 0, syncMax = 100, nullRatioMax = 0.9, enforce = true)
+      val stream = videoPacket(0) ++ videoPacket(5)
+      val failed = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.ignore)
+        .failed
+        .futureValue
+      failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
+    }
+
+    "fail when enforce is true and sync-byte loss exceeds threshold" in {
+      val settings = MpegTsHealth.Settings(windowSec = 1, ccMax = 100, syncMax = 0, nullRatioMax = 0.9, enforce = true)
+      val stream = ByteString(Array.fill[Byte](10)(0x00.toByte)) ++ videoPacket(0)
+      val failed = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.ignore)
+        .failed
+        .futureValue
+      failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
+    }
   }
 }

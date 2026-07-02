@@ -84,6 +84,26 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers {
     Tablo4thGen.Channel.WatchSession.keepaliveDelaySec(session, now) shouldBe Some(5)
   }
 
+  it should "use keepalive lead branch for small intervals" in {
+    val session = Tablo4thGen.Channel.WatchSession.Session(
+      Some("abc")
+    , None
+    , Some(9)
+    , "http://example.com/pl.m3u8"
+    )
+    Tablo4thGen.Channel.WatchSession.keepaliveDelaySec(session) shouldBe Some(6)
+  }
+
+  it should "floor delay at five seconds" in {
+    val session = Tablo4thGen.Channel.WatchSession.Session(
+      Some("abc")
+    , None
+    , Some(6)
+    , "http://example.com/pl.m3u8"
+    )
+    Tablo4thGen.Channel.WatchSession.keepaliveDelaySec(session) shouldBe Some(5)
+  }
+
   "WatchSession.shouldRefreshSession" should "refresh when expiry is missing" in {
     val session = Tablo4thGen.Channel.WatchSession.Session(None, None, Some(30), "http://example.com/pl.m3u8")
     Tablo4thGen.Channel.WatchSession.shouldRefreshSession(session) shouldBe true

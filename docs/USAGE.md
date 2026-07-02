@@ -153,7 +153,6 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
 | `STREAM_MAX_GAP_SEC` | `60` | Maximum gap (in seconds) before a single HLS attempt is retuned |
-| `STREAM_RETRY_DELAY_SEC` | `5` | Legacy fixed retry delay (superseded by min/max backoff when using HLS recovery) |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### Weak OTA / Plex recovery (HLS backend)
@@ -178,7 +177,6 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `STREAM_RETRY_MAX_BACKOFF_SEC` | `30` | Maximum delay between retune attempts |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | End stream after this many seconds without real backend data |
 | `STREAM_HLS_STALL_POLLS` | `3` | Playlist polls with no media-sequence advance before retune |
-| `STREAM_HLS_SEGMENT_GAP_SEC` | `15` | Unused legacy setting; idle timeout uses `STREAM_MAX_GAP_SEC` |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
 | `STREAM_HLS_HEALTH_WINDOW_SEC` | `10` | MPEG-TS health metric sliding window |
 | `STREAM_HLS_CC_ERROR_MAX` | `30` | Continuity-counter errors per window before degraded |

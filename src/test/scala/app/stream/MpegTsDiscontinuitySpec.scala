@@ -42,5 +42,24 @@ class MpegTsDiscontinuitySpec extends ScalaTestWithActorTestKit with AnyWordSpec
       val thirdPacketOffset = 376
       val _ = (out(thirdPacketOffset + 5) & 0x80) shouldBe 0
     }
+
+    "reassemble a packet split across chunks" in {
+      val flow = MpegTsDiscontinuity.markFirstPackets(1)
+      val packet = packetWithAdaptation(0)
+      val first = packet.take(100)
+      val second = packet.drop(100)
+      val out = Source(List(first, second)).via(flow).runWith(Sink.fold(ByteString.empty)(_ ++ _)).futureValue
+      val _ = out.length shouldBe 188
+      (out(5) & 0x80) should not be 0
+    }
+
+    "pass through packets beyond count without marking" in {
+      val flow = MpegTsDiscontinuity.markFirstPackets(1)
+      val input = packetWithAdaptation(0) ++ packetWithAdaptation(1) ++ packetPayloadOnly(2)
+      val out = Source.single(input).via(flow).runWith(Sink.head).futureValue
+      val _ = (out(5) & 0x80) should not be 0
+      val secondPacketOffset = 188
+      (out(secondPacketOffset + 5) & 0x80) shouldBe 0
+    }
   }
 }

@@ -86,7 +86,8 @@ object HlsPlaylistPoller {
         Fail(HlsBackend.HlsError.PlaylistStall)
       } else {
         val nextTarget = if (playlist.targetDuration > 0) playlist.targetDuration else defaultPollSec
-        val newEmittedKeys = state.emittedKeys ++ segments.map(segmentKey)
+        val playlistKeys = allSegments.map(segmentKey).toSet
+        val newEmittedKeys = (state.emittedKeys ++ segments.map(segmentKey)).intersect(playlistKeys)
         Emit(
           state.copy(
             lastSeq = newLastSeq

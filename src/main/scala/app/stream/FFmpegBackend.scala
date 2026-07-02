@@ -14,7 +14,7 @@ object FFmpegBackend extends StreamBackend {
   val log = LoggerFactory.getLogger(this.getClass)
   override def name: String = "ffmpeg"
 
-  override def stream(playlistUrl: String)(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
+  override def stream(playlistUrl: String, label: String = "")(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
     Source.lazySource { () =>
       val ffmpegCmd = Array(
@@ -31,7 +31,7 @@ object FFmpegBackend extends StreamBackend {
       , "pipe:1"
       )
       val process = scala.sys.runtime.exec(ffmpegCmd)
-      log.info("[stream:ffmpeg] start pid={} playlistUrl={}", process.pid, playlistUrl)
+      log.info("[stream:ffmpeg] start label={} pid={} playlistUrl={}", label, process.pid, playlistUrl)
       StreamConverters
         .fromInputStream(() => process.getInputStream)
         .watchTermination() { (_, done) =>

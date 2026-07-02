@@ -126,4 +126,17 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val _ = HlsPlaylistPoller.pollDelaySec(state, playlistAdvanced = true, targetDurationSec = 20, defaultPollSec = 2) shouldBe 10
     HlsPlaylistPoller.pollDelaySec(state, playlistAdvanced = false, targetDurationSec = 1, defaultPollSec = 2) shouldBe 1
   }
+
+  it should "bound emittedKeys to the current playlist window" in {
+    var state = HlsPlaylistPoller.initial("http://host/pl.m3u8")
+    val windowSize = 2
+    (0 until 10).foreach { seq =>
+      val p = playlist(seq, Seq(s"seg${seq}.ts", s"seg${seq + 1}.ts"))
+      HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 20, defaultPollSec = 2) match {
+        case HlsPlaylistPoller.Emit(next, _) => state = next
+        case _ => fail(s"expected emit at seq=$seq")
+      }
+      state.emittedKeys.size should be <= windowSize
+    }
+  }
 }

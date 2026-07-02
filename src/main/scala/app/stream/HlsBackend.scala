@@ -39,9 +39,16 @@ object HlsBackend extends StreamBackend {
     case object SessionEnded extends RuntimeException("playlist ended (EXT-X-ENDLIST)") with HlsError
     case object PlaylistStall extends RuntimeException("playlist media-sequence stalled") with HlsError
     case object PollExhausted extends RuntimeException("playlist poll failures exhausted") with HlsError
-    case object SegmentGap extends RuntimeException("no segment bytes within gap window") with HlsError
     final case class TsHealthDegraded(detail: String) extends RuntimeException(s"ts health degraded: $detail") with HlsError
   }
+
+  private[stream] def pollOutcomeToFuture(
+    outcome: HlsPlaylistPoller.Outcome
+  ): Future[Option[(HlsPlaylistPoller.PollState, Seq[HlsPlaylistPoller.SegmentInfo])]] =
+    outcome match {
+      case HlsPlaylistPoller.Emit(next, segments) => Future.successful(Some((next, segments)))
+      case HlsPlaylistPoller.Fail(err) => Future.failed(err)
+    }
 
   type SegmentInfo = HlsPlaylistPoller.SegmentInfo
   type PollState = HlsPlaylistPoller.PollState
@@ -55,7 +62,7 @@ object HlsBackend extends StreamBackend {
     , enforce = Tablo2HDHomeRun.STREAM_HLS_HEALTH_ENFORCE
     )
 
-  override def stream(playlistUrl: String)(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
+  override def stream(playlistUrl: String, label: String = "")(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
     val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
@@ -194,68 +201,66 @@ object HlsBackend extends StreamBackend {
       , state.lastTargetDuration
       , defaultPollSec
       )
-    def applyOutcome(
-      outcome: HlsPlaylistPoller.Outcome
-    , priorLogged: Boolean
-    ): Future[Option[(PollState, Seq[SegmentInfo])]] = {
-      outcome match {
-        case HlsPlaylistPoller.Emit(next, segments) =>
-          lastSeqOut.set(next.lastSeq)
-          if (segments.nonEmpty && !priorLogged) {
-            val head = segments.head
-            val last = segments.last
-            val rangeDesc = head.byteRange.map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
-            log.info(
-              "[stream:hls] emit count={} firstSeq={} lastSeq={} firstUrl={}{}"
-            , segments.size
-            , head.sequence
-            , last.sequence
-            , LogConfig.truncate(head.url)
-            , rangeDesc
-            )
-          }
-          Future.successful(Some((next, segments)))
-        case HlsPlaylistPoller.Fail(err) =>
-          log.warn("[stream:hls] retune reason={}", err.getMessage)
-          Future.failed(err)
-      }
-    }
     def step(state: PollState)(implicit mat: pekko.stream.Materializer): Future[Option[(PollState, Seq[SegmentInfo])]] = {
       val doFetch: () => Future[Option[(PollState, Seq[SegmentInfo])]] = () => {
-        fetchPlaylistWithState(state)(mat).flatMap { case (fetchedState, bodyOpt) =>
-          val outcome = bodyOpt match {
-            case None =>
-              log.debug("[stream:hls] playlist not-modified lastSeq={}", fetchedState.lastSeq)
-              HlsPlaylistPoller.onPlaylistNotModified(fetchedState, Tablo2HDHomeRun.STREAM_HLS_STALL_POLLS)
-            case Some(body) =>
-              val playlist = M3U8.parse(body)
-              log.debug(
-                "[stream:hls] playlist version={} target={} mediaSequence={} segments={} pollDelay={}"
-              , playlist.version.map(_.toString).getOrElse("unknown")
-              , playlist.targetDuration
-              , playlist.mediaSequence
-              , playlist.segments.size
-              , pollIntervalSecFromState(fetchedState)
-              )
-              HlsPlaylistPoller.onPlaylist(
-                fetchedState
-              , playlist
-              , Tablo2HDHomeRun.STREAM_HLS_STALL_POLLS
-              , defaultPollSec
-              )
+        fetchPlaylistWithState(state)(mat)
+          .map { case (fetchedState, bodyOpt) =>
+            bodyOpt match {
+              case None =>
+                log.debug("[stream:hls] playlist not-modified lastSeq={}", fetchedState.lastSeq)
+                HlsPlaylistPoller.onPlaylistNotModified(fetchedState, Tablo2HDHomeRun.STREAM_HLS_STALL_POLLS)
+              case Some(body) =>
+                val playlist = M3U8.parse(body)
+                log.debug(
+                  "[stream:hls] playlist version={} target={} mediaSequence={} segments={} pollDelay={}"
+                , playlist.version.map(_.toString).getOrElse("unknown")
+                , playlist.targetDuration
+                , playlist.mediaSequence
+                , playlist.segments.size
+                , pollIntervalSecFromState(fetchedState)
+                )
+                HlsPlaylistPoller.onPlaylist(
+                  fetchedState
+                , playlist
+                , Tablo2HDHomeRun.STREAM_HLS_STALL_POLLS
+                , defaultPollSec
+                )
+            }
           }
-          applyOutcome(outcome, state.loggedFirstSegment)
-        }.recoverWith { case ex =>
-          val outcome = HlsPlaylistPoller.onFetchError(state, Tablo2HDHomeRun.STREAM_HLS_POLL_FAILURES_MAX)
-          outcome match {
-            case HlsPlaylistPoller.Fail(fetchErr) =>
-              log.warn("[stream:hls] poll failed error={}", ex.getMessage)
-              Future.failed(fetchErr)
-            case HlsPlaylistPoller.Emit(next, segments) =>
-              log.warn("[stream:hls] poll failed retrying error={}", ex.getMessage)
-              Future.successful(Some((next, segments)))
+          .recover { case ex =>
+            val outcome = HlsPlaylistPoller.onFetchError(state, Tablo2HDHomeRun.STREAM_HLS_POLL_FAILURES_MAX)
+            outcome match {
+              case HlsPlaylistPoller.Emit(_, _) =>
+                log.warn("[stream:hls] poll failed retrying error={}", ex.getMessage)
+              case HlsPlaylistPoller.Fail(_) =>
+                log.warn("[stream:hls] poll failed error={}", ex.getMessage)
+            }
+            outcome
           }
-        }
+          .flatMap { outcome =>
+            outcome match {
+              case HlsPlaylistPoller.Fail(err) =>
+                log.warn("[stream:hls] retune reason={}", err.getMessage)
+                Future.failed(err)
+              case HlsPlaylistPoller.Emit(next, segments) =>
+                lastSeqOut.set(next.lastSeq)
+                if (segments.nonEmpty && !state.loggedFirstSegment) {
+                  val head = segments.head
+                  val last = segments.last
+                  val rangeDesc = head.byteRange.map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
+                  log.info(
+                    "[stream:hls] emit label={} count={} firstSeq={} lastSeq={} firstUrl={}{}"
+                  , label
+                  , segments.size
+                  , head.sequence
+                  , last.sequence
+                  , LogConfig.truncate(head.url)
+                  , rangeDesc
+                  )
+                }
+                Future.successful(Some((next, segments)))
+            }
+          }
       }
       val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
       val delaySec = pollIntervalSecFromState(state)
@@ -267,10 +272,10 @@ object HlsBackend extends StreamBackend {
       }
     }
     Source.lazySource { () =>
-      log.info("[stream:hls] materialized playlistUrl={}", playlistUrl)
+      log.info("[stream:hls] materialized label={} playlistUrl={}", label, playlistUrl)
       heartbeatTask = Some(
         system.toClassic.scheduler.scheduleWithFixedDelay(heartbeatSec.seconds, heartbeatSec.seconds) { () =>
-          log.info("[stream:hls] heartbeat lastSeq={} bytes={}", lastSeqOut.get(), bytesOut.get())
+          log.info("[stream:hls] heartbeat label={} lastSeq={} bytes={}", label, lastSeqOut.get(), bytesOut.get())
         }(ec)
       )
       Source.futureSource(
@@ -292,10 +297,10 @@ object HlsBackend extends StreamBackend {
         done.onComplete {
           case Success(_) =>
             heartbeatTask.foreach(_.cancel())
-            log.info("[stream:hls] complete")
+            log.info("[stream:hls] complete label={}", label)
           case Failure(ex) =>
             heartbeatTask.foreach(_.cancel())
-            log.warn("[stream:hls] failed", ex)
+            log.warn("[stream:hls] failed label={}", label, ex)
         }
       }
     }

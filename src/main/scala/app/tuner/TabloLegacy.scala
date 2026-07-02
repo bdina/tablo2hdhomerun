@@ -865,11 +865,11 @@ object TabloLegacy {
                 if (checkTuners) {
                   tunersFuture.map { tuners =>
                     val available = tuners.filterNot(_.in_use).size
-                    log.info(s"[channel] available tuners - $available")
+                    log.info("[channel] available tuners {}", available)
                     if (available > 0) {
                       true
                     } else {
-                      log.info(s"[channel] no available tuners (0/${tuners.size})")
+                      log.info("[channel] no available tuners (0/{})", tuners.size)
                       false
                     }
                   }
@@ -892,12 +892,12 @@ object TabloLegacy {
                   nextPlaylistUrl match {
                     case Some(url) =>
                       nextPlaylistUrl = None
-                      StreamBackend().stream(url)
+                      StreamBackend().stream(url, streamId)
                     case None =>
                       Source.futureSource(
                         startWatchSession(checkTuners = false).map { data =>
-                          log.info(s"[channel] recovered tune - playlist: ${data.playlist_url}")
-                          StreamBackend().stream(data.playlist_url.toString)
+                          log.info("[channel] recovered tune playlist={}", data.playlist_url)
+                          StreamBackend().stream(data.playlist_url.toString, streamId)
                         }
                       )
                   }

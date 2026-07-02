@@ -857,10 +857,10 @@ object Tablo4thGen {
             val availableFuture = if (checkAvailability) tunerCheckFuture else Future.successful(true)
             availableFuture.flatMap { available =>
               if (available) {
-                log.info(s"[4thgen-channel] guide/channels/$channelId/watch (POST) - $watchUri")
+                log.info("[4thgen-channel] guide/channels/{}/watch (POST) - {}", channelId, watchUri)
                 watchChannel()
               } else {
-                log.info(s"[4thgen-channel] no available tuners")
+                log.info("[4thgen-channel] no available tuners")
                 Future.failed(Error.NoAvailableTuners)
               }
             }
@@ -917,7 +917,7 @@ object Tablo4thGen {
             , session.keepalive.map(_.toString).getOrElse("unknown")
             , LogConfig.truncate(session.playlistUrl)
             )
-            StreamBackend().stream(session.playlistUrl)
+            StreamBackend().stream(session.playlistUrl, streamId)
           }
 
           def streamWithTunerTracking(firstSession: WatchSession.Session): Source[ByteString, ?] =

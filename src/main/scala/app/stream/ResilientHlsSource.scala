@@ -74,6 +74,7 @@ object ResilientHlsSource {
 
       override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) {
         private var lastRealNanos = System.nanoTime()
+        private var padding = false
         private val checkInterval = (timeout / 4).max(50.millis)
         private var failAsync: org.apache.pekko.stream.stage.AsyncCallback[Throwable] = uninitialized
 
@@ -93,8 +94,17 @@ object ResilientHlsSource {
           override def onPush(): Unit = {
             val elem = grab(in)
             elem match {
-              case Real(_) => lastRealNanos = System.nanoTime()
-              case GapFill => ()
+              case Real(_) =>
+                if (padding) {
+                  log.debug("[{}] gap-fill ended, real data resumed", streamName)
+                  padding = false
+                }
+                lastRealNanos = System.nanoTime()
+              case GapFill =>
+                if (!padding) {
+                  log.debug("[{}] gap-fill started, emitting null packets", streamName)
+                  padding = true
+                }
             }
             push(out, elem)
           }
