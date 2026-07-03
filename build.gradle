@@ -43,6 +43,8 @@ dependencies {
 
     implementation group: 'org.scala-lang.modules', name: "scala-xml_${scala_maj}", version: '2.4.0'
 
+    implementation group: 'org.parboiled', name: "parboiled_${scala_maj}", version: '2.5.1'
+
     testImplementation group: 'org.scalatest', name: "scalatest_${scala_maj}", version: scala_test
     testImplementation group: 'org.scalactic', name: "scalactic_${scala_maj}", version: scala_test
 

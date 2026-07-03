@@ -216,4 +216,101 @@ class M3U8Spec extends AnyFlatSpec with Matchers {
     val _ = p.segments(0).byteRange shouldBe Some((0L, 1000L))
     p.segments(1).byteRange shouldBe Some((1000L, 2000L))
   }
+
+  it should "ignore unknown tags before, between, and after segments" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-UNKNOWN:foo
+        |#EXT-X-TARGETDURATION:10
+        |#EXTINF:10.0,
+        |#EXT-X-DISCONTINUITY
+        |seg0.ts
+        |#EXT-X-KEY:METHOD=NONE
+        |#EXTINF:10.0,
+        |seg1.ts
+        |#EXT-X-PROGRAM-DATE-TIME:2020-01-01T00:00:00Z
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.targetDuration shouldBe 10
+    val _ = p.segments should have size 2
+    val _ = p.segments(0).uri shouldBe "seg0.ts"
+    p.segments(1).uri shouldBe "seg1.ts"
+  }
+
+  it should "ignore blank lines and trim whitespace" in {
+    val raw =
+      """#EXTM3U
+        |
+        |#EXT-X-TARGETDURATION:10
+        |
+        |#EXTINF:10.0,
+        |  seg0.ts
+        |
+        |#EXTINF:5.0,
+        |seg1.ts
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.segments should have size 2
+    val _ = p.segments(0).uri shouldBe "seg0.ts"
+    p.segments(1).uri shouldBe "seg1.ts"
+  }
+
+  it should "attach pending byte range to URI-only segment" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-TARGETDURATION:10
+        |#EXT-X-BYTERANGE:500@1000
+        |bare.ts
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.segments should have size 1
+    val _ = p.segments(0).uri shouldBe "bare.ts"
+    val _ = p.segments(0).duration shouldBe 0.0
+    p.segments(0).byteRange shouldBe Some((1000L, 500L))
+  }
+
+  it should "attach byte range before EXTINF to the next segment" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-TARGETDURATION:10
+        |#EXT-X-BYTERANGE:1000
+        |#EXTINF:10.0,
+        |seg0.ts
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.segments should have size 1
+    val _ = p.segments(0).uri shouldBe "seg0.ts"
+    p.segments(0).byteRange shouldBe Some((0L, 1000L))
+  }
+
+  it should "use defaults for malformed target duration and media sequence" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-TARGETDURATION:abc
+        |#EXT-X-MEDIA-SEQUENCE:xyz
+        |#EXTINF:10.0,
+        |seg.ts
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.targetDuration shouldBe 10
+    val _ = p.mediaSequence shouldBe 0
+    p.segments should have size 1
+  }
+
+  it should "use zero byte range for malformed BYTERANGE values" in {
+    val raw =
+      """#EXTM3U
+        |#EXT-X-TARGETDURATION:10
+        |#EXTINF:10.0,
+        |#EXT-X-BYTERANGE:abc@def
+        |seg.ts
+        |""".stripMargin
+    val p = M3U8.parse(raw)
+    val _ = p.segments should have size 1
+    p.segments(0).byteRange shouldBe Some((0L, 0L))
+  }
+
+  it should "return segment URI unchanged when base URL is invalid" in {
+    M3U8.resolveSegmentUri("seg.ts", "not a valid uri") shouldBe "seg.ts"
+  }
 }
