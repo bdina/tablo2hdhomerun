@@ -4,9 +4,7 @@ import java.net.URI
 
 import org.parboiled2._
 
-import scala.util.Failure
-import scala.util.Success
-import scala.util.Try
+import scala.util.{ Failure, Success, Try }
 
 object M3U8 {
   case class Segment(uri: String, duration: Double, title: Option[String], byteRange: Option[(Long, Long)] = None)
@@ -147,8 +145,7 @@ private object M3U8LineParser {
     import LineEvent.*
 
     def line: Rule1[LineEvent] = rule {
-      extm3uLine | endListLine | versionLine | targetDurationLine | mediaSequenceLine | byteRangeLine |
-        extinfLine | unknownTagLine | uriLine
+      extm3uLine | endListLine | versionLine | targetDurationLine | mediaSequenceLine | byteRangeLine | extinfLine | unknownTagLine | uriLine
     }
 
     def eol: Rule0 = rule { EOI }
