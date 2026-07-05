@@ -275,7 +275,7 @@ object HlsBackend extends StreamBackend {
       log.info("[stream:hls] materialized label={} playlistUrl={}", label, playlistUrl)
       heartbeatTask = Some(
         system.toClassic.scheduler.scheduleWithFixedDelay(heartbeatSec.seconds, heartbeatSec.seconds) { () =>
-          log.info("[stream:hls] heartbeat label={} lastSeq={} bytes={}", label, lastSeqOut.get(), bytesOut.get())
+          log.debug("[stream:hls] heartbeat label={} lastSeq={} bytes={}", label, lastSeqOut.get(), bytesOut.get())
         }(ec)
       )
       Source.futureSource(
