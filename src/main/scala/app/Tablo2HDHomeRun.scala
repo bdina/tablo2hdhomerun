@@ -143,11 +143,11 @@ object Tablo2HDHomeRun {
   val PROXY_IP = InetAddress.getByName(scala.sys.env.getOrElse("PROXY_IP","127.0.0.1"))
   val PROXY_PORT = 8080
 
-  val TABLO_GEN = scala.sys.env.getOrElse("TABLO_GEN", "legacy")
+  val TABLO_GEN = scala.sys.env.getOrElse("TABLO_GEN", "4thgen")
   val TABLO_EMAIL = scala.sys.env.get("TABLO_EMAIL")
   val TABLO_PASSWORD = scala.sys.env.get("TABLO_PASSWORD")
   val TABLO_DEVICE_NAME = scala.sys.env.get("TABLO_DEVICE_NAME")
-  val STREAM_BACKEND = scala.sys.env.getOrElse("STREAM_BACKEND", "ffmpeg")
+  val STREAM_BACKEND = scala.sys.env.getOrElse("STREAM_BACKEND", "hls")
   val STREAM_MAX_GAP_SEC = scala.sys.env.get("STREAM_MAX_GAP_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
   val STREAM_RETRY_MIN_BACKOFF_SEC = scala.sys.env.get("STREAM_RETRY_MIN_BACKOFF_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(2)
   val STREAM_RETRY_MAX_BACKOFF_SEC = scala.sys.env.get("STREAM_RETRY_MAX_BACKOFF_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(30)
@@ -190,7 +190,7 @@ object Tablo2HDHomeRun {
 
     val break = if (daemon) "CTRL-C" else "RETURN"
     val url = s"http://${PROXY_IP.getHostAddress}:${PROXY_PORT}"
-    val modeText = if (TABLO_GEN == "4thgen") " (4th Gen mode)" else ""
+    val modeText = if (TABLO_GEN == "4thgen") " (4th Gen mode)" else "(legacy mode)"
     val message = s"Server now online$modeText. Please navigate to ${url}\nPress ${break} to stop..."
 
     println(message)
