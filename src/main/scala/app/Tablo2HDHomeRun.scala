@@ -73,16 +73,15 @@ object Tablo2HDHomeRun {
     AppContext.initialize(system)
   }
 
-  private def buildDiscover(config: AppConfig): Discover = {
+  private def buildDiscover(config: AppConfig): Discover =
     Discover(
       friendlyName = config.tablo.gen.discoverFriendlyName
     , localIp = config.proxy.ip
     , protocol = config.tablo.protocol
     , port = config.proxy.port
     )
-  }
 
-  private def appVersion: String = {
+  private def appVersion: String =
     Option(getClass.getPackage.getImplementationVersion)
       .orElse {
         Try {
@@ -96,9 +95,8 @@ object Tablo2HDHomeRun {
         }.toOption.flatten
       }
       .getOrElse("dev")
-  }
 
-  def logStartupConfig(config: AppConfig): Unit = {
+  def logStartupConfig(config: AppConfig): Unit =
     log.info(
       "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} mediaRoot={}"
     , appVersion
@@ -109,7 +107,6 @@ object Tablo2HDHomeRun {
     , config.stream.backend.envValue
     , config.mediaRoot.getOrElse("none")
     )
-  }
 
   def apply(config: AppConfig, tabloAuth: TabloAuthEnv, daemon: Boolean): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
     config.mediaRoot.foreach { case root =>
@@ -150,7 +147,6 @@ object Tablo2HDHomeRun {
   implicit def system: ActorSystem[pekko.NotUsed] = AppContext.system
 
   implicit def ec: scala.concurrent.ExecutionContext = system.executionContext
-
 
   val Response = app.tuner.TabloLegacy.Response
   val Lineup = app.tuner.TabloLegacy.Lineup
