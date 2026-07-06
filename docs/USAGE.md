@@ -3,7 +3,7 @@
 ## Prerequisites
 
 1. **Tablo DVR** - A networked Tablo device (Legacy or 4th Generation) with an active antenna connection
-2. **FFmpeg** - Required when using default stream backend (`STREAM_BACKEND=ffmpeg`). Optional when `STREAM_BACKEND=hls`
+2. **FFmpeg** - Optional by default (`STREAM_BACKEND=hls`). Required when using `STREAM_BACKEND=ffmpeg`
 3. **Java 24** (JVM mode) or GraalVM CE (native image)
 4. **Network access** between proxy host and Tablo device
 5. **Tablo Account** (4th Gen only) - Email and password for Lighthouse cloud authentication
@@ -12,10 +12,60 @@
 
 | Device Type | Environment Variable | Authentication |
 |-------------|---------------------|----------------|
-| Legacy Tablo (Pre-4th Gen) | `TABLO_GEN=legacy` (default) | None (local network) |
-| 4th Generation Tablo | `TABLO_GEN=4thgen` | Tablo account credentials |
+| 4th Generation Tablo | `TABLO_GEN=4thgen` (default) | Tablo account credentials |
+| Legacy Tablo (Pre-4th Gen) | `TABLO_GEN=legacy` | None (local network) |
+
+## Quick Start (4th Generation Tablo)
+
+The default configuration targets 4th Generation Tablo (`TABLO_GEN=4thgen`). Set `TABLO_EMAIL` and `TABLO_PASSWORD` before starting.
+
+### Step 1: Set Environment Variables
+
+```bash
+export TABLO_EMAIL=your-tablo-account@email.com
+export TABLO_PASSWORD=your-tablo-password
+export TABLO_IP=192.168.1.100
+export PROXY_IP=0.0.0.0
+```
+
+`TABLO_GEN=4thgen` is the default and may be omitted.
+
+### Step 2: Start the Proxy
+
+```bash
+./tablo2hdhomerun -d
+```
+
+The `-d` flag runs in daemon mode (no stdin prompt to exit). The proxy authenticates with the Tablo Lighthouse cloud service and discovers your device.
+
+### Step 3: Verify Operation
+
+```bash
+# Test discovery endpoint
+curl http://localhost:8080/discover.json
+
+# Expected response:
+{
+  "FriendlyName": "Tablo 4th Gen Proxy",
+  "LocalIP": "0.0.0.0",
+  "BaseURL": "http://0.0.0.0:8080",
+  ...
+}
+```
+
+### Optional: Select Specific Device
+
+If you have multiple Tablo devices on your account, specify which one to use:
+
+```bash
+export TABLO_DEVICE_NAME="Living Room"
+```
+
+The proxy selects the first device whose name contains the specified string (case-insensitive).
 
 ## Quick Start (Legacy Tablo)
+
+Set `TABLO_GEN=legacy` for pre-4th Generation Tablo devices (no cloud credentials required).
 
 ### Step 1: Find Your Tablo IP
 
@@ -24,6 +74,7 @@ Locate your Tablo device IP address (typically via router DHCP lease table or Ta
 ### Step 2: Start the Proxy
 
 ```bash
+export TABLO_GEN=legacy
 export TABLO_IP=192.168.1.100
 export PROXY_IP=0.0.0.0
 ./tablo2hdhomerun -d
@@ -60,51 +111,6 @@ In your media application (Plex, Jellyfin, etc.):
 1. Add a new HDHomeRun tuner
 2. Enter the proxy URL: `http://<proxy-ip>:8080`
 3. The application should auto-discover channels
-
-## Quick Start (4th Generation Tablo)
-
-### Step 1: Set Environment Variables
-
-```bash
-export TABLO_GEN=4thgen
-export TABLO_EMAIL=your-tablo-account@email.com
-export TABLO_PASSWORD=your-tablo-password
-export TABLO_IP=192.168.1.100
-export PROXY_IP=0.0.0.0
-```
-
-### Step 2: Start the Proxy
-
-```bash
-./tablo2hdhomerun -d
-```
-
-The proxy will authenticate with the Tablo Lighthouse cloud service and automatically discover your device.
-
-### Step 3: Verify Operation
-
-```bash
-# Test discovery endpoint
-curl http://localhost:8080/discover.json
-
-# Expected response:
-{
-  "FriendlyName": "Tablo 4th Gen Proxy",
-  "LocalIP": "0.0.0.0",
-  "BaseURL": "http://0.0.0.0:8080",
-  ...
-}
-```
-
-### Optional: Select Specific Device
-
-If you have multiple Tablo devices on your account, specify which one to use:
-
-```bash
-export TABLO_DEVICE_NAME="Living Room"
-```
-
-The proxy will select the first device whose name contains the specified string (case-insensitive).
 
 ## Deployment Options
 
@@ -148,18 +154,20 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TABLO_GEN` | `legacy` | Tablo generation: `legacy` or `4thgen` |
+| `TABLO_GEN` | `4thgen` | Tablo generation: `4thgen` or `legacy` |
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
-| `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
+| `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `STREAM_MAX_GAP_SEC` | `60` | Maximum gap (in seconds) before a single HLS attempt is retuned |
+| `LOG_LEVEL` | (none) | Application log level (e.g. `DEBUG`, `INFO`) |
+| `PEKKO_LOG_LEVEL` | (same as `LOG_LEVEL`) | Pekko/Actor log level; falls back to `LOG_LEVEL` |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
-### Weak OTA / Plex recovery (HLS backend)
+### Weak OTA / Plex recovery (default `hls` backend)
 
 Recovery retunes automatically on stalls, session end, unauthorized segment responses, range mismatches, or degraded MPEG-TS. Playback stays active while real video flows; null packets keep the HTTP connection alive during gaps. The stream ends when you stop it from the remote, or when `STREAM_RECOVERY_TIMEOUT_SEC` elapses with no real backend data (unattended TV on a dead channel).
 
-The native HLS backend (`STREAM_BACKEND=hls`) adds:
+The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 
 - HLS v4 `#EXT-X-BYTERANGE` support with HTTP range requests
 - Adaptive playlist polling based on `#EXT-X-TARGETDURATION`
@@ -189,8 +197,8 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `TABLO_EMAIL` | (required) | Tablo account email for cloud authentication |
-| `TABLO_PASSWORD` | (required) | Tablo account password |
+| `TABLO_EMAIL` | (required for 4th gen) | Tablo account email for cloud authentication |
+| `TABLO_PASSWORD` | (required for 4th gen) | Tablo account password |
 | `TABLO_DEVICE_NAME` | (none) | Optional filter to select device by name |
 
 ## Streaming a Channel
@@ -223,16 +231,20 @@ The guide provides 24 hours of programming data in XMLTV format, compatible with
 
 ## Docker Deployment
 
-### Basic Docker Run
+### Basic Docker Run (4th Generation, default)
 
 ```bash
 docker run -d \
   --name tablo-proxy \
+  -e TABLO_EMAIL=your@email.com \
+  -e TABLO_PASSWORD=yourpassword \
   -e TABLO_IP=192.168.1.100 \
   -e PROXY_IP=0.0.0.0 \
   -p 8080:8080 \
   tablo2hdhomerun:native
 ```
+
+For legacy Tablo add `-e TABLO_GEN=legacy` and omit credentials.
 
 ### With Hardware Acceleration (Intel QSV)
 
@@ -262,10 +274,11 @@ docker run -d \
 
 ### 4th Generation Tablo
 
+Same as basic run above; `TABLO_GEN=4thgen` is the default and may be omitted.
+
 ```bash
 docker run -d \
   --name tablo-proxy \
-  -e TABLO_GEN=4thgen \
   -e TABLO_EMAIL=your@email.com \
   -e TABLO_PASSWORD=yourpassword \
   -e TABLO_IP=192.168.1.100 \
@@ -296,7 +309,7 @@ docker run -d \
 ### Stream Won't Start
 
 1. Check tuner availability: `curl http://<tablo-ip>:8885/server/tuners`
-2. If using default backend: verify FFmpeg is installed (`ffmpeg -version`). Or set `STREAM_BACKEND=hls` to use the HLS-native backend (no FFmpeg)
+2. If using `STREAM_BACKEND=ffmpeg`: verify FFmpeg is installed (`ffmpeg -version`). The default `hls` backend does not require FFmpeg
 3. Check for concurrent recording conflicts
 
 ### Container Issues

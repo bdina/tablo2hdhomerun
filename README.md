@@ -18,7 +18,7 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 
 - Java 11+ and Scala 3.8.1 (JVM mode)
 - GraalVM CE (native image mode; Docker uses GraalVM CE 25)
-- FFmpeg (required for streaming when using default backend; optional when `STREAM_BACKEND=hls`)
+- FFmpeg (optional by default; required when `STREAM_BACKEND=ffmpeg`)
 - Network access to TabloTV device
 
 ## Quick Start
@@ -26,12 +26,14 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 ### Using Environment Variables
 
 ```bash
-export TABLO_IP=192.168.1.100    # Your Tablo device IP
-export PROXY_IP=0.0.0.0          # Bind to all interfaces
+export TABLO_EMAIL=your@email.com       # Required (default is 4th gen Tablo)
+export TABLO_PASSWORD=yourpassword
+export TABLO_IP=192.168.1.100           # Your Tablo device IP
+export PROXY_IP=0.0.0.0                 # Bind to all interfaces
 ./tablo2hdhomerun -d
 ```
 
-For 4th Generation Tablo set `TABLO_GEN=4thgen` and `TABLO_EMAIL` / `TABLO_PASSWORD`; see [Usage Guide](docs/USAGE.md).
+For legacy Tablo set `TABLO_GEN=legacy` (no cloud credentials). See [Usage Guide](docs/USAGE.md).
 
 ### Using Docker
 
@@ -39,11 +41,15 @@ For 4th Generation Tablo set `TABLO_GEN=4thgen` and `TABLO_EMAIL` / `TABLO_PASSW
 docker build -f Dockerfile.native --tag tablo2hdhomerun:latest .
 docker run -d \
   --name tablo-proxy \
+  -e TABLO_EMAIL=your@email.com \
+  -e TABLO_PASSWORD=yourpassword \
   -e TABLO_IP=192.168.1.100 \
   -e PROXY_IP=0.0.0.0 \
   -p 8080:8080 \
   tablo2hdhomerun:latest
 ```
+
+For legacy Tablo add `-e TABLO_GEN=legacy` (credentials not required).
 
 ## Building
 
@@ -80,12 +86,12 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | Environment Variable | Default | Description |
 |---------------------|---------|-------------|
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR |
-| `TABLO_GEN` | `legacy` | Tablo generation: `legacy` or `4thgen` |
-| `TABLO_EMAIL` | (none) | Tablo account email (required for 4th Gen) |
-| `TABLO_PASSWORD` | (none) | Tablo account password (required for 4th Gen) |
+| `TABLO_GEN` | `4thgen` | Tablo generation: `4thgen` or `legacy` |
+| `TABLO_EMAIL` | (required for 4th gen) | Tablo account email |
+| `TABLO_PASSWORD` | (required for 4th gen) | Tablo account password |
 | `TABLO_DEVICE_NAME` | (none) | Optional filter for 4th Gen device by name |
 | `PROXY_IP` | `127.0.0.1` | IP address for proxy to bind |
-| `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
+| `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 
 ## API Endpoints

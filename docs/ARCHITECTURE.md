@@ -99,8 +99,8 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 
 The live channel stream can use one of two backends, selected by `STREAM_BACKEND`:
 
-- **ffmpeg** (default): Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH. Includes reconnect and error-detect flags to survive transient stream drops.
-- **hls**: Fetches M3U8 playlists and TS segments directly via HTTP; no external process. Optimized for HLS v4 byte-range playlists with adaptive polling, conditional playlist requests (`ETag` / `Last-Modified`), strict `206 Partial Content` validation for ranged segment fetches, and status-aware segment recovery. Wrapped by `ResilientHlsSource` for null-packet padding and retune backoff.
+- **hls** (default): Fetches M3U8 playlists and TS segments directly via HTTP; no external process. Optimized for HLS v4 byte-range playlists with adaptive polling, conditional playlist requests (`ETag` / `Last-Modified`), strict `206 Partial Content` validation for ranged segment fetches, and status-aware segment recovery. Wrapped by `ResilientHlsSource` for null-packet padding and retune backoff.
+- **ffmpeg**: Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH. Includes reconnect and error-detect flags to survive transient stream drops.
 
 The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a robust Pekko Streams `Flow`. If the stream backend fails or the connection to the Tablo drops, this wrapper automatically injects MPEG-TS null packets (PID 0x1FFF) to keep the HTTP chunked transfer alive, preventing downstream players like Plex from disconnecting. It also implements an `idleTimeout` and `RestartSource.withBackoff` to retry connection to the backend and enforce a maximum outage gap.
 
@@ -183,9 +183,10 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `TABLO_GEN` | `4thgen` | Tablo generation: `4thgen` or `legacy` |
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
-| `STREAM_BACKEND` | `ffmpeg` | Live stream backend: `ffmpeg` or `hls` |
+| `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### Fixed Configuration
