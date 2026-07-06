@@ -25,6 +25,7 @@ import spray.json._
 import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
+import app.config.ConfigTypes.{HostAddress, HttpProtocol, Port}
 import app.stream.StreamBackend
 import app.sys.LogConfig
 
@@ -77,13 +78,13 @@ object TabloLegacy {
       , DeviceID: String = "12345678" // TODO hash friendly name
       , DeviceAuth: String = "tabloauth123"
       ) {
-        def proxyAddress(inetAddress: InetAddress, port: Int) =
-          BaseURL.withHost(inetAddress.getHostAddress.toString).withPort(port)
+        def proxyAddress(host: HostAddress, port: Port): Uri =
+          BaseURL.withHost(host.hostString).withPort(port.value)
       }
       object Discover {
-        def apply(friendlyName: String, localIp: InetAddress): Discover = {
-          val proxyUri = Uri(s"${Tablo2HDHomeRun.TABLO_PROTOCOL}://${localIp.getHostAddress}:${Tablo2HDHomeRun.PROXY_PORT}")
-          Discover(FriendlyName=friendlyName, LocalIP=localIp, BaseURL=proxyUri, LineupURL=proxyUri.withPath(Uri.Path("/lineup.json")))
+        def apply(friendlyName: String, localIp: HostAddress, protocol: HttpProtocol, port: Port): Discover = {
+          val proxyUri = Uri(s"${protocol.value}://${localIp.hostString}:${port.value}")
+          Discover(FriendlyName=friendlyName, LocalIP=localIp.inet, BaseURL=proxyUri, LineupURL=proxyUri.withPath(Uri.Path("/lineup.json")))
         }
         object JsonProtocol {
           import Response.JsonProtocol.{inetAddressFormat,uriFormat}
@@ -94,7 +95,7 @@ object TabloLegacy {
           path("discover.json") {
             get {
               import Discover.JsonProtocol.discoverFormat
-              val response = Tablo2HDHomeRun.discover.toJson
+              val response = AppContext.discover.toJson
               log.debug("[discover] served")
               complete(HttpEntity(ContentTypes.`application/json`, response.compactPrint))
             }
@@ -128,7 +129,7 @@ object TabloLegacy {
 
       object Proxy {
         object Request {
-          val baseUrl = Tablo2HDHomeRun.discover.proxyAddress(Tablo2HDHomeRun.TABLO_IP,Tablo2HDHomeRun.TABLO_PORT)
+          val baseUrl = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
           val getUri = baseUrl.withPath(Uri.Path("/guide/channels"))
           val postUri = baseUrl.withPath(Uri.Path("/batch"))
 
@@ -144,8 +145,8 @@ object TabloLegacy {
           object ChannelObject {
             def jsValue(obj: ChannelObject): JsValue = {
               val num = s"${obj.channel.major}.${obj.channel.minor}"
-              val url = s"${Tablo2HDHomeRun.discover.BaseURL.withPath(Uri.Path(s"/channel/${obj.object_id}"))}"
-              val src = s"${Tablo2HDHomeRun.discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${obj.object_id}/watch"))}"
+              val url = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/channel/${obj.object_id}"))}"
+              val src = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${obj.object_id}/watch"))}"
               JsObject(
                 "GuideNumber" -> JsString(num)
               , "GuideName" -> JsString(obj.channel.call_sign)
@@ -364,7 +365,7 @@ object TabloLegacy {
 
       object Proxy {
         object Request {
-          val baseUrl = Tablo2HDHomeRun.discover.proxyAddress(Tablo2HDHomeRun.TABLO_IP,Tablo2HDHomeRun.TABLO_PORT)
+          val baseUrl = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
 
           // try to discover program guide endpoints
           def getProgramsUri(channelId: Int, startTime: Option[String] = None, endTime: Option[String] = None) = {
@@ -802,7 +803,7 @@ object TabloLegacy {
           )
         }
         object Tuners {
-          val uri = Tablo2HDHomeRun.discover.proxyAddress(Tablo2HDHomeRun.TABLO_IP,Tablo2HDHomeRun.TABLO_PORT).withPath(Uri.Path(s"/server/tuners"))
+          val uri = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port).withPath(Uri.Path(s"/server/tuners"))
           val httpRequest = HttpRequest(uri = uri)
         }
       }
@@ -842,8 +843,8 @@ object TabloLegacy {
             val streamId = java.util.UUID.randomUUID.toString.take(8)
 
             val watchUri =
-              Tablo2HDHomeRun.discover
-                .proxyAddress(Tablo2HDHomeRun.TABLO_IP,Tablo2HDHomeRun.TABLO_PORT)
+              AppContext.discover
+                .proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
                 .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
 
             val tunersFuture: Future[Seq[Response.Tuners]] =

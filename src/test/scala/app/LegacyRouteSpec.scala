@@ -15,7 +15,9 @@ import org.scalatestplus.junit.JUnitRunner
 import org.apache.pekko.http.scaladsl.server.RouteConcatenation._
 import spray.json._
 
+import app.config.AppConfig
 import app.tuner.TabloLegacy._
+import app.tuner.TabloLegacy.Response.Discover
 
 trait LegacyRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRouteTest {
 
@@ -37,6 +39,14 @@ trait LegacyRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRo
   }
 
   def legacyRoutes: Route = {
+    val config = AppConfig.load(Map.empty).config
+    val discover = Discover(
+      friendlyName = "Tablo Legacy Gen Proxy",
+      localIp = config.proxy.ip,
+      protocol = config.tablo.protocol,
+      port = config.proxy.port
+    )
+    AppContext.initialize(config, discover)
     AppContext.initialize(typedSystem)
     val stubLineup = createStubLineupActor()
     Response.Discover.route ~ Lineup.route(stubLineup) ~ Favicon.route

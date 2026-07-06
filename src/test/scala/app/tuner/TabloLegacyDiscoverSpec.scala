@@ -11,6 +11,7 @@ import org.apache.pekko.http.scaladsl.model.Uri
 
 import spray.json._
 
+import app.config.ConfigTypes.{HostAddress, Port}
 import app.tuner.TabloLegacy.Response.Discover
 import app.tuner.TabloLegacy.Response.Discover.JsonProtocol.discoverFormat
 
@@ -57,8 +58,7 @@ class TabloLegacyDiscoverSpec extends AnyFlatSpec with Matchers {
       DeviceID = "12345678",
       DeviceAuth = "tabloauth123"
     )
-    val other = InetAddress.getByName("10.0.0.2")
-    val proxied = discover.proxyAddress(other, 9090)
+    val proxied = discover.proxyAddress(HostAddress.fromName("10.0.0.2"), Port(9090))
     val _ = proxied.authority.host.address().shouldBe("10.0.0.2")
     proxied.toString.should(include("9090"))
   }

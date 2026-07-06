@@ -17,7 +17,7 @@ import pekko.util.ByteString
 import org.apache.pekko.pattern.after
 import org.slf4j.LoggerFactory
 
-import app.Tablo2HDHomeRun
+import app.AppContext
 import app.sys.LogConfig
 
 import scala.concurrent.Future
@@ -53,14 +53,7 @@ object HlsBackend extends StreamBackend {
   type SegmentInfo = HlsPlaylistPoller.SegmentInfo
   type PollState = HlsPlaylistPoller.PollState
 
-  private def healthSettings: MpegTsHealth.Settings =
-    MpegTsHealth.Settings(
-      windowSec = Tablo2HDHomeRun.STREAM_HLS_HEALTH_WINDOW_SEC
-    , ccMax = Tablo2HDHomeRun.STREAM_HLS_CC_ERROR_MAX
-    , syncMax = Tablo2HDHomeRun.STREAM_HLS_SYNC_LOSS_MAX
-    , nullRatioMax = Tablo2HDHomeRun.STREAM_HLS_NULL_RATIO_MAX
-    , enforce = Tablo2HDHomeRun.STREAM_HLS_HEALTH_ENFORCE
-    )
+  private def healthSettings: MpegTsHealth.Settings = AppContext.config.stream.hls.health
 
   override def stream(playlistUrl: String, label: String = "")(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
@@ -69,7 +62,8 @@ object HlsBackend extends StreamBackend {
     val http = Http(system.toClassic)
     val bytesOut = new java.util.concurrent.atomic.AtomicLong(0L)
     val lastSeqOut = new java.util.concurrent.atomic.AtomicInteger(0)
-    val heartbeatSec = Tablo2HDHomeRun.STREAM_HLS_HEARTBEAT_SEC
+    val hlsConfig = AppContext.config.stream.hls
+    val heartbeatSec = hlsConfig.heartbeatSec
     var heartbeatTask: Option[org.apache.pekko.actor.Cancellable] = None
     def fetchPlaylistBody(url: String)(implicit mat: pekko.stream.Materializer): Future[String] =
       fetchPlaylist(url, HlsPlaylistFetch.Validators()).flatMap {
@@ -208,7 +202,7 @@ object HlsBackend extends StreamBackend {
             bodyOpt match {
               case None =>
                 log.debug("[stream:hls] playlist not-modified lastSeq={}", fetchedState.lastSeq)
-                HlsPlaylistPoller.onPlaylistNotModified(fetchedState, Tablo2HDHomeRun.STREAM_HLS_STALL_POLLS)
+                HlsPlaylistPoller.onPlaylistNotModified(fetchedState, hlsConfig.stallPolls)
               case Some(body) =>
                 val playlist = M3U8.parse(body)
                 log.debug(
@@ -222,13 +216,13 @@ object HlsBackend extends StreamBackend {
                 HlsPlaylistPoller.onPlaylist(
                   fetchedState
                 , playlist
-                , Tablo2HDHomeRun.STREAM_HLS_STALL_POLLS
+                , hlsConfig.stallPolls
                 , defaultPollSec
                 )
             }
           }
           .recover { case ex =>
-            val outcome = HlsPlaylistPoller.onFetchError(state, Tablo2HDHomeRun.STREAM_HLS_POLL_FAILURES_MAX)
+            val outcome = HlsPlaylistPoller.onFetchError(state, hlsConfig.pollFailuresMax)
             outcome match {
               case HlsPlaylistPoller.Emit(_, _) =>
                 log.warn("[stream:hls] poll failed retrying error={}", ex.getMessage)

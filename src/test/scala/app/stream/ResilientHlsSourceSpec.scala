@@ -12,8 +12,24 @@ import org.scalatestplus.junit.JUnitRunner
 import scala.concurrent.duration._
 import java.util.concurrent.atomic.AtomicBoolean
 
+import app.config.AppConfig
+import app.AppContext
+import app.tuner.TabloLegacy.Response.Discover
+
 @RunWith(classOf[JUnitRunner])
 class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with Matchers {
+
+  override def beforeAll(): Unit = {
+    super.beforeAll()
+    val config = AppConfig.load(Map.empty).config
+    val discover = Discover(
+      friendlyName = "Tablo Legacy Gen Proxy",
+      localIp = config.proxy.ip,
+      protocol = config.tablo.protocol,
+      port = config.proxy.port
+    )
+    AppContext.initialize(config, discover)
+  }
 
   "ResilientHlsSource" should {
 

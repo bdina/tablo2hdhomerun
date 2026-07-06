@@ -6,7 +6,8 @@ import pekko.actor.typed.ActorSystem
 import pekko.stream.scaladsl.Source
 import pekko.util.ByteString
 
-import app.Tablo2HDHomeRun
+import app.AppContext
+import app.config.StreamBackendKind
 
 trait StreamBackend {
   def stream(playlistUrl: String, label: String = "")(implicit system: ActorSystem[?]): Source[ByteString, ?]
@@ -14,9 +15,12 @@ trait StreamBackend {
 }
 
 object StreamBackend {
-  def apply(): StreamBackend = apply(Tablo2HDHomeRun.STREAM_BACKEND)
-  def apply(backendName: String): StreamBackend = backendName match {
-    case "hls" => HlsBackend
-    case _ => FFmpegBackend
+  def apply(): StreamBackend = apply(AppContext.config.stream.backend)
+
+  def apply(kind: StreamBackendKind): StreamBackend = kind match {
+    case StreamBackendKind.Hls => HlsBackend
+    case StreamBackendKind.Ffmpeg => FFmpegBackend
   }
+
+  def apply(backendName: String): StreamBackend = apply(StreamBackendKind.fromEnv(backendName))
 }

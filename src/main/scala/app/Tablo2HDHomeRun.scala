@@ -10,7 +10,6 @@ import pekko.http.scaladsl.server.Directives.{complete, extractRequest, handleRe
 import pekko.http.scaladsl.server.{RejectionHandler, Route}
 import pekko.http.scaladsl.server.RouteConcatenation._
 
-import java.net.InetAddress
 import java.nio.file.Paths
 
 import org.slf4j.LoggerFactory
@@ -18,19 +17,33 @@ import org.slf4j.LoggerFactory
 import scala.io.StdIn
 import scala.util.{Failure, Success, Try}
 
+import app.config.{AppConfig, TabloAuthEnv, TabloGen}
 import app.sys.LogConfig
+import app.tuner.TabloLegacy.Response.Discover
 
 @main def tablo2hdhomerunApp(args: String*): Unit = {
-  LogConfig.configure()
+  val loaded = AppConfig.load()
+  LogConfig.configure(loaded.logging)
   val daemon = args.contains("-d")
-  Dependencies.verify()
-  Tablo2HDHomeRun.start(daemon)
+  Dependencies.verify(loaded.config)
+  Tablo2HDHomeRun.start(loaded.config, loaded.tabloAuth, daemon)
 }
 
 object AppContext {
+  @volatile private var _config: AppConfig = scala.compiletime.uninitialized
+  @volatile private var _discover: Discover = scala.compiletime.uninitialized
   @volatile private var _system: ActorSystem[pekko.NotUsed] = scala.compiletime.uninitialized
+
+  def config: AppConfig = _config
+  def discover: Discover = _discover
   implicit def system: ActorSystem[pekko.NotUsed] = _system
-  private[app] def initialize(s: ActorSystem[pekko.NotUsed]): Unit = { _system = s }
+
+  private[app] def initialize(config: AppConfig, discover: Discover): Unit = {
+    _config = config
+    _discover = discover
+  }
+
+  private[app] def initialize(system: ActorSystem[pekko.NotUsed]): Unit = { _system = system }
 }
 
 object Dependencies {
@@ -39,8 +52,8 @@ object Dependencies {
   import scala.sys.process._
   val devNull = ProcessLogger(_ => {}, _ => {})
 
-  def verify() = {
-    if (Tablo2HDHomeRun.STREAM_BACKEND != "hls") {
+  def verify(config: AppConfig) = {
+    if (!config.stream.backend.isHls) {
       val ffmpegCheck = Try { "ffmpeg -version".!<(devNull) }.getOrElse(-1)
       if (ffmpegCheck != 0) {
         log.error("[startup] missing dependency name=ffmpeg")
@@ -53,11 +66,20 @@ object Dependencies {
 object Tablo2HDHomeRun {
   val log = LoggerFactory.getLogger(this.getClass)
 
-  val media = scala.sys.env.get("MEDIA_ROOT")
-
-  def start(daemon: Boolean): Unit = {
-    val system = ActorSystem(apply(daemon), "tablo2hdhomerun-system")
+  def start(config: AppConfig, tabloAuth: TabloAuthEnv, daemon: Boolean): Unit = {
+    val discover = buildDiscover(config)
+    AppContext.initialize(config, discover)
+    val system = ActorSystem(apply(config, tabloAuth, daemon), "tablo2hdhomerun-system")
     AppContext.initialize(system)
+  }
+
+  private def buildDiscover(config: AppConfig): Discover = {
+    Discover(
+      friendlyName = config.tablo.gen.discoverFriendlyName
+    , localIp = config.proxy.ip
+    , protocol = config.tablo.protocol
+    , port = config.proxy.port
+    )
   }
 
   private def appVersion: String = {
@@ -76,21 +98,21 @@ object Tablo2HDHomeRun {
       .getOrElse("dev")
   }
 
-  def logStartupConfig(): Unit = {
+  def logStartupConfig(config: AppConfig): Unit = {
     log.info(
       "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} mediaRoot={}"
     , appVersion
-    , TABLO_GEN
-    , TABLO_IP.getHostAddress
-    , PROXY_IP.getHostAddress
-    , PROXY_PORT
-    , STREAM_BACKEND
-    , media.getOrElse("none")
+    , config.tablo.gen.envValue
+    , config.tablo.ipHost
+    , config.proxy.bindHost
+    , config.proxy.bindPort
+    , config.stream.backend.envValue
+    , config.mediaRoot.getOrElse("none")
     )
   }
 
-  def apply(daemon: Boolean): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
-    media.foreach { case root =>
+  def apply(config: AppConfig, tabloAuth: TabloAuthEnv, daemon: Boolean): Behavior[pekko.NotUsed] = Behaviors.setup { context =>
+    config.mediaRoot.foreach { case root =>
       val monitor = context.spawn(app.sys.FsMonitor(), "monitor-actor", pekko.actor.typed.Props.empty)
       context.log.debug("[scan] monitor spawned root={}", root)
 
@@ -107,20 +129,20 @@ object Tablo2HDHomeRun {
       }
     }
 
-    logStartupConfig()
+    logStartupConfig(config)
 
-    val routes = TABLO_GEN match {
-      case "4thgen" =>
+    val routes = config.tablo.gen match {
+      case TabloGen.FourthGen =>
         implicit val sys: ActorSystem[?] = context.system
-        val authContext = app.tuner.Tablo4thGen.Auth.initialize()
+        val authContext = app.tuner.Tablo4thGen.Auth.initialize(tabloAuth)
         val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
         app.tuner.Tablo4thGen.routes(lineup, authContext)
-      case _ =>
+      case TabloGen.Legacy =>
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
         Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route ~ Guide.route ~ Favicon.route
     }
 
-    startHttp(routes, daemon)
+    startHttp(config, routes, daemon)
 
     Behaviors.empty
   }
@@ -136,40 +158,8 @@ object Tablo2HDHomeRun {
   val Channel = app.tuner.TabloLegacy.Channel
   val Favicon = app.tuner.TabloLegacy.Favicon
 
-  val TABLO_IP = InetAddress.getByName(scala.sys.env.getOrElse("TABLO_IP","127.0.0.1"))
-  val TABLO_PROTOCOL = "http"
-  val TABLO_PORT = 8885
-
-  val PROXY_IP = InetAddress.getByName(scala.sys.env.getOrElse("PROXY_IP","127.0.0.1"))
-  val PROXY_PORT = 8080
-
-  val TABLO_GEN = scala.sys.env.getOrElse("TABLO_GEN", "4thgen")
-  val TABLO_EMAIL = scala.sys.env.get("TABLO_EMAIL")
-  val TABLO_PASSWORD = scala.sys.env.get("TABLO_PASSWORD")
-  val TABLO_DEVICE_NAME = scala.sys.env.get("TABLO_DEVICE_NAME")
-  val STREAM_BACKEND = scala.sys.env.getOrElse("STREAM_BACKEND", "hls")
-  val STREAM_MAX_GAP_SEC = scala.sys.env.get("STREAM_MAX_GAP_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
-  val STREAM_RETRY_MIN_BACKOFF_SEC = scala.sys.env.get("STREAM_RETRY_MIN_BACKOFF_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(2)
-  val STREAM_RETRY_MAX_BACKOFF_SEC = scala.sys.env.get("STREAM_RETRY_MAX_BACKOFF_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(30)
-  val STREAM_RECOVERY_TIMEOUT_SEC = scala.sys.env.get("STREAM_RECOVERY_TIMEOUT_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
-  val STREAM_HLS_STALL_POLLS = scala.sys.env.get("STREAM_HLS_STALL_POLLS").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(3)
-  val STREAM_HLS_HEARTBEAT_SEC = scala.sys.env.get("STREAM_HLS_HEARTBEAT_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
-  val STREAM_HLS_HEALTH_WINDOW_SEC = scala.sys.env.get("STREAM_HLS_HEALTH_WINDOW_SEC").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(10)
-  val STREAM_HLS_CC_ERROR_MAX = scala.sys.env.get("STREAM_HLS_CC_ERROR_MAX").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(30)
-  val STREAM_HLS_SYNC_LOSS_MAX = scala.sys.env.get("STREAM_HLS_SYNC_LOSS_MAX").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(10)
-  val STREAM_HLS_NULL_RATIO_MAX = scala.sys.env.get("STREAM_HLS_NULL_RATIO_MAX").flatMap(s => scala.util.Try(s.toDouble).toOption).getOrElse(0.6)
-  val STREAM_HLS_HEALTH_ENFORCE = scala.sys.env.get("STREAM_HLS_HEALTH_ENFORCE").map(_ == "true").getOrElse(false)
-  val STREAM_HLS_POLL_FAILURES_MAX = scala.sys.env.get("STREAM_HLS_POLL_FAILURES_MAX").flatMap(s => scala.util.Try(s.toInt).toOption).getOrElse(60)
-
-  import Response.Discover
-  val discoverFriendlyName = TABLO_GEN match {
-    case "4thgen" => "Tablo 4th Gen Proxy"
-    case _ => "Tablo Legacy Gen Proxy"
-  }
-  val discover = Discover(friendlyName=discoverFriendlyName,localIp=PROXY_IP)
-
   lazy val HttpCtx = Http()
-  def startHttp(routes: Route, daemon: Boolean): Unit = {
+  def startHttp(config: AppConfig, routes: Route, daemon: Boolean): Unit = {
     val loggedRejectionHandler =
       RejectionHandler
         .newBuilder()
@@ -183,14 +173,14 @@ object Tablo2HDHomeRun {
 
     val bindingFuture =
       Http()
-        .newServerAt(PROXY_IP.getHostAddress.toString, PROXY_PORT)
+        .newServerAt(config.proxy.bindHost, config.proxy.bindPort)
         .bind {
           handleRejections(loggedRejectionHandler) { routes }
         }
 
     val break = if (daemon) "CTRL-C" else "RETURN"
-    val url = s"http://${PROXY_IP.getHostAddress}:${PROXY_PORT}"
-    val modeText = if (TABLO_GEN == "4thgen") " (4th Gen mode)" else "(legacy mode)"
+    val url = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}"
+    val modeText = config.tablo.gen.startupModeText
     val message = s"Server now online$modeText. Please navigate to ${url}\nPress ${break} to stop..."
 
     println(message)
@@ -205,7 +195,6 @@ object Tablo2HDHomeRun {
       .onComplete(_ => system.terminate()) // and shutdown when done
   }
 }
-
 
 case class Monitor()
 object Monitor {

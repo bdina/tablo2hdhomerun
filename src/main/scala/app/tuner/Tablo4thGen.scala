@@ -27,7 +27,8 @@ import scala.util.{Failure, Success, Try}
 import spray.json._
 import DefaultJsonProtocol._
 
-import app.Tablo2HDHomeRun
+import app.{AppContext, Tablo2HDHomeRun}
+import app.config.TabloAuthEnv
 import app.stream.StreamBackend
 import app.sys.LogConfig
 
@@ -36,10 +37,6 @@ object Tablo4thGen {
 
   val LIGHTHOUSE_BASE_URL = "https://lighthousetv.ewscloud.com/api/v2"
   val USER_AGENT = "Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)"
-  val DefaultHashKey = "6l8jU5N43cEilqItmT3U2M2PFM3qPziilXqau9ys"
-  val DefaultDeviceKey = "ljpg6ZkwShVv8aI12E2LP55Ep8vq1uYDPvX0DdTB"
-  def deviceHashKey: String = scala.sys.env.get("TABLO_HASH_KEY").orElse(scala.sys.env.get("HashKey")).getOrElse(DefaultHashKey)
-  def deviceDeviceKey: String = scala.sys.env.get("TABLO_DEVICE_KEY").orElse(scala.sys.env.get("DeviceKey")).getOrElse(DefaultDeviceKey)
 
   sealed trait Error extends Exception
   object Error {
@@ -91,14 +88,15 @@ object Tablo4thGen {
 
     def authContext: Option[AuthContext] = _authContext
 
-    def initialize()(implicit system: ActorSystem[?]): AuthContext = {
+    def initialize(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): AuthContext = {
       val HttpCtx = Http()
 
-      val email = Tablo2HDHomeRun.TABLO_EMAIL.getOrElse {
+      val tablo = AppContext.config.tablo
+      val email = tabloAuth.email.getOrElse {
         log.error("[auth] missing env name=TABLO_EMAIL")
         throw Tablo4thGen.Error.MissingEmail
       }
-      val password = Tablo2HDHomeRun.TABLO_PASSWORD.getOrElse {
+      val password = tabloAuth.password.getOrElse {
         log.error("[auth] missing env name=TABLO_PASSWORD")
         throw Tablo4thGen.Error.MissingPassword
       }
@@ -145,7 +143,7 @@ object Tablo4thGen {
         }
         device = {
           val devices = accountInfo.devices.getOrElse(Seq.empty)
-          val deviceNameFilter = Tablo2HDHomeRun.TABLO_DEVICE_NAME
+          val deviceNameFilter = tablo.deviceName
           deviceNameFilter match {
             case Some(name) =>
               devices.find(_.name.toLowerCase.contains(name.toLowerCase)).getOrElse {
@@ -182,13 +180,13 @@ object Tablo4thGen {
         }
       } yield {
         val deviceUrl = device.url.map(Uri(_)).getOrElse {
-          Uri(s"http://${Tablo2HDHomeRun.TABLO_IP.getHostAddress}:${Tablo2HDHomeRun.TABLO_PORT}")
+          Uri(tablo.deviceBaseUri)
         }
         AuthContext(
           accessToken = accessToken
         , lighthouseToken = lighthouseToken
-        , deviceKey = Tablo4thGen.deviceDeviceKey
-        , hashKey = Tablo4thGen.deviceHashKey
+        , deviceKey = tablo.deviceKey
+        , hashKey = tablo.hashKey
         , deviceUrl = deviceUrl
         , profileId = profile.identifier
         , serverId = device.serverId
@@ -296,8 +294,8 @@ object Tablo4thGen {
               (0, 0, channel.name, "unknown")
           }
           val num = s"$major.$minor"
-          val url = s"${Tablo2HDHomeRun.discover.BaseURL.withPath(Uri.Path(s"/channel/${channel.identifier}"))}"
-          val src = s"${Tablo2HDHomeRun.discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${channel.identifier}/watch"))}"
+          val url = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/channel/${channel.identifier}"))}"
+          val src = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${channel.identifier}/watch"))}"
           JsObject(
             "GuideNumber" -> JsString(num)
           , "GuideName" -> JsString(callSign)

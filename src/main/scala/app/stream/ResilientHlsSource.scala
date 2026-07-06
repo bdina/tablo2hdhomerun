@@ -9,14 +9,15 @@ import org.apache.pekko.util.ByteString
 
 import org.slf4j.LoggerFactory
 
+import app.AppContext
+
 import scala.compiletime.uninitialized
 import scala.concurrent.duration._
 
 object ResilientHlsSource {
   val log = LoggerFactory.getLogger(this.getClass)
 
-  // Configuration (from environment variables)
-  def maxGapSec: Int = app.Tablo2HDHomeRun.STREAM_MAX_GAP_SEC
+  // Configuration (from AppContext.config.stream.resilient)
   val nullPacketIntervalMs: Int = 80
 
   // MPEG-TS null packet constant (188 bytes, sync byte 0x47, PID 0x1FFF)
@@ -36,10 +37,11 @@ object ResilientHlsSource {
   def apply(
     streamFactory: () => Source[ByteString, ?]
   , streamName: String
-  , recoveryTimeout: FiniteDuration = app.Tablo2HDHomeRun.STREAM_RECOVERY_TIMEOUT_SEC.seconds
-  , minBackoff: FiniteDuration = app.Tablo2HDHomeRun.STREAM_RETRY_MIN_BACKOFF_SEC.seconds
-  , maxBackoff: FiniteDuration = app.Tablo2HDHomeRun.STREAM_RETRY_MAX_BACKOFF_SEC.seconds
+  , recoveryTimeout: FiniteDuration = AppContext.config.stream.resilient.recoveryTimeoutSec.seconds
+  , minBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMinBackoffSec.seconds
+  , maxBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMaxBackoffSec.seconds
   ): Source[ByteString, ?] = {
+    val maxGapSec = AppContext.config.stream.resilient.maxGapSec
 
     val restartSettings = RestartSettings(
       minBackoff = minBackoff

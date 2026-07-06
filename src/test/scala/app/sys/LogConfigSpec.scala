@@ -1,8 +1,13 @@
 package app.sys
 
+import app.config.LoggingConfig
+
+import org.junit.runner.RunWith
 import org.scalatest.funsuite.AnyFunSuite
 import org.scalatest.matchers.should.Matchers
+import org.scalatestplus.junit.JUnitRunner
 
+@RunWith(classOf[JUnitRunner])
 class LogConfigSpec extends AnyFunSuite with Matchers {
   test("pekkoLogLevel maps warn to WARNING") {
     LogConfig.pekkoLogLevel("warn") shouldBe "WARNING"
@@ -15,5 +20,22 @@ class LogConfigSpec extends AnyFunSuite with Matchers {
     LogConfig.pekkoLogLevel("error") shouldBe "ERROR"
     LogConfig.pekkoLogLevel("info") shouldBe "INFO"
     LogConfig.pekkoLogLevel("debug") shouldBe "DEBUG"
+  }
+
+  test("configure sets logging system properties") {
+    val slf4jKey = "org.slf4j.simpleLogger.defaultLogLevel"
+    val pekkoKey = "pekko.loglevel"
+    val priorSlf4j = Option(System.getProperty(slf4jKey))
+    val priorPekko = Option(System.getProperty(pekkoKey))
+    try {
+      LogConfig.configure(LoggingConfig(logLevel = Some("debug"), pekkoLogLevel = Some("warn")))
+      System.getProperty(slf4jKey) shouldBe "debug"
+      System.getProperty(pekkoKey) shouldBe "WARNING"
+    } finally {
+      priorSlf4j.foreach(System.setProperty(slf4jKey, _))
+      priorPekko.foreach(System.setProperty(pekkoKey, _))
+      if (priorSlf4j.isEmpty) System.clearProperty(slf4jKey)
+      if (priorPekko.isEmpty) System.clearProperty(pekkoKey)
+    }
   }
 }
