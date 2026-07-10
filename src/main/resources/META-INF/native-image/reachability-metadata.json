@@ -192,11 +192,19 @@
       "allDeclaredFields": true
     },
     {
+      "type": "app.tuner.Tablo4thGen$Channel$Request$Watch4thGenExtra",
+      "allDeclaredFields": true
+    },
+    {
       "type": "app.tuner.Tablo4thGen$Channel$Request$Watch4thGenRequest",
       "allDeclaredFields": true
     },
     {
       "type": "app.tuner.Tablo4thGen$Channel$Response$Watch4thGenResponse",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.tuner.Tablo4thGen$Channel$Request$Watch4thGenRequest$JsonProtocol$",
       "allDeclaredFields": true
     },
     {
