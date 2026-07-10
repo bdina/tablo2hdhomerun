@@ -18,6 +18,7 @@ object ConfigTypes {
 
   object Port {
     val DefaultTablo: Port = 8885
+    val DefaultTabloFourthGen: Port = 8887
     val DefaultProxy: Port = 8080
 
     def apply(value: Int): Port = value

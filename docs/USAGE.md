@@ -156,6 +156,7 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 |----------|---------|-------------|
 | `TABLO_GEN` | `4thgen` | Tablo generation: `4thgen` or `legacy` |
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
+| `TABLO_PORT` | `8887` (4th gen) / `8885` (legacy) | Tablo device REST API port |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `STREAM_MAX_GAP_SEC` | `60` | Maximum gap (in seconds) before a single HLS attempt is retuned |
@@ -176,6 +177,7 @@ The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 - Distinct recovery errors for playlist stalls, segment-not-ready races, and auth failures
 - 4th gen watch-session expiry awareness before recovery retune
 - 4th gen Tablo player-session keepalive (`POST /player/sessions/{token}/keepalive`) while client playback is active
+- 4th gen session teardown (`DELETE /player/sessions/{token}`) when the client disconnects or the session is replaced on retune
 
 MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session keepalive are separate mechanisms: the former keeps the HTTP chunked response alive during HLS gaps; the latter renews the Tablo watch session token on the device.
 
@@ -302,13 +304,13 @@ docker run -d \
 
 ### No Channels Found
 
-1. Verify Tablo IP is correct: `curl http://<tablo-ip>:8885/guide/channels`
+1. Verify Tablo IP is correct (4th gen uses port 8887; legacy uses 8885)
 2. Check network connectivity between proxy and Tablo
 3. Ensure Tablo has completed initial channel scan
 
 ### Stream Won't Start
 
-1. Check tuner availability: `curl http://<tablo-ip>:8885/server/tuners`
+1. Check tuner availability (legacy: `curl http://<tablo-ip>:8885/server/tuners`; 4th gen tuners are managed via player sessions)
 2. If using `STREAM_BACKEND=ffmpeg`: verify FFmpeg is installed (`ffmpeg -version`). The default `hls` backend does not require FFmpeg
 3. Check for concurrent recording conflicts
 

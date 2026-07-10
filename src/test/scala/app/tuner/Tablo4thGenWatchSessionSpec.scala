@@ -130,4 +130,16 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers {
     )
     Tablo4thGen.Channel.WatchSession.shouldRefreshSession(session, now) shouldBe false
   }
+
+  "WatchSession.playlistChanged" should "detect playlist url changes" in {
+    val before = Tablo4thGen.Channel.WatchSession.Session(
+      Some("abc")
+    , None
+    , Some(165)
+    , "http://example.com/pl.m3u8?a=1"
+    )
+    val after = before.copy(playlistUrl = "http://example.com/pl.m3u8?a=2")
+    Tablo4thGen.Channel.WatchSession.playlistChanged(before, after) shouldBe true
+    Tablo4thGen.Channel.WatchSession.playlistChanged(before, before) shouldBe false
+  }
 }

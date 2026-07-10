@@ -91,9 +91,12 @@ object AppConfig {
   def load(env: Map[String, String]): Loaded = loadFrom(key => env.get(key))
 
   def loadFrom(get: EnvGet): Loaded = {
+    val gen = getTabloGen(get)
+    val defaultTabloPort = if (gen.isFourthGen) Port.DefaultTabloFourthGen.value else Port.DefaultTablo.value
     val tablo = TabloConfig(
       ip = getHostAddress(get, "TABLO_IP", "127.0.0.1")
-    , gen = getTabloGen(get)
+    , port = Port(getInt(get, "TABLO_PORT", defaultTabloPort))
+    , gen = gen
     , deviceName = get("TABLO_DEVICE_NAME")
     , hashKey = get("TABLO_HASH_KEY").orElse(get("HashKey")).getOrElse(DefaultHashKey)
     , deviceKey = get("TABLO_DEVICE_KEY").orElse(get("DeviceKey")).getOrElse(DefaultDeviceKey)

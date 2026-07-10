@@ -146,7 +146,7 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
    d. 4th gen: periodically POST /player/sessions/{token}/keepalive while the client stream is active
    e. 4th gen recovery retunes via `/watch` when the HLS session stalls, expires, or degrades
    f. Stream output as chunked HTTP response
-   g. On client disconnect, clean up backend resources and cancel session keepalive
+   g. On client disconnect, DELETE /player/sessions/{token} to release the Tablo tuner and cancel keepalive
 4. If no tuners: return 500 error
 ```
 
@@ -185,6 +185,7 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
 |----------|---------|-------------|
 | `TABLO_GEN` | `4thgen` | Tablo generation: `4thgen` or `legacy` |
 | `TABLO_IP` | `127.0.0.1` | IP address of the Tablo DVR device |
+| `TABLO_PORT` | `8887` (4th gen) / `8885` (legacy) | Tablo device API port |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |

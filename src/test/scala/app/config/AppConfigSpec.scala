@@ -16,7 +16,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.tablo.ipHost shouldBe "127.0.0.1"
     val _ = config.tablo.gen shouldBe TabloGen.FourthGen
     val _ = config.tablo.protocol shouldBe HttpProtocol.Http
-    val _ = config.tablo.port shouldBe Port.DefaultTablo
+    val _ = config.tablo.port shouldBe Port.DefaultTabloFourthGen
     val _ = config.tablo.deviceName shouldBe None
     val _ = config.proxy.bindHost shouldBe "127.0.0.1"
     val _ = config.proxy.port shouldBe Port.DefaultProxy
@@ -69,6 +69,14 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     )).config
     val _ = config.tablo.hashKey shouldBe "hash-alias"
     config.tablo.deviceKey shouldBe "device-alias"
+  }
+
+  it should "use legacy tablo port by default" in {
+    AppConfig.load(Map("TABLO_GEN" -> "legacy")).config.tablo.port shouldBe Port.DefaultTablo
+  }
+
+  it should "use fourth-gen tablo port by default" in {
+    AppConfig.load(Map.empty).config.tablo.port shouldBe Port.DefaultTabloFourthGen
   }
 
   it should "support legacy tablo gen" in {
