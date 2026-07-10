@@ -1,0 +1,2931 @@
+openapi: 3.1.0
+info:
+  title: Tablo TV 4th Generation Local API
+  description: 'Reverse-engineered OpenAPI specification for the Tablo TV 4th Generation local HTTP API.
+
+
+    See tablo-api-guide.md for usage, authentication details, and playback flow.'
+  version: 0.2.0
+  x-source-pcaps:
+  - tablo_capture-http_filtered.pcap
+  - tablo_capture-http_filtered_live+recordings.pcap
+  x-captured-device:
+    model: Tablo 4G QUAD 128GB
+    firmware: 2.2.58
+    server_id: SID_5087B856F43D
+servers:
+- url: http://{tabloHost}:8887
+  variables:
+    tabloHost:
+      default: 192.168.2.28
+      description: Tablo LAN IP address
+tags:
+- name: server
+- name: settings
+- name: guide
+- name: views
+- name: recordings
+- name: player
+- name: images
+- name: notifications
+- name: stream
+paths:
+  /player/sessions/{sessionId}:
+    delete:
+      operationId: delete_player_sessions_sessionId
+      summary: End an active player session
+      tags:
+      - player
+      x-observed-count: 10
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Player session UUID returned by /watch
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '204':
+          description: Session ended successfully
+    get:
+      operationId: get_player_sessions_sessionId
+      summary: Active player session state and playlist URL
+      tags:
+      - player
+      x-observed-count: 0
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Player session UUID returned by /watch
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: Current player session state
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerSession'
+  /recordings/series/episodes/{id}:
+    delete:
+      operationId: delete_recordings_series_episodes_id
+      summary: Full episode metadata including video and channel details
+      tags:
+      - recordings
+      x-observed-count: 18
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 16x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesEpisodesIdDeleteResponse'
+        '204':
+          description: HTTP 204 (observed 1x in capture)
+        '404':
+          description: HTTP 404 (observed 1x in capture)
+    get:
+      operationId: get_recordings_series_episodes_id
+      summary: Full episode metadata including video and channel details
+      tags:
+      - recordings
+      x-observed-count: 23
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 21x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesEpisodesIdGetResponse'
+        '404':
+          description: HTTP 404 (observed 2x in capture)
+    patch:
+      operationId: patch_recordings_series_episodes_id
+      summary: Full episode metadata including video and channel details
+      tags:
+      - recordings
+      x-observed-count: 0
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingsSeriesEpisodesIdPatchRequest'
+      responses:
+        default:
+          description: Response not captured in this trace
+  /guide/airings:
+    get:
+      operationId: get_guide_airings
+      summary: Scheduled single-airing recordings
+      tags:
+      - guide
+      x-observed-count: 5
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - requested
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 5x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuideAiringsGetResponse'
+  /guide/shows:
+    get:
+      operationId: get_guide_shows
+      summary: Series-level recording rules
+      tags:
+      - guide
+      x-observed-count: 5
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - requested
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 5x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuideShowsGetResponse'
+  /guide/{airingId}:
+    get:
+      operationId: get_guide_airingId
+      summary: Detailed guide entry for a specific airing
+      tags:
+      - guide
+      x-observed-count: 11
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: airingId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Guide airing identifier (LH-CEP... or LH-CSH... format)
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 11x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuideAiringidGetResponse'
+  /guide/{showId}:
+    get:
+      operationId: get_guide_showId
+      summary: Series/show recording rule details
+      tags:
+      - guide
+      x-observed-count: 3
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: showId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Series/show identifier (C{num}_SHOW_SH{num} format)
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 3x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuideShowidGetResponse'
+  /guide/{showId}/airings:
+    get:
+      operationId: get_guide_showId_airings
+      summary: Airings associated with a series/show recording rule
+      tags:
+      - guide
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: showId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Series/show identifier (C{num}_SHOW_SH{num} format)
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - requested
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuideShowidAiringsGetResponse'
+  /images/{id}:
+    get:
+      operationId: get_images_id
+      summary: Program or channel artwork (JPEG)
+      tags:
+      - images
+      x-observed-count: 7
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      responses:
+        '200':
+          description: HTTP 200 (observed 7x in capture)
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+  /notifications/stream:
+    get:
+      operationId: get_notifications_stream
+      summary: Long-lived notification stream (SSE or chunked HTTP)
+      tags:
+      - notifications
+      x-observed-count: 0
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: client_build
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: client_type
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: client_version
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: device_id
+        in: query
+        required: false
+        schema:
+          type: string
+          format: uuid
+      - name: device_type
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: Long-lived event stream (response body not fully captured)
+          content:
+            text/event-stream:
+              schema:
+                type: string
+  /recordings/channels/{id}:
+    get:
+      operationId: get_recordings_channels_id
+      summary: Recorded channel metadata
+      tags:
+      - recordings
+      x-observed-count: 11
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 11x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsChannelsIdGetResponse'
+  /recordings/movies:
+    get:
+      operationId: get_recordings_movies
+      summary: Recorded movies
+      tags:
+      - recordings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsMoviesGetResponse'
+  /recordings/series:
+    get:
+      operationId: get_recordings_series
+      summary: All recorded series summaries
+      tags:
+      - recordings
+      x-observed-count: 7
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 7x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesGetResponse'
+  /recordings/series/seasons/{id}:
+    get:
+      operationId: get_recordings_series_seasons_id
+      summary: Single season metadata
+      tags:
+      - recordings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesSeasonsIdGetResponse'
+  /recordings/series/seasons/{id}/episodes:
+    get:
+      operationId: get_recordings_series_seasons_id_episodes
+      summary: Episode paths for a recorded season
+      tags:
+      - recordings
+      x-observed-count: 4
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: failed
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 3x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesSeasonsIdEpisodesGetResponse'
+        '404':
+          description: HTTP 404 (observed 1x in capture)
+  /recordings/series/{id}:
+    get:
+      operationId: get_recordings_series_id
+      summary: Single series summary with episode list paths
+      tags:
+      - recordings
+      x-observed-count: 16
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 15x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesIdGetResponse'
+        '404':
+          description: HTTP 404 (observed 1x in capture)
+  /recordings/series/{id}/episodes:
+    get:
+      operationId: get_recordings_series_id_episodes
+      summary: Episode paths for a recorded series
+      tags:
+      - recordings
+      x-observed-count: 1
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 1x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesIdEpisodesGetResponse'
+  /recordings/series/{id}/seasons:
+    get:
+      operationId: get_recordings_series_id_seasons
+      summary: Season paths for a recorded series
+      tags:
+      - recordings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesIdSeasonsGetResponse'
+  /recordings/shows:
+    get:
+      operationId: get_recordings_shows
+      summary: Recorded shows (non-series)
+      tags:
+      - recordings
+      x-observed-count: 7
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 7x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsShowsGetResponse'
+  /recordings/sports:
+    get:
+      operationId: get_recordings_sports
+      summary: Recorded sports events
+      tags:
+      - recordings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSportsGetResponse'
+  /server/guide/status:
+    get:
+      operationId: get_server_guide_status
+      summary: EPG download/seed status and coverage window
+      tags:
+      - server
+      x-observed-count: 8
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 8x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerGuideStatusGetResponse'
+  /server/harddrives:
+    get:
+      operationId: get_server_harddrives
+      summary: Attached storage devices
+      tags:
+      - server
+      x-observed-count: 16
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 16x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerHarddrivesGetResponse'
+  /server/info:
+    get:
+      operationId: get_server_info
+      summary: Device identity, firmware version, and hardware model
+      tags:
+      - server
+      x-observed-count: 10
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 10x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerInfoGetResponse'
+  /server/location:
+    get:
+      operationId: get_server_location
+      summary: Geographic location / lineup configuration
+      tags:
+      - server
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerLocationGetResponse'
+  /server/update/info:
+    get:
+      operationId: get_server_update_info
+      summary: Available firmware update metadata
+      tags:
+      - server
+      x-observed-count: 3
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 3x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerUpdateInfoGetResponse'
+  /settings/info:
+    get:
+      operationId: get_settings_info
+      summary: User preferences (LED, audio, auto-delete, etc.)
+      tags:
+      - settings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: allowAudioTranscode
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsInfoGetResponse'
+  /settings/recording_qualities/live:
+    get:
+      operationId: get_settings_recording_qualities_live
+      summary: Available live recording quality presets
+      tags:
+      - settings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsRecordingQualitiesLiveGetResponse'
+  /settings/recording_qualities/recordings:
+    get:
+      operationId: get_settings_recording_qualities_recordings
+      summary: Available recording quality presets
+      tags:
+      - settings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SettingsRecordingQualitiesRecordingsGetResponse'
+  /stream/pl.m3u8:
+    get:
+      operationId: get_stream_pl.m3u8
+      summary: HLS master playlist for active playback session
+      tags:
+      - stream
+      x-observed-count: 0
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: 3VZwx02Y_crNP0UXRAvVSw
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: bouHoasHHGbsl0JAPASdeg
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: eQEfTxQrLnyUzvucVvaGhw
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: ox4jMUWRb5lpDPDo8-_DyA
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: sEVUYYN0uqzSXjbDpb6HDg
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      servers:
+      - url: http://{tabloHost}:80
+        variables:
+          tabloHost:
+            default: 192.168.2.28
+      responses:
+        default:
+          description: Response not captured in this trace
+  /stream/pls.m3u8:
+    get:
+      operationId: get_stream_pls.m3u8
+      summary: HLS sub-playlist (variant stream)
+      tags:
+      - stream
+      x-observed-count: 0
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: NQb5XgGM8NAikbL1yM4mNA
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: dNbc5vC8N5q7UAJBJkFkKg
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: fmt
+        in: query
+        required: false
+        schema:
+          type: string
+      - name: gGLU6qqiKqLS51Kv9ZvWEQ
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: kWEYkd6ciEhr62tX6URagw
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      servers:
+      - url: http://{tabloHost}:80
+        variables:
+          tabloHost:
+            default: 192.168.2.28
+      responses:
+        default:
+          description: Response not captured in this trace
+  /stream/segw.ts:
+    get:
+      operationId: get_stream_segw.ts
+      summary: HLS MPEG-TS media segment
+      tags:
+      - stream
+      x-observed-count: 3
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: gaXJ9ESWPf_q9fGIOFHDfA
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      - name: nucsK4ZwZjCZ165RNKy2eQ
+        in: query
+        required: false
+        schema:
+          type: string
+        description: Opaque stream/session token from playlist_url or watch response
+      responses:
+        '206':
+          description: HTTP 206 (observed 3x in capture)
+          content:
+            video/mp2t:
+              schema:
+                type: string
+                format: binary
+  /views/guide/channels/{channelId}/airings:
+    get:
+      operationId: get_views_guide_channels_channelId_airings
+      summary: EPG airings for a channel on a given date
+      tags:
+      - views
+      x-observed-count: 401
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: channelId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Channel identifier (S{station}_{major}_{minor} format)
+      - name: date
+        in: query
+        required: false
+        schema:
+          type: string
+          format: date
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      - name: state
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - requested
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 401x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewsGuideChannelsChannelidAiringsGetResponse'
+  /views/guide/upcoming:
+    get:
+      operationId: get_views_guide_upcoming
+      summary: Upcoming scheduled recordings across all channels
+      tags:
+      - views
+      x-observed-count: 3
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 3x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewsGuideUpcomingGetResponse'
+  /views/recordings/failed:
+    get:
+      operationId: get_views_recordings_failed
+      summary: Failed recordings
+      tags:
+      - views
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewsRecordingsFailedGetResponse'
+  /views/recordings/recent:
+    get:
+      operationId: get_views_recordings_recent
+      summary: Recently recorded content grouped by date
+      tags:
+      - views
+      x-observed-count: 9
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: failed
+        in: query
+        required: false
+        schema:
+          type: boolean
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      - name: order
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - desc
+      - name: sort
+        in: query
+        required: false
+        schema:
+          type: string
+          enum:
+          - age
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 9x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ViewsRecordingsRecentGetResponse'
+  /guide/channels/{channelId}/watch:
+    post:
+      operationId: post_guide_channels_channelId_watch
+      summary: Start live TV playback; returns player session and HLS playlist URL
+      tags:
+      - guide
+      x-observed-count: 13
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: channelId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Channel identifier (S{station}_{major}_{minor} format)
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GuideChannelsChannelidWatchPostRequest'
+      responses:
+        '200':
+          description: HTTP 200 (observed 3x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerSession'
+        '503':
+          description: HTTP 503 (observed 10x in capture)
+  /player/sessions/{sessionId}/keepalive:
+    post:
+      operationId: post_player_sessions_sessionId_keepalive
+      summary: Extend player session TTL
+      tags:
+      - player
+      x-observed-count: 13
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: sessionId
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Player session UUID returned by /watch
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 13x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerSessionsSessionidKeepalivePostResponse'
+  /recordings/series/episodes/{id}/watch:
+    post:
+      operationId: post_recordings_series_episodes_id_watch
+      summary: Start recorded episode playback; returns player session and HLS playlist URL
+      tags:
+      - recordings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingsSeriesEpisodesIdWatchPostRequest'
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PlayerSession'
+  /recordings/series/{id}/delete:
+    post:
+      operationId: post_recordings_series_id_delete
+      summary: Bulk-delete recordings for a series (e.g. watched episodes)
+      tags:
+      - recordings
+      x-observed-count: 2
+      x-source-pcaps:
+      - tablo_capture-http_filtered_live+recordings.pcap
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+        description: Numeric object identifier
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RecordingsSeriesIdDeletePostRequest'
+      responses:
+        '200':
+          description: HTTP 200 (observed 2x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/RecordingsSeriesIdDeletePostResponse'
+  /server/guide/refresh:
+    post:
+      operationId: post_server_guide_refresh
+      summary: Trigger guide data refresh
+      tags:
+      - server
+      x-observed-count: 1
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '204':
+          description: HTTP 204 (observed 1x in capture)
+  /server/update/check:
+    post:
+      operationId: post_server_update_check
+      summary: Check for firmware updates
+      tags:
+      - server
+      x-observed-count: 1
+      x-source-pcaps:
+      - tablo_capture-http_filtered.pcap
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: HTTP 200 (observed 1x in capture)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerUpdateCheckPostResponse'
+components:
+  securitySchemes:
+    TabloAuth:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: 'Format: `tablo:{deviceToken}:{requestHash}`'
+  schemas:
+    RecordingsSeriesEpisodesIdDeleteResponse:
+      type: object
+      properties:
+        object_id:
+          type: integer
+        path:
+          type: string
+        series_path:
+          type: string
+        season_path:
+          type: string
+        guide_identifier:
+          type: string
+        snapshot_image:
+          type: object
+          properties:
+            image_id:
+              type: integer
+            has_title:
+              type: boolean
+          required:
+          - has_title
+          - image_id
+        airing_details:
+          type: object
+          properties:
+            datetime:
+              type: string
+              format: date-time
+            duration:
+              type: integer
+            channel_path:
+              type: string
+            channel:
+              type: object
+              properties:
+                object_id:
+                  type: integer
+                path:
+                  type: string
+                channel:
+                  type: object
+                  properties:
+                    call_sign:
+                      type: string
+                    name:
+                      type: string
+                    call_sign_src:
+                      type: string
+                    major:
+                      type: integer
+                    minor:
+                      type: integer
+                    network:
+                      type: string
+                    flags:
+                      type: array
+                      items:
+                        type: string
+                    resolution:
+                      type: string
+                    favourite:
+                      type: boolean
+                    tms_station_id:
+                      type: string
+                    tms_affiliate_id:
+                      type: string
+                    channel_identifier:
+                      type: string
+                    source:
+                      type: string
+                    logos:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          kind:
+                            type: string
+                          url:
+                            type: string
+                        required:
+                        - kind
+                        - url
+                  required:
+                  - call_sign
+                  - call_sign_src
+                  - channel_identifier
+                  - favourite
+                  - flags
+                  - logos
+                  - major
+                  - minor
+                  - name
+                  - network
+                  - resolution
+                  - source
+                  - tms_affiliate_id
+                  - tms_station_id
+              required:
+              - channel
+              - object_id
+              - path
+            show_title:
+              type: string
+          required:
+          - channel
+          - channel_path
+          - datetime
+          - duration
+          - show_title
+        video_details:
+          type: object
+          properties:
+            state:
+              type: string
+            clean:
+              type: boolean
+            cloud:
+              type: boolean
+            uploading:
+              type: boolean
+            audio:
+              type: string
+            size:
+              type: integer
+            duration:
+              type: integer
+            width:
+              type: integer
+            height:
+              type: integer
+            has_snap_grid:
+              type: boolean
+            recorded_offsets:
+              type: object
+              properties:
+                start:
+                  type: integer
+                end:
+                  type: integer
+              required:
+              - end
+              - start
+            airing_offsets:
+              type: object
+              properties:
+                start:
+                  type: integer
+                end:
+                  type: integer
+                source:
+                  type: string
+              required:
+              - end
+              - source
+              - start
+            seek:
+              type: integer
+            container_format:
+              type: string
+            flags:
+              type: array
+              items:
+                type: string
+            error:
+              type:
+              - string
+              - 'null'
+            warnings:
+              type: array
+              items:
+                type: string
+            schedule_offsets:
+              type: object
+              properties:
+                start:
+                  type: integer
+                end:
+                  type: integer
+                deprecated:
+                  type: boolean
+              required:
+              - deprecated
+              - end
+              - start
+          required:
+          - airing_offsets
+          - audio
+          - clean
+          - cloud
+          - container_format
+          - duration
+          - flags
+          - has_snap_grid
+          - height
+          - recorded_offsets
+          - seek
+          - size
+          - state
+          - uploading
+          - warnings
+          - width
+        user_info:
+          type: object
+          properties:
+            position:
+              type: integer
+            watched:
+              type: boolean
+            protected:
+              type: boolean
+          required:
+          - position
+          - protected
+          - watched
+        episode:
+          type: object
+          properties:
+            title:
+              type:
+              - string
+              - 'null'
+            description:
+              type:
+              - string
+              - 'null'
+            number:
+              type: integer
+            season_number:
+              type: integer
+            orig_air_date:
+              type: string
+              format: date
+            tms_id:
+              type: string
+          required:
+          - number
+          - orig_air_date
+          - season_number
+        qualifiers:
+          type: array
+          items:
+            type: string
+      required:
+      - airing_details
+      - episode
+      - object_id
+      - path
+      - qualifiers
+      - season_path
+      - series_path
+      - snapshot_image
+      - user_info
+      - video_details
+    GuideAiringsGetResponse:
+      type: array
+      items:
+        type: object
+        properties:
+          identifier:
+            type: string
+          schedule:
+            type: object
+            properties:
+              state:
+                type: string
+              qualifier:
+                type: string
+              skip_reason:
+                type: string
+              skip_detail:
+                type:
+                - string
+                - 'null'
+              offsets:
+                type: object
+                properties:
+                  start:
+                    type: integer
+                  end:
+                    type: integer
+                  source:
+                    type: string
+                required:
+                - end
+                - source
+                - start
+            required:
+            - offsets
+            - qualifier
+            - skip_reason
+            - state
+        required:
+        - identifier
+        - schedule
+    GuideShowsGetResponse:
+      type: array
+      items:
+        type: object
+        properties:
+          identifier:
+            type: string
+          schedule:
+            type: object
+            properties:
+              rule:
+                type: string
+              channel_identifier:
+                type: string
+              offsets:
+                type: object
+                properties:
+                  start:
+                    type: integer
+                  end:
+                    type: integer
+                  source:
+                    type: string
+                required:
+                - end
+                - source
+                - start
+            required:
+            - channel_identifier
+            - offsets
+            - rule
+          keep:
+            type: object
+            properties:
+              rule:
+                type: string
+              count:
+                type: integer
+            required:
+            - count
+            - rule
+          recordings_path:
+            type: string
+        required:
+        - identifier
+        - keep
+        - schedule
+    GuideAiringidGetResponse:
+      type: object
+      properties:
+        identifier:
+          type: string
+        schedule:
+          type: object
+          properties:
+            state:
+              type: string
+            qualifier:
+              type: string
+            skip_reason:
+              type: string
+            skip_detail:
+              type:
+              - string
+              - 'null'
+            offsets:
+              type: object
+              properties:
+                start:
+                  type: integer
+                end:
+                  type: integer
+                source:
+                  type: string
+              required:
+              - end
+              - source
+              - start
+          required:
+          - offsets
+          - qualifier
+          - skip_reason
+          - state
+      required:
+      - identifier
+      - schedule
+    GuideShowidGetResponse:
+      type: object
+      properties:
+        identifier:
+          type: string
+        schedule:
+          type: object
+          properties:
+            rule:
+              type: string
+            channel_identifier:
+              type: string
+            offsets:
+              type: object
+              properties:
+                start:
+                  type: integer
+                end:
+                  type: integer
+                source:
+                  type: string
+              required:
+              - end
+              - source
+              - start
+          required:
+          - offsets
+          - rule
+        keep:
+          type: object
+          properties:
+            rule:
+              type: string
+            count:
+              type: integer
+          required:
+          - rule
+        recordings_path:
+          type: string
+      required:
+      - identifier
+      - keep
+      - schedule
+    GuideShowidAiringsGetResponse:
+      type: array
+      items:
+        type: object
+        properties:
+          identifier:
+            type: string
+          schedule:
+            type: object
+            properties:
+              state:
+                type: string
+              qualifier:
+                type: string
+              skip_reason:
+                type: string
+              skip_detail:
+                type:
+                - string
+                - 'null'
+              offsets:
+                type: object
+                properties:
+                  start:
+                    type: integer
+                  end:
+                    type: integer
+                  source:
+                    type: string
+                required:
+                - end
+                - source
+                - start
+            required:
+            - offsets
+            - qualifier
+            - skip_reason
+            - state
+        required:
+        - identifier
+        - schedule
+    RecordingsChannelsIdGetResponse:
+      type: object
+      properties:
+        object_id:
+          type: integer
+        path:
+          type: string
+        channel:
+          type: object
+          properties:
+            call_sign:
+              type: string
+            name:
+              type: string
+            call_sign_src:
+              type: string
+            major:
+              type: integer
+            minor:
+              type: integer
+            network:
+              type: string
+            flags:
+              type: array
+              items:
+                type: string
+            resolution:
+              type: string
+            favourite:
+              type: boolean
+            tms_station_id:
+              type: string
+            tms_affiliate_id:
+              type: string
+            channel_identifier:
+              type: string
+            source:
+              type: string
+            logos:
+              type: array
+              items:
+                type: object
+                properties:
+                  kind:
+                    type: string
+                  url:
+                    type: string
+                required:
+                - kind
+                - url
+          required:
+          - call_sign
+          - call_sign_src
+          - channel_identifier
+          - favourite
+          - flags
+          - logos
+          - major
+          - minor
+          - name
+          - network
+          - resolution
+          - source
+          - tms_affiliate_id
+          - tms_station_id
+      required:
+      - channel
+      - object_id
+      - path
+    RecordingsMoviesGetResponse:
+      type: array
+      items:
+        type: string
+    RecordingsSeriesGetResponse:
+      type: array
+      items:
+        type: string
+    RecordingsSeriesEpisodesIdGetResponse:
+      type: object
+      properties:
+        object_id:
+          type: integer
+        path:
+          type: string
+        series_path:
+          type: string
+        season_path:
+          type: string
+        guide_identifier:
+          type: string
+        snapshot_image:
+          type: object
+          properties:
+            image_id:
+              type: integer
+            has_title:
+              type: boolean
+        airing_details:
+          type: object
+          properties:
+            datetime:
+              type: string
+              format: date-time
+            duration:
+              type: integer
+            channel_path:
+              type: string
+            channel:
+              type: object
+              properties:
+                object_id:
+                  type: integer
+                path:
+                  type: string
+                channel:
+                  type: object
+                  properties:
+                    call_sign:
+                      type: string
+                    name:
+                      type: string
+                    call_sign_src:
+                      type: string
+                    major:
+                      type: integer
+                    minor:
+                      type: integer
+                    network:
+                      type: string
+                    flags:
+                      type: array
+                      items:
+                        type: string
+                    resolution:
+                      type: string
+                    favourite:
+                      type: boolean
+                    tms_station_id:
+                      type: string
+                    tms_affiliate_id:
+                      type: string
+                    channel_identifier:
+                      type: string
+                    source:
+                      type: string
+                    logos:
+                      type: array
+                      items:
+                        type: object
+                        properties:
+                          kind:
+                            type: string
+                          url:
+                            type: string
+                        required:
+                        - kind
+                        - url
+                  required:
+                  - call_sign
+                  - call_sign_src
+                  - channel_identifier
+                  - favourite
+                  - flags
+                  - logos
+                  - major
+                  - minor
+                  - name
+                  - network
+                  - resolution
+                  - source
+                  - tms_affiliate_id
+                  - tms_station_id
+              required:
+              - channel
+              - object_id
+              - path
+            show_title:
+              type: string
+          required:
+          - channel
+          - channel_path
+          - datetime
+          - duration
+          - show_title
+        video_details:
+          type: object
+          properties:
+            state:
+              type: string
+            clean:
+              type: boolean
+            cloud:
+              type: boolean
+            uploading:
+              type: boolean
+            audio:
+              type: string
+            size:
+              type: integer
+            duration:
+              type: integer
+            width:
+              type: integer
+            height:
+              type: integer
+            has_snap_grid:
+              type: boolean
+            recorded_offsets:
+              type: object
+              properties:
+                start:
+                  type: integer
+                end:
+                  type: integer
+              required:
+              - end
+              - start
+            airing_offsets:
+              type: object
+              properties:
+                start:
+                  type: integer
+                end:
+                  type: integer
+                source:
+                  type: string
+              required:
+              - end
+              - source
+              - start
+            seek:
+              type: integer
+            container_format:
+              type: string
+            flags:
+              type: array
+              items:
+                type: string
+            error:
+              type:
+              - string
+              - 'null'
+            warnings:
+              type: array
+              items:
+                type: object
+                properties:
+                  code:
+                    type: string
+                  details:
+                    type:
+                    - string
+                    - 'null'
+                  description:
+                    type: string
+          required:
+          - airing_offsets
+          - audio
+          - clean
+          - cloud
+          - container_format
+          - duration
+          - flags
+          - has_snap_grid
+          - height
+          - recorded_offsets
+          - seek
+          - size
+          - state
+          - uploading
+          - warnings
+          - width
+        user_info:
+          type: object
+          properties:
+            position:
+              type: integer
+            watched:
+              type: boolean
+            protected:
+              type: boolean
+          required:
+          - position
+          - protected
+          - watched
+        episode:
+          type: object
+          properties:
+            title:
+              type:
+              - string
+              - 'null'
+            description:
+              type: string
+            number:
+              type: integer
+            season_number:
+              type: integer
+            orig_air_date:
+              type: string
+              format: date
+          required:
+          - number
+          - orig_air_date
+          - season_number
+        qualifiers:
+          type: array
+          items:
+            type: string
+      required:
+      - airing_details
+      - episode
+      - guide_identifier
+      - object_id
+      - path
+      - qualifiers
+      - season_path
+      - series_path
+      - user_info
+      - video_details
+    RecordingsSeriesSeasonsIdGetResponse:
+      type: object
+      properties:
+        object_id:
+          type: integer
+        path:
+          type: string
+        series_path:
+          type: string
+        season:
+          type: object
+          properties:
+            number:
+              type: integer
+            name:
+              type: string
+          required:
+          - name
+          - number
+        season_counts:
+          type: object
+          properties:
+            airing_count:
+              type: integer
+            unwatched_count:
+              type: integer
+            protected_count:
+              type: integer
+            watched_and_protected_count:
+              type: integer
+            failed_count:
+              type: integer
+            deprecated:
+              type: string
+          required:
+          - airing_count
+          - deprecated
+          - failed_count
+          - protected_count
+          - unwatched_count
+          - watched_and_protected_count
+      required:
+      - object_id
+      - path
+      - season
+      - season_counts
+      - series_path
+    RecordingsSeriesSeasonsIdEpisodesGetResponse:
+      type: array
+      items:
+        type: string
+    RecordingsSeriesIdGetResponse:
+      type: object
+      properties:
+        object_id:
+          type: integer
+        path:
+          type: string
+        series:
+          type: object
+          properties:
+            title:
+              type: string
+            genres:
+              type: array
+              items:
+                type: string
+            description:
+              type: string
+            orig_air_date:
+              type: string
+              format: date
+            episode_runtime:
+              type: integer
+            series_rating:
+              type:
+              - string
+              - 'null'
+            cast:
+              type: array
+              items:
+                type: string
+            awards:
+              type: array
+              items:
+                type: string
+            background_image:
+              type: object
+              properties:
+                image_id:
+                  type: integer
+                has_title:
+                  type: boolean
+              required:
+              - has_title
+              - image_id
+            cover_image:
+              type: object
+              properties:
+                image_id:
+                  type: integer
+                has_title:
+                  type: boolean
+              required:
+              - has_title
+              - image_id
+            thumbnail_image:
+              type: object
+              properties:
+                image_id:
+                  type: integer
+                has_title:
+                  type: boolean
+              required:
+              - has_title
+              - image_id
+          required:
+          - awards
+          - background_image
+          - cast
+          - cover_image
+          - episode_runtime
+          - genres
+          - orig_air_date
+          - thumbnail_image
+          - title
+        show_counts:
+          type: object
+          properties:
+            airing_count:
+              type: integer
+            unwatched_count:
+              type: integer
+            protected_count:
+              type: integer
+            watched_and_protected_count:
+              type: integer
+            failed_count:
+              type: integer
+          required:
+          - airing_count
+          - failed_count
+          - protected_count
+          - unwatched_count
+          - watched_and_protected_count
+        ota_show_counts:
+          type: object
+          properties:
+            airing_count:
+              type: integer
+            unwatched_count:
+              type: integer
+            protected_count:
+              type: integer
+            watched_and_protected_count:
+              type: integer
+            failed_count:
+              type: integer
+          required:
+          - airing_count
+          - failed_count
+          - protected_count
+          - unwatched_count
+          - watched_and_protected_count
+        ott_show_counts:
+          type: object
+          properties:
+            airing_count:
+              type: integer
+            unwatched_count:
+              type: integer
+            protected_count:
+              type: integer
+            watched_and_protected_count:
+              type: integer
+            failed_count:
+              type: integer
+          required:
+          - airing_count
+          - failed_count
+          - protected_count
+          - unwatched_count
+          - watched_and_protected_count
+        user_info:
+          type: object
+          properties:
+            up_next:
+              type: string
+          required:
+          - up_next
+        keep:
+          type: object
+          properties:
+            rule:
+              type: string
+            count:
+              type:
+              - string
+              - 'null'
+          required:
+          - rule
+        guide_identifier:
+          type: string
+      required:
+      - guide_identifier
+      - keep
+      - object_id
+      - ota_show_counts
+      - ott_show_counts
+      - path
+      - series
+      - show_counts
+      - user_info
+    RecordingsSeriesIdEpisodesGetResponse:
+      type: array
+      items:
+        type: string
+    RecordingsSeriesIdSeasonsGetResponse:
+      type: array
+      items:
+        type: string
+    RecordingsShowsGetResponse:
+      type: array
+      items:
+        type: string
+    RecordingsSportsGetResponse:
+      type: array
+      items:
+        type: string
+    ServerGuideStatusGetResponse:
+      type: object
+      properties:
+        guide_seeded:
+          type: boolean
+        last_update:
+          type: string
+          format: date-time
+        limit:
+          type: string
+          format: date-time
+        download_progress:
+          type:
+          - string
+          - 'null'
+      required:
+      - guide_seeded
+      - last_update
+      - limit
+    ServerHarddrivesGetResponse:
+      type: array
+      items:
+        type: object
+        properties:
+          error:
+            type:
+            - string
+            - 'null'
+          connected:
+            type: boolean
+          format_state:
+            type: string
+          name:
+            type: string
+          busy_state:
+            type: string
+          kind:
+            type: string
+          size:
+            type: integer
+          size_mib:
+            type: integer
+          usage:
+            type: integer
+          usage_mib:
+            type: integer
+          free:
+            type: integer
+          free_mib:
+            type: integer
+          limit:
+            type: integer
+          limit_mib:
+            type: integer
+        required:
+        - busy_state
+        - connected
+        - format_state
+        - free
+        - free_mib
+        - kind
+        - limit
+        - limit_mib
+        - name
+        - size
+        - size_mib
+        - usage
+        - usage_mib
+    ServerInfoGetResponse:
+      type: object
+      properties:
+        server_id:
+          type: string
+        name:
+          type: string
+        timezone:
+          type: string
+        deprecated:
+          type: string
+        version:
+          type: string
+        local_address:
+          type: string
+        setup_completed:
+          type: boolean
+        build_number:
+          type: integer
+        model:
+          type: object
+          properties:
+            wifi:
+              type: boolean
+            tuners:
+              type: integer
+            type:
+              type: string
+            name:
+              type: string
+          required:
+          - name
+          - tuners
+          - type
+          - wifi
+        availability:
+          type: string
+        cache_key:
+          type: string
+          format: uuid
+        product:
+          type: string
+      required:
+      - availability
+      - build_number
+      - cache_key
+      - deprecated
+      - local_address
+      - model
+      - name
+      - product
+      - server_id
+      - setup_completed
+      - timezone
+      - version
+    ServerLocationGetResponse:
+      type: object
+      properties:
+        state:
+          type: string
+        location:
+          type: object
+          properties:
+            postal_code:
+              type: string
+            name:
+              type: string
+            locality:
+              type: string
+            area:
+              type: string
+            state:
+              type: string
+            latitude:
+              type: number
+            longitude:
+              type: number
+          required:
+          - area
+          - latitude
+          - locality
+          - longitude
+          - name
+          - postal_code
+          - state
+        timezone:
+          type: object
+          properties:
+            name:
+              type: string
+            raw_offset:
+              type: integer
+            dst_offset:
+              type: integer
+            does_dst:
+              type: boolean
+          required:
+          - does_dst
+          - dst_offset
+          - name
+          - raw_offset
+      required:
+      - location
+      - state
+      - timezone
+    ServerUpdateInfoGetResponse:
+      type: object
+      properties:
+        details:
+          type:
+          - string
+          - 'null'
+        available_update:
+          type:
+          - string
+          - 'null'
+        last_checked:
+          type: string
+          format: date-time
+        last_update:
+          type:
+          - string
+          - 'null'
+        sequence:
+          type: array
+          items:
+            type: string
+        current_step:
+          type:
+          - string
+          - 'null'
+        state:
+          type: string
+        error:
+          type:
+          - string
+          - 'null'
+      required:
+      - last_checked
+      - sequence
+      - state
+    SettingsInfoGetResponse:
+      type: object
+      properties:
+        led:
+          type: string
+        extend_live_recordings:
+          type: boolean
+        auto_delete_recordings:
+          type: boolean
+        exclude_duplicates:
+          type: boolean
+        audio:
+          type: string
+        preferred_audio_track:
+          type: string
+        enable_amplifier:
+          type: boolean
+      required:
+      - audio
+      - auto_delete_recordings
+      - enable_amplifier
+      - exclude_duplicates
+      - extend_live_recordings
+      - led
+      - preferred_audio_track
+    SettingsRecordingQualitiesLiveGetResponse:
+      type: array
+      items:
+        type: string
+    SettingsRecordingQualitiesRecordingsGetResponse:
+      type: array
+      items:
+        type: string
+    ViewsGuideChannelsChannelidAiringsGetResponse:
+      type: array
+      items:
+        type: string
+    ViewsGuideUpcomingGetResponse:
+      type: array
+      items:
+        type: object
+        properties:
+          key:
+            type: string
+            format: date
+          contents:
+            type: array
+            items:
+              type: string
+        required:
+        - contents
+        - key
+    ViewsRecordingsFailedGetResponse:
+      type: array
+      items:
+        type: string
+    ViewsRecordingsRecentGetResponse:
+      type: array
+      items:
+        type: object
+        properties:
+          key:
+            type: string
+            format: date
+          contents:
+            type: array
+            items:
+              type: string
+        required:
+        - contents
+        - key
+    RecordingsSeriesEpisodesIdPatchRequest:
+      type: object
+      properties:
+        position:
+          type: integer
+        protected:
+          type: boolean
+    GuideChannelsChannelidWatchPostRequest:
+      type: object
+      properties:
+        bandwidth:
+          type:
+          - string
+          - 'null'
+        platform:
+          type: string
+        extra:
+          type: object
+          properties:
+            deviceOSVersion:
+              type: string
+            deviceMake:
+              type: string
+            width:
+              type: integer
+            height:
+              type: integer
+            deviceModel:
+              type: string
+            deviceId:
+              type: string
+              format: uuid
+            deviceOS:
+              type: string
+            limitedAdTracking:
+              type: integer
+            lang:
+              type: string
+          required:
+          - deviceId
+          - deviceMake
+          - deviceModel
+          - deviceOS
+          - deviceOSVersion
+          - height
+          - lang
+          - limitedAdTracking
+          - width
+        device_id:
+          type: string
+          format: uuid
+      required:
+      - device_id
+      - extra
+      - platform
+    PlayerSessionsSessionidKeepalivePostResponse:
+      type: object
+      properties:
+        token:
+          type: string
+          format: uuid
+        expires:
+          type: string
+          format: date-time
+        keepalive:
+          type: integer
+        playlist_url:
+          type: string
+        video_details:
+          type: object
+          properties:
+            container_format:
+              type: string
+            flags:
+              type: array
+              items:
+                type: string
+            width:
+              type: integer
+            height:
+              type: integer
+          required:
+          - container_format
+          - flags
+        canRecord:
+          type: boolean
+        bif_url_sd:
+          type: string
+        bif_url_hd:
+          type: string
+        recordings_path:
+          type: string
+      required:
+      - canRecord
+      - expires
+      - keepalive
+      - playlist_url
+      - token
+      - video_details
+    RecordingsSeriesEpisodesIdWatchPostRequest:
+      type: object
+      properties:
+        device_id:
+          type: string
+          format: uuid
+        bandwidth:
+          type:
+          - string
+          - 'null'
+        platform:
+          type: string
+      required:
+      - device_id
+      - platform
+    RecordingsSeriesIdDeletePostRequest:
+      type: object
+      properties:
+        filter:
+          type: string
+      required:
+      - filter
+    RecordingsSeriesIdDeletePostResponse:
+      type: array
+      items:
+        type: string
+    ServerUpdateCheckPostResponse:
+      type: object
+      properties:
+        details:
+          type:
+          - string
+          - 'null'
+        available_update:
+          type:
+          - string
+          - 'null'
+        last_checked:
+          type: string
+          format: date-time
+        last_update:
+          type:
+          - string
+          - 'null'
+        sequence:
+          type: array
+          items:
+            type: string
+        current_step:
+          type:
+          - string
+          - 'null'
+        state:
+          type: string
+        error:
+          type:
+          - string
+          - 'null'
+      required:
+      - last_checked
+      - sequence
+      - state
+    PlayerSession:
+      type: object
+      properties:
+        token:
+          type: string
+          format: uuid
+        expires:
+          type: string
+          format: date-time
+        keepalive:
+          type: integer
+        playlist_url:
+          type: string
+        video_details:
+          type: object
+          properties:
+            container_format:
+              type: string
+            flags:
+              type: array
+              items:
+                type: string
+            width:
+              type: integer
+            height:
+              type: integer
+          required:
+          - container_format
+          - flags
+        canRecord:
+          type: boolean
+        audio_details:
+          type: object
+          properties:
+            container_format:
+              type: string
+          required:
+          - container_format
+        bif_url_sd:
+          type: string
+        bif_url_hd:
+          type: string
+        recordings_path:
+          type: string
+      required:
+      - audio_details
+      - canRecord
+      - expires
+      - keepalive
+      - playlist_url
+      - token
+      - video_details
