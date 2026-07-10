@@ -2,6 +2,9 @@ openapi: 3.1.0
 info:
   title: Tablo 4th Gen API
   version: 1.1.0
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
   description: 'Complete API specification for Tablo 4th Generation devices.
 
     Includes the Lighthouse cloud service for authentication, discovery, and guide data,
@@ -74,15 +77,18 @@ tags:
 - name: stream
   description: HLS video delivery on port 80
 paths:
-  /login/:
+  /login:
     post:
       tags:
       - Cloud Authentication
       summary: Login to Lighthouse TV
       operationId: login
+      security: []
       description: 'Authenticate with Tablo account credentials.
 
         Returns access token for subsequent API calls.
+
+        Lighthouse cloud requests use a trailing slash in practice (`/login/`).
 
         '
       requestBody:
@@ -104,7 +110,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /account/:
+  /account:
     get:
       tags:
       - Cloud Account
@@ -130,7 +136,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /account/select/:
+  /account/select:
     post:
       tags:
       - Cloud Account
@@ -162,7 +168,7 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
-  /account/{lighthouseToken}/guide/channels/:
+  /account/{lighthouseToken}/guide/channels:
     get:
       tags:
       - Cloud Guide
@@ -194,7 +200,7 @@ paths:
                   $ref: '#/components/schemas/ChannelLineup'
         '401':
           description: Unauthorized
-  /account/guide/channels/{channelId}/airings/{date}/:
+  /account/guide/channels/{channelId}/airings/{date}:
     get:
       tags:
       - Cloud Guide
@@ -258,9 +264,12 @@ paths:
           type: boolean
       security:
       - TabloAuth: []
+      - DeviceAuth: []
       responses:
         '204':
           description: Session ended successfully
+        '401':
+          $ref: '#/components/responses/DeviceUnauthorized'
     get:
       operationId: get_player_sessions_sessionId
       summary: Active player session state and playlist URL
@@ -285,6 +294,7 @@ paths:
           type: boolean
       security:
       - TabloAuth: []
+      - DeviceAuth: []
       responses:
         '200':
           description: Current player session state
@@ -458,23 +468,26 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/GuideShowsGetResponse'
-  /guide/{airingId}:
+  /guide/{guideId}:
     get:
-      operationId: get_guide_airingId
-      summary: Detailed guide entry for a specific airing
+      operationId: get_guide_guideId
+      summary: Guide airing details or show recording rule
+      description: 'Returns airing details when guideId is an airing identifier (LH-CEP...
+        / LH-CSH...), or show recording rule details when guideId is a series/show
+        identifier (C{num}_SHOW_SH{num}).'
       tags:
       - guide
-      x-observed-count: 11
+      x-observed-count: 14
       x-source-pcaps:
       - tablo_capture-http_filtered.pcap
       - tablo_capture-http_filtered_live+recordings.pcap
       parameters:
-      - name: airingId
+      - name: guideId
         in: path
         required: true
         schema:
           type: string
-        description: Guide airing identifier (LH-CEP... or LH-CSH... format)
+        description: Guide airing identifier (LH-CEP... / LH-CSH...) or series/show identifier (C{num}_SHOW_SH{num})
       - name: lh
         in: query
         required: false
@@ -485,43 +498,14 @@ paths:
       - TabloAuth: []
       responses:
         '200':
-          description: HTTP 200 (observed 11x in capture)
+          description: Airing details or show recording rule
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/GuideAiringidGetResponse'
-  /guide/{showId}:
-    get:
-      operationId: get_guide_showId
-      summary: Series/show recording rule details
-      tags:
-      - guide
-      x-observed-count: 3
-      x-source-pcaps:
-      - tablo_capture-http_filtered_live+recordings.pcap
-      parameters:
-      - name: showId
-        in: path
-        required: true
-        schema:
-          type: string
-        description: Series/show identifier (C{num}_SHOW_SH{num} format)
-      - name: lh
-        in: query
-        required: false
-        description: Bare flag parameter (no value). Present on most authenticated API calls.
-        schema:
-          type: boolean
-      security:
-      - TabloAuth: []
-      responses:
-        '200':
-          description: HTTP 200 (observed 3x in capture)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/GuideShowidGetResponse'
-  /guide/{showId}/airings:
+                oneOf:
+                - $ref: '#/components/schemas/GuideAiringidGetResponse'
+                - $ref: '#/components/schemas/GuideShowidGetResponse'
+  /guide/{guideId}/airings:
     get:
       operationId: get_guide_showId_airings
       summary: Airings associated with a series/show recording rule
@@ -531,7 +515,7 @@ paths:
       x-source-pcaps:
       - tablo_capture-http_filtered_live+recordings.pcap
       parameters:
-      - name: showId
+      - name: guideId
         in: path
         required: true
         schema:
@@ -565,6 +549,7 @@ paths:
       summary: Program or channel artwork (JPEG)
       tags:
       - images
+      security: []
       x-observed-count: 7
       x-source-pcaps:
       - tablo_capture-http_filtered.pcap
@@ -1162,6 +1147,7 @@ paths:
       summary: HLS master playlist for active playback session
       tags:
       - stream
+      security: []
       x-observed-count: 0
       x-source-pcaps:
       - tablo_capture-http_filtered.pcap
@@ -1211,6 +1197,7 @@ paths:
       summary: HLS sub-playlist (variant stream)
       tags:
       - stream
+      security: []
       x-observed-count: 0
       x-source-pcaps:
       - tablo_capture-http_filtered.pcap
@@ -1259,6 +1246,7 @@ paths:
       summary: HLS MPEG-TS media segment
       tags:
       - stream
+      security: []
       x-observed-count: 3
       x-source-pcaps:
       - tablo_capture-http_filtered_live+recordings.pcap
@@ -1450,6 +1438,7 @@ paths:
           type: boolean
       security:
       - TabloAuth: []
+      - DeviceAuth: []
       requestBody:
         required: true
         content:
@@ -1490,6 +1479,7 @@ paths:
           type: boolean
       security:
       - TabloAuth: []
+      - DeviceAuth: []
       responses:
         '200':
           description: HTTP 200 (observed 13x in capture)
@@ -1662,7 +1652,7 @@ components:
         email:
           type: string
           format: email
-          example: user@example.com
+          examples: [ user@example.com ]
         password:
           type: string
           format: password
@@ -1674,7 +1664,7 @@ components:
           description: JWT access token
         token_type:
           type: string
-          example: Bearer
+          examples: [ Bearer ]
         is_verified:
           type: boolean
           description: Whether the account email is verified
@@ -1728,7 +1718,7 @@ components:
           description: Device friendly name
         type:
           type: string
-          example: tablo_gen4
+          examples: [ tablo_gen4 ]
         product:
           type: string
         version:
@@ -1782,7 +1772,7 @@ components:
         identifier:
           type: string
           description: Channel unique identifier
-          example: S122912_503_01
+          examples: [ S122912_503_01 ]
         name:
           type: string
           description: Channel name
@@ -1876,8 +1866,9 @@ components:
         onnow:
           type: string
         description:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         kind:
           type: string
           enum:
@@ -1933,32 +1924,38 @@ components:
             string:
               type: string
         episodeNumber:
-          type: integer
-          nullable: true
+          type:
+          - integer
+          - 'null'
         originalAirDate:
-          type: string
+          type:
+          - string
+          - 'null'
           format: date
-          nullable: true
         rating:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
     MovieAiringInfo:
       type: object
       properties:
         releaseYear:
           type: integer
         filmRating:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
         qualityRating:
-          type: number
-          nullable: true
+          type:
+          - number
+          - 'null'
     SportEventInfo:
       type: object
       properties:
         season:
-          type: string
-          nullable: true
+          type:
+          - string
+          - 'null'
     AiringImage:
       type: object
       properties:

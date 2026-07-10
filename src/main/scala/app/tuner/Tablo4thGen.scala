@@ -991,8 +991,8 @@ object Tablo4thGen {
             }
 
           import app.stream.ResilientHlsSource
-          import pekko.stream.scaladsl.{Keep, KillSwitches}
-          import pekko.stream.UniqueKillSwitch
+          import org.apache.pekko.stream.{KillSwitches, UniqueKillSwitch}
+          import pekko.stream.scaladsl.Keep
 
           def retuneWatchSession(priorToken: Option[String]): Future[WatchSession.Session] =
             startWatchSession(checkAvailability = false).flatMap { data =>
