@@ -745,8 +745,64 @@ object Tablo4thGen {
         )
 
         object JsonProtocol extends DefaultJsonProtocol {
-          implicit val watch4thGenExtraFormat: JsonFormat[Watch4thGenExtra] = jsonFormat9(Watch4thGenExtra.apply)
-          implicit val watch4thGenRequestFormat: JsonFormat[Watch4thGenRequest] = jsonFormat4(Watch4thGenRequest.apply)
+          implicit val watch4thGenExtraFormat: JsonFormat[Watch4thGenExtra] = new JsonFormat[Watch4thGenExtra] {
+            def write(x: Watch4thGenExtra): JsValue = JsObject(
+              "deviceOS" -> JsString(x.deviceOS)
+            , "deviceOSVersion" -> JsString(x.deviceOSVersion)
+            , "deviceMake" -> JsString(x.deviceMake)
+            , "deviceModel" -> JsString(x.deviceModel)
+            , "width" -> JsNumber(x.width)
+            , "height" -> JsNumber(x.height)
+            , "deviceId" -> JsString(x.deviceId)
+            , "lang" -> JsString(x.lang)
+            , "limitedAdTracking" -> JsNumber(x.limitedAdTracking)
+            )
+            def read(value: JsValue): Watch4thGenExtra =
+              value.asJsObject.getFields(
+                "deviceOS", "deviceOSVersion", "deviceMake", "deviceModel"
+              , "width", "height", "deviceId", "lang", "limitedAdTracking"
+              ) match {
+                case Seq(
+                  JsString(deviceOS), JsString(deviceOSVersion), JsString(deviceMake), JsString(deviceModel)
+                , JsNumber(width), JsNumber(height), JsString(deviceId), JsString(lang), JsNumber(limitedAdTracking)
+                ) =>
+                  Watch4thGenExtra(
+                    deviceOS = deviceOS
+                  , deviceOSVersion = deviceOSVersion
+                  , deviceMake = deviceMake
+                  , deviceModel = deviceModel
+                  , width = width.toInt
+                  , height = height.toInt
+                  , deviceId = deviceId
+                  , lang = lang
+                  , limitedAdTracking = limitedAdTracking.toInt
+                  )
+                case _ => deserializationError("Watch4thGenExtra expected")
+              }
+          }
+          implicit val watch4thGenRequestFormat: JsonFormat[Watch4thGenRequest] = new JsonFormat[Watch4thGenRequest] {
+            def write(x: Watch4thGenRequest): JsValue = JsObject(
+              "device_id" -> JsString(x.device_id)
+            , "bandwidth" -> x.bandwidth.map(JsString(_)).getOrElse(JsNull)
+            , "platform" -> JsString(x.platform)
+            , "extra" -> x.extra.toJson
+            )
+            def read(value: JsValue): Watch4thGenRequest =
+              value.asJsObject.getFields("device_id", "bandwidth", "platform", "extra") match {
+                case Seq(JsString(deviceId), bandwidth, JsString(platform), extra) =>
+                  Watch4thGenRequest(
+                    device_id = deviceId
+                  , bandwidth = bandwidth match {
+                      case JsString(s) => Some(s)
+                      case JsNull => None
+                      case _ => deserializationError("Watch4thGenRequest.bandwidth expected string or null")
+                    }
+                  , platform = platform
+                  , extra = extra.convertTo[Watch4thGenExtra]
+                  )
+                case _ => deserializationError("Watch4thGenRequest expected")
+              }
+          }
         }
       }
     }
