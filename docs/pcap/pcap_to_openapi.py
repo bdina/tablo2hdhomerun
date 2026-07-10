@@ -610,9 +610,10 @@ def build_spec_from_endpoints(endpoints, tablo_host, device_info, source_pcaps):
     'info': {
       'title': 'Tablo TV 4th Generation Local API',
       'description': textwrap.dedent('''
-        Reverse-engineered OpenAPI specification for the Tablo TV 4th Generation local HTTP API.
+        Reverse-engineered local device paths for the Tablo TV 4th Generation HTTP API.
 
-        See tablo-api-guide.md for usage, authentication details, and playback flow.
+        Merge device paths and components into openapi/tablo-4thgen.yaml (canonical spec).
+        See docs/tablo-api-guide.md for usage, authentication details, and playback flows.
       ''').strip(),
       'version': '0.2.0',
       'x-source-pcaps': source_pcaps,
@@ -676,7 +677,7 @@ def main():
     if info:
       device_info = info
   tablo_host = args.host or device_info.get('local_address', '192.168.1.1')
-  output = args.output or args.pcaps[0].with_name('tablo-api.openapi.yaml')
+  output = args.output or Path(__file__).resolve().parent.parent / 'openapi' / 'tablo-4thgen-device.generated.yaml'
 
   try:
     import yaml

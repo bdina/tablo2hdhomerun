@@ -1,58 +1,191 @@
-# Tablo TV 4th Generation Local API — Usage Guide
+# Tablo TV 4th Generation API — Usage Guide
 
-This guide supplements `tablo-api-4g.yaml`, a reverse-engineered OpenAPI specification
-derived from a packet capture of the official Tablo iOS client (v2.0.1 build 78) talking to
-a Tablo 4G QUAD 128GB on the local network.
+This guide supplements [`openapi/tablo-4thgen.yaml`](openapi/tablo-4thgen.yaml), the canonical
+OpenAPI specification for Tablo 4th Generation devices. The spec covers the Lighthouse cloud
+service (authentication, account management, cloud guide data) and the local device API
+(reverse-engineered from packet captures of the official Tablo iOS client v2.0.1 build 78
+talking to a Tablo 4G QUAD 128GB).
 
 ## Files in this directory
 
 | File | Purpose |
 |------|---------|
-| `tablo-api-4g.yaml` | Machine-readable API specification (OpenAPI 3.1) |
+| `openapi/tablo-4thgen.yaml` | Machine-readable API specification (OpenAPI 3.1) — cloud + local device |
 | `tablo-api-guide.md` | This document — usage, security, and workflow context |
-| `pcap_to_openapi.py` | Script to regenerate the spec from future PCAP captures |
-| `tablo-credentials.txt` | Extracted tokens, hashes, and identifiers from the source PCAP |
-| `tablo_capture-http_filtered.pcap` | Original packet capture |
+| `pcap/pcap_to_openapi.py` | Script to regenerate local device paths from PCAP captures |
+| `pcap/tablo-credentials.txt` | Extracted tokens, hashes, and identifiers from the source PCAP |
+| `pcap/tablo_capture-http_filtered.pcap` | Original packet capture |
 
-> **Security warning:** `tablo-credentials.txt` contains live authentication material from your
-> capture. Treat it like a password file. Do not commit it to version control or share it
+> **Security warning:** `pcap/tablo-credentials.txt` contains live authentication material from
+> your capture. Treat it like a password file. Do not commit it to version control or share it
 > publicly. Add it to `.gitignore` if this directory is ever placed inside a repo.
 
 ## Architecture overview
 
-The Tablo exposes two HTTP services on your LAN:
+Tablo 4th gen clients interact with three HTTP services:
 
 ```
 ┌─────────────────┐         ┌──────────────────────────────────────┐
-│  iOS Client     │  :8887  │  Tablo REST API                      │
-│  (Tablo-FAST)   │────────▶│  guide, recordings, settings,        │
-│                 │         │  player sessions, notifications      │
-│                 │  :80    │                                      │
-│                 │────────▶│  Tablo HLS Streaming                 │
-│                 │         │  m3u8 playlists + MPEG-TS segments   │
-└─────────────────┘         └──────────────────────────────────────┘
+│  Client         │  HTTPS  │  Lighthouse Cloud                    │
+│  (Tablo-FAST)   │────────▶│  login, account, cloud guide         │
+│                 │         │  lighthousetv.ewscloud.com/api/v2    │
+└────────┬────────┘         └──────────────────────────────────────┘
+         │
+         │  :8887 (LAN)
+         ▼
+┌──────────────────────────────────────┐
+│  Tablo REST API                      │
+│  guide, recordings, settings,        │
+│  player sessions, notifications      │
+└────────┬─────────────────────────────┘
+         │  :80 (LAN)
+         ▼
+┌──────────────────────────────────────┐
+│  Tablo HLS Streaming                 │
+│  m3u8 playlists + MPEG-TS segments   │
+└──────────────────────────────────────┘
 ```
 
-- **Port 8887** — JSON REST API. Most operations live here.
-- **Port 80** — HLS video delivery. No Tablo auth header; access is gated by opaque stream
+- **Lighthouse cloud** — Account login, device discovery, and cloud-hosted guide data (channel
+  lineup and airings for XMLTV).
+- **Port 8887** — Local JSON REST API. Most device operations live here.
+- **Port 80** — Local HLS video delivery. No Tablo auth header; access is gated by opaque stream
   tokens returned from the player session API.
 
-The default server URL in the spec is `http://{tabloHost}:8887`. Replace `tabloHost` with your
-Tablo's LAN IP (discovered via `GET /server/info`).
+The default local server URL in the spec is `http://{tabloHost}:8887`. Replace `tabloHost`
+with your Tablo's LAN IP (from `GET /account/` device list or `GET /server/info`).
+
+---
+
+## Lighthouse cloud services
+
+Base URL: `https://lighthousetv.ewscloud.com/api/v2`
+
+Third-party clients (including tablo2hdhomerun) authenticate through the cloud before talking to
+the local device. The iOS app may use a separate local pairing flow (see Local device security
+below); the cloud path is the documented approach for account-based access.
+
+### Authentication flow
+
+```
+┌──────────┐  POST /login/              ┌───────────────┐
+│  Client  │───────────────────────────▶│  Lighthouse   │
+│          │◀──── Bearer access_token ──│  Cloud        │
+└──────────┘                            └───────────────┘
+     │
+     │  GET /account/  (Bearer)
+     ▼
+┌──────────┐  POST /account/select/     ┌───────────────┐
+│  Client  │───────────────────────────▶│  Lighthouse   │
+│          │◀──── lighthouseToken ─────│  Cloud        │
+└──────────┘                            └───────────────┘
+     │
+     │  Cloud guide + local device (HMAC)
+     ▼
+┌──────────┐  GET /account/{token}/guide/channels/
+│  Client  │  GET /account/guide/channels/{id}/airings/{date}/
+└──────────┘
+```
+
+**Step 1 — Login:**
+
+```http
+POST /login/ HTTP/1.1
+Host: lighthousetv.ewscloud.com
+Content-Type: application/json
+
+{"email": "user@example.com", "password": "..."}
+```
+
+Returns a Bearer JWT (`access_token`).
+
+**Step 2 — Account info:**
+
+```http
+GET /account/ HTTP/1.1
+Host: lighthousetv.ewscloud.com
+Authorization: Bearer {access_token}
+```
+
+Returns profiles and registered devices. Each device includes `serverId`, `name`, `url`
+(local network address), and `reachability`.
+
+**Step 3 — Select profile and device:**
+
+```http
+POST /account/select/ HTTP/1.1
+Host: lighthousetv.ewscloud.com
+Authorization: Bearer {access_token}
+Content-Type: application/json
+
+{"pid": "{profileId}", "sid": "{serverId}"}
+```
+
+Returns a `token` — the Lighthouse token used for cloud guide calls and local device signing.
+
+**Step 4 — Cloud guide data:**
+
+```http
+GET /account/{lighthouseToken}/guide/channels/ HTTP/1.1
+Host: lighthousetv.ewscloud.com
+Authorization: Bearer {access_token}
+Lighthouse: {lighthouseToken}
+```
+
+```http
+GET /account/guide/channels/S122912_503_01/airings/2026-07-08/ HTTP/1.1
+Host: lighthousetv.ewscloud.com
+Authorization: Bearer {access_token}
+Lighthouse: {lighthouseToken}
+```
+
+Cloud guide responses use a different schema than local guide endpoints. They include OTA and
+OTT channel metadata and are suitable for building XMLTV program guides.
+
+### Cloud authentication headers
+
+| Header | Value | When |
+|--------|-------|------|
+| `Authorization` | `Bearer {access_token}` | All authenticated cloud requests |
+| `Lighthouse` | `{lighthouseToken}` | Guide endpoints after `/account/select/` |
+
+### Device HMAC authentication (cloud-paired clients)
+
+After cloud select, clients that already hold `deviceKey` and `hashKey` credentials sign local
+device requests using HMAC-MD5 (`DeviceAuth` in the spec):
+
+```
+Authorization: tablo:{deviceKey}:{hmac}
+Date: {RFC 1123 UTC date}
+Lighthouse: {lighthouseToken}
+User-Agent: Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)
+```
+
+HMAC calculation:
+
+1. Build signature string: `{METHOD}\n{PATH}\n{MD5_OF_BODY_OR_EMPTY}\n{DATE_RFC1123}`
+2. Calculate HMAC-MD5 using `hashKey`
+3. Format Authorization as `tablo:{deviceKey}:{hmac_hex}`
+
+This differs from the iOS `TabloAuth` request-hash model documented in the local security
+section below. tablo2hdhomerun uses the cloud + HMAC path.
+
+---
 
 ## Using the OpenAPI spec
 
 ### Viewing and exploring
 
-Import `tablo-api-4g.yaml` into any OpenAPI-compatible tool:
+Import `openapi/tablo-4thgen.yaml` into any OpenAPI-compatible tool:
 
 - [Swagger Editor](https://editor.swagger.io/) — paste or upload the YAML
 - [Stoplight Studio](https://stoplight.io/studio) — local desktop app
 - VS Code with an OpenAPI extension (e.g. *OpenAPI (Swagger) Editor*)
 - Code generators: `openapi-generator`, `oapi-codegen`, etc.
 
-Each operation includes an `x-observed-count` field showing how many times it appeared in the
-source capture. Endpoints with a count of zero were requested but had no captured response.
+Local device operations include an `x-observed-count` field showing how many times each
+appeared in the source capture. Endpoints with a count of zero were requested but had no
+captured response. Cloud endpoints are documented from API analysis rather than PCAP.
 
 ### Path parameter conventions
 
@@ -64,21 +197,22 @@ The spec normalizes volatile path segments into parameters:
 | `{airingId}` | `LH-CEP000015221761-S20431_004_01-T1783866600` | Guide airing identifier |
 | `{sessionId}` | `c3cc25a2-efb0-4c96-bf5a-4dc1371586fe` | Player session UUID |
 | `{id}` | `1025238` | Numeric object ID (recordings, images, etc.) |
+| `{lighthouseToken}` | (from select response) | Lighthouse session token |
 
 ### Response schemas
 
-JSON response schemas were inferred by merging observed response bodies. They represent the
-shape of data returned during the capture but may not include fields that were absent in those
-particular responses. Nullable or optional fields are not always marked.
+JSON response schemas for local endpoints were inferred by merging observed response bodies.
+They represent the shape of data returned during the capture but may not include fields that
+were absent in those particular responses. Nullable or optional fields are not always marked.
 
 ---
 
-## Security
+## Local device security
 
-Authentication is the main barrier to building a third-party client. This section documents
-everything observed in the capture.
+Authentication is the main barrier to building a third-party client that mimics the iOS app.
+This section documents the request-hash model observed in the packet capture.
 
-### Authorization header format
+### Authorization header format (TabloAuth)
 
 Authenticated requests on port 8887 carry a custom `Authorization` header:
 
@@ -146,12 +280,15 @@ token appears to be issued during initial setup when the app links to the Tablo 
 
 To work with the API today without reverse-engineering the hash algorithm, you have two options:
 
-1. **Replay captured credentials** — use the token/hash pairs in `tablo-credentials.txt`.
+1. **Replay captured credentials** — use the token/hash pairs in `pcap/tablo-credentials.txt`.
    Hashes are single-use for some endpoints, so replay only works for idempotent GETs with
    stable hashes.
 
 2. **Proxy the official app** — capture fresh auth headers from the iOS client in real time
    (mitmproxy, Wireshark) and forward them to your client.
+
+Alternatively, use the **cloud + HMAC** path described above if you have account credentials and
+device keys configured.
 
 ### User-Agent strings
 
@@ -166,7 +303,7 @@ The server may validate User-Agent. Consider matching these if requests are reje
 
 ### Credentials file reference
 
-`tablo-credentials.txt` is organized into sections:
+`pcap/tablo-credentials.txt` is organized into sections:
 
 - **DEVICE** — server ID, firmware, IP, cache key
 - **DEVICE TOKENS** — the pairing token and hash count
@@ -180,7 +317,12 @@ The server may validate User-Agent. Consider matching these if requests are reje
 
 ## Common workflows
 
-### 1. Device discovery
+### 1. Cloud login and device selection
+
+See the Lighthouse cloud services section above. After select, use the device `url` from
+`/account/` as the base for local requests.
+
+### 2. Device discovery
 
 ```http
 GET /server/info HTTP/1.1
@@ -190,7 +332,7 @@ Host: 192.168.2.28:8887
 No authentication required. Returns device name, firmware version, model, tuner count, and
 `local_address`. Use `local_address` as `tabloHost` for all subsequent requests.
 
-### 2. Browse the program guide
+### 3. Browse the program guide
 
 ```http
 GET /views/guide/channels/S73354_009_02/airings?date=2026-07-08&state=requested&lh&lh HTTP/1.1
@@ -201,7 +343,7 @@ Authorization: tablo:{deviceToken}:{requestHash}
 Returns an array of airing objects for the given channel and date. The app fetches two days
 (today and tomorrow) for each visible channel.
 
-### 3. List recordings
+### 4. List recordings
 
 ```http
 GET /recordings/series?lh HTTP/1.1
@@ -212,7 +354,7 @@ GET /recordings/series/episodes/{id}?lh HTTP/1.1
 Series summaries link to episode paths. Episode detail includes full video metadata, channel
 info, playback position, and recording quality.
 
-### 4. Watch live TV
+### 5. Watch live TV
 
 This is the most involved flow:
 
@@ -330,7 +472,10 @@ changes, guide updates, and similar events.
 
 ---
 
-## Regenerating the spec from a new capture
+## Regenerating local device paths from a new capture
+
+The PCAP generator produces **device-only** paths. Cloud endpoints in `tablo-4thgen.yaml` are
+maintained separately and must be preserved when merging regenerated device content.
 
 ### Prerequisites
 
@@ -346,36 +491,39 @@ changes, guide updates, and similar events.
    host 192.168.2.28 and (tcp port 8887 or tcp port 80)
    ```
 3. Use the official app to exercise the features you want documented.
-4. Save as a `.pcap` file. An HTTP-only filtered copy (like `tablo_capture-http_filtered.pcap`)
-   keeps file size manageable.
+4. Save as a `.pcap` file. An HTTP-only filtered copy keeps file size manageable.
 
 ### Running the generator
 
 ```bash
-# Single PCAP
-python3 pcap_to_openapi.py tablo_capture-http_filtered.pcap
+# Single PCAP (default output: openapi/tablo-4thgen-device.generated.yaml)
+python3 pcap/pcap_to_openapi.py pcap/tablo_capture-http_filtered.pcap
 
-# Merge multiple PCAPs into one spec (recommended as you capture more workflows)
-python3 pcap_to_openapi.py \
-  tablo_capture-http_filtered.pcap \
-  tablo_capture-http_filtered_live+recordings.pcap \
-  -o tablo-api-4g.yaml
+# Merge multiple PCAPs into one device spec
+python3 pcap/pcap_to_openapi.py \
+  pcap/tablo_capture-http_filtered.pcap \
+  pcap/tablo_capture-http_filtered_live+recordings.pcap \
+  -o openapi/tablo-4thgen-device.generated.yaml
 
 # Custom output paths:
-python3 pcap_to_openapi.py my_capture.pcap \
-  -o tablo-api-4g.yaml \
-  --credentials tablo-credentials.txt
+python3 pcap/pcap_to_openapi.py my_capture.pcap \
+  -o openapi/tablo-4thgen-device.generated.yaml \
+  --credentials pcap/tablo-credentials.txt
 
 # Spec only (no credentials extract):
-python3 pcap_to_openapi.py my_capture.pcap -o tablo-api-4g.yaml
+python3 pcap/pcap_to_openapi.py my_capture.pcap \
+  -o openapi/tablo-4thgen-device.generated.yaml
 
 # Override the Tablo IP if /server/info was not captured:
-python3 pcap_to_openapi.py my_capture.pcap --host 192.168.2.50
+python3 pcap/pcap_to_openapi.py my_capture.pcap --host 192.168.2.50
 ```
 
 When multiple PCAPs are provided, the tool merges all discovered endpoints into a single
 spec. Endpoints seen in both captures combine their observed counts and JSON schemas.
 Each operation includes an `x-source-pcaps` list showing which capture(s) contributed it.
+
+After generation, merge the device `paths` and `components` from the generated file into
+`openapi/tablo-4thgen.yaml`, keeping the cloud sections intact.
 
 The script will print a summary of paths and schemas generated.
 
@@ -395,12 +543,19 @@ The script will print a summary of paths and schemas generated.
   generate valid hashes
 - Long-lived streams (notifications) may have incomplete response documentation
 - TCP connection reuse can occasionally mis-associate responses in `tshark` output
+- Does not generate or update cloud (Lighthouse) endpoints
 
 ---
 
 ## Known gaps
 
-The following were not observed in this capture and are absent from the spec:
+**Cloud:**
+
+- Token refresh / session expiry handling
+- Remote/out-of-home device access details
+- Full error response catalog for cloud endpoints
+
+**Local device (from PCAP):**
 
 - Device pairing / token issuance flow
 - Scheduling or canceling recordings (POST/DELETE on guide endpoints)
@@ -408,4 +563,4 @@ The following were not observed in this capture and are absent from the spec:
 - Remote/out-of-home access (all traffic is LAN-local)
 - Request hash generation algorithm
 
-Contributing additional PCAPs from other app workflows is the best way to expand coverage.
+Contributing additional PCAPs from other app workflows is the best way to expand local coverage.
