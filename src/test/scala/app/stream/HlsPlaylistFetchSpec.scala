@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.junit.JUnitRunner
 
-import org.apache.pekko.http.scaladsl.model.headers.{EntityTag, `If-None-Match`, RawHeader}
+import org.apache.pekko.http.scaladsl.model.headers.{`If-None-Match`, RawHeader}
 
 @RunWith(classOf[JUnitRunner])
 class HlsPlaylistFetchSpec extends AnyFlatSpec with Matchers {

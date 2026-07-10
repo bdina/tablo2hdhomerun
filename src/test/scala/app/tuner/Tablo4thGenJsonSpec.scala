@@ -90,9 +90,9 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
     val v = Tablo4thGen.Channel.Request.Watch4thGenRequest.forDevice(deviceId)
     val json = v.toJson
     val parsed = json.convertTo[Tablo4thGen.Channel.Request.Watch4thGenRequest]
-    parsed.device_id shouldBe deviceId
-    parsed.extra.deviceId shouldBe deviceId
-    parsed.extra.deviceOS shouldBe "iOS"
+    val _ = parsed.device_id shouldBe deviceId
+    val _ = parsed.extra.deviceId shouldBe deviceId
+    val _ = parsed.extra.deviceOS shouldBe "iOS"
     parsed.platform shouldBe "ios"
   }
 }

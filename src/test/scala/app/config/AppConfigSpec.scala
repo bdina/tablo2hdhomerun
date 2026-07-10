@@ -33,10 +33,10 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.hls.health.nullRatioMax shouldBe 0.6
     val _ = config.stream.hls.health.enforce shouldBe false
     val _ = config.stream.hls.pollFailuresMax shouldBe 60
-    config.mediaRoot shouldBe None
-    loaded.tabloAuth.email shouldBe None
-    loaded.tabloAuth.password shouldBe None
-    loaded.tabloAuth.credentials shouldBe None
+    val _ = config.mediaRoot shouldBe None
+    val _ = loaded.tabloAuth.email shouldBe None
+    val _ = loaded.tabloAuth.password shouldBe None
+    val _ = loaded.tabloAuth.credentials shouldBe None
     val _ = loaded.logging.logLevel shouldBe None
     loaded.logging.pekkoLogLevel shouldBe None
   }
@@ -97,8 +97,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     ))
     val _ = loaded.logging.logLevel shouldBe Some("debug")
     val _ = loaded.logging.pekkoLogLevel shouldBe Some("warn")
-    loaded.config.mediaRoot shouldBe Some("/media")
-    loaded.tabloAuth.credentials shouldBe Some(TabloCredentials("user@example.com", "secret"))
+    val _ = loaded.config.mediaRoot shouldBe Some("/media")
+    val _ = loaded.tabloAuth.credentials shouldBe Some(TabloCredentials("user@example.com", "secret"))
   }
 
   "AppConfig.loadFrom" should "read only requested keys from a getter" in {

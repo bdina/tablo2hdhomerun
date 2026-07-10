@@ -10,15 +10,15 @@ import org.scalatestplus.junit.JUnitRunner
 @RunWith(classOf[JUnitRunner])
 class LogConfigSpec extends AnyFunSuite with Matchers {
   test("pekkoLogLevel maps warn to WARNING") {
-    LogConfig.pekkoLogLevel("warn") shouldBe "WARNING"
-    LogConfig.pekkoLogLevel("WARN") shouldBe "WARNING"
+    val _ = LogConfig.pekkoLogLevel("warn") shouldBe "WARNING"
+    val _ = LogConfig.pekkoLogLevel("WARN") shouldBe "WARNING"
     LogConfig.pekkoLogLevel("warning") shouldBe "WARNING"
   }
 
   test("pekkoLogLevel maps standard levels") {
-    LogConfig.pekkoLogLevel("off") shouldBe "OFF"
-    LogConfig.pekkoLogLevel("error") shouldBe "ERROR"
-    LogConfig.pekkoLogLevel("info") shouldBe "INFO"
+    val _ = LogConfig.pekkoLogLevel("off") shouldBe "OFF"
+    val _ = LogConfig.pekkoLogLevel("error") shouldBe "ERROR"
+    val _ = LogConfig.pekkoLogLevel("info") shouldBe "INFO"
     LogConfig.pekkoLogLevel("debug") shouldBe "DEBUG"
   }
 
@@ -29,13 +29,13 @@ class LogConfigSpec extends AnyFunSuite with Matchers {
     val priorPekko = Option(System.getProperty(pekkoKey))
     try {
       LogConfig.configure(LoggingConfig(logLevel = Some("debug"), pekkoLogLevel = Some("warn")))
-      System.getProperty(slf4jKey) shouldBe "debug"
+      val _ = System.getProperty(slf4jKey) shouldBe "debug"
       System.getProperty(pekkoKey) shouldBe "WARNING"
     } finally {
-      priorSlf4j.foreach(System.setProperty(slf4jKey, _))
-      priorPekko.foreach(System.setProperty(pekkoKey, _))
-      if (priorSlf4j.isEmpty) System.clearProperty(slf4jKey)
-      if (priorPekko.isEmpty) System.clearProperty(pekkoKey)
+      priorSlf4j.foreach(v => System.setProperty(slf4jKey, v))
+      priorPekko.foreach(v => System.setProperty(pekkoKey, v))
+      if (priorSlf4j.isEmpty) { System.clearProperty(slf4jKey); () }
+      if (priorPekko.isEmpty) { System.clearProperty(pekkoKey); () }
     }
   }
 }

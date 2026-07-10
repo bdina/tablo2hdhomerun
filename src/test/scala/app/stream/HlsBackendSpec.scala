@@ -6,7 +6,6 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.junit.JUnitRunner
 
-import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.duration._
 
 @RunWith(classOf[JUnitRunner])

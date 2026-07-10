@@ -67,9 +67,9 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       // While the inner source is down, keepAlive should emit MPEG-TS null packets.
       implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
       val probe = wrappedSource.runWith(TestSink[ByteString]())
-      probe.ensureSubscription()
+      val _ = probe.ensureSubscription()
       val first = probe.requestNext(2.seconds)
-      first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
+      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
       probe.cancel()
     }
 

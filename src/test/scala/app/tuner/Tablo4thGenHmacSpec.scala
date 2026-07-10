@@ -56,8 +56,8 @@ class Tablo4thGenHmacSpec extends AnyFlatSpec with Matchers {
     val (authGet, _) = Hmac.sign("GET", sessionPath, None, "hk", "dk")
     val (authPost, _) = Hmac.sign("POST", keepalivePath, None, "hk", "dk")
     val (authDelete, _) = Hmac.sign("DELETE", sessionPath, None, "hk", "dk")
-    authGet should not equal authPost
-    authDelete should not equal authGet
+    val _ = authGet should not equal authPost
+    val _ = authDelete should not equal authGet
     val _ = sessionPath should not include "?lh=1"
     val _ = keepalivePath should not include "?lh=1"
   }

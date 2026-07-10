@@ -35,8 +35,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
       case HlsPlaylistPoller.Emit(next, segments) =>
         val _ = next.lastSeq shouldBe 12
-        segments should not be empty
-        segments.head.sequence shouldBe 10
+        val _ = segments should not be empty
+        val _ = segments.head.sequence shouldBe 10
       case HlsPlaylistPoller.Fail(_) => fail("expected emit")
     }
   }
