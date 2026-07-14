@@ -91,12 +91,19 @@ object SharedChannelStream {
     def reportTerminated(cause: Option[Throwable]): Unit =
       if (terminatedReported.compareAndSet(false, true)) {
         cancelKeepalive()
+        cause match {
+          case Some(ex) =>
+            log.warn("[shared] upstream terminated label={} sessionId={}", channelLabel, currentSession.get().sessionId, ex)
+          case None =>
+            log.info("[shared] upstream complete label={} sessionId={}", channelLabel, currentSession.get().sessionId)
+        }
         onTerminated(cause)
       }
 
     def scheduleKeepaliveRetry(): Unit =
       if (!leaseStopped.get() && keepaliveOps.isDefined) {
         import org.apache.pekko.actor.typed.scaladsl.adapter._
+        log.debug("[shared] keepalive retry scheduled label={}", channelLabel)
         keepaliveTask = Some(
           system.toClassic.scheduler.scheduleOnce(
             Tablo4thGen.Channel.WatchSession.keepaliveRetrySec.seconds
@@ -177,12 +184,29 @@ object SharedChannelStream {
 
     def replaceSession(prior: PlayerSession): Future[PlayerSession] = {
       val promise = Promise[PlayerSession]()
+      log.info(
+        "[shared] replace requested label={} sessionId={}"
+      , channelLabel
+      , prior.sessionId
+      )
       val replyAdapter = system.systemActorOf(
         Behaviors.receiveMessage[ReplaceResult] {
           case Replaced(session) =>
+            log.info(
+              "[shared] replace completed label={} prior={} next={}"
+            , channelLabel
+            , prior.sessionId
+            , session.sessionId
+            )
             val _ = promise.trySuccess(session)
             Behaviors.stopped
           case ReplaceFailed(cause) =>
+            log.warn(
+              "[shared] replace failed label={} sessionId={}"
+            , channelLabel
+            , prior.sessionId
+            , cause
+            )
             val _ = promise.tryFailure(cause)
             Behaviors.stopped
         }
@@ -244,6 +268,7 @@ object SharedChannelStream {
         .backpressureTimeout(backpressureTimeout)
         .mapMaterializedValue(_ => NotUsed)
     , stop = () => {
+        log.info("[shared] stop label={} sessionId={}", channelLabel, currentSession.get().sessionId)
         cancelKeepalive()
         killSwitch.shutdown()
       }

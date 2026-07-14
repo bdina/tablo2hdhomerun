@@ -214,8 +214,8 @@ class SessionManagerSpec
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
       control.cancel()
-      manager ! AttachmentEnded(attached.attachmentId)
-      manager ! AttachmentEnded(attached.attachmentId)
+      manager ! AttachmentEnded(attached.attachmentId, None)
+      manager ! AttachmentEnded(attached.attachmentId, None)
       eventually {
         backend.closeCount.get() shouldBe 1
       }

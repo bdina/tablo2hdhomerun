@@ -231,6 +231,22 @@ Capacity failures and Tablo watch HTTP 503 always return proxy HTTP 503. Unexpec
 8. Duplicate termination messages cannot double-close a session or produce a negative attachment count.
 9. A late subscriber receives future live bytes without replay.
 
+## Operational logging
+
+Session lifecycle uses the `[session]` prefix. Shared upstream events use `[shared]`. HTTP channel responses use
+`[channel]`.
+
+| Event | Level | Key fields |
+|-------|-------|------------|
+| Client granted / queued | info | `channel`, `sessionId`, `attachment`, `shared`, `clients` |
+| Client connect (stream materialized) | info | `channel`, `sessionId`, `attachment`, `clients`, `shared` |
+| Client disconnect (clean) | info | `channel`, `sessionId`, `attachment`, `clientsRemaining`, `shared` |
+| Client stream failed | warn | same plus exception |
+| Session open / active / close | info | `channel`, `sessionId`, `clients`, `reserved`, `total` |
+| Capacity rejection / open failure / replace failure | warn | `channel`, reason/exception |
+
+`shared=true` and `clients>1` indicate more than one HTTP client on the same Tablo player session.
+
 ## Legacy support
 
 Deliver legacy support as milestone two of the same implementation. Use the same manager with `LegacyChannel`. The

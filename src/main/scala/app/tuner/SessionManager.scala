@@ -60,7 +60,7 @@ object SessionManager {
   final case class ReplaceFailed(cause: Throwable) extends ReplaceResult
 
   private[tuner] final case class AttachmentStarted(attachmentId: UUID) extends Command
-  private[tuner] final case class AttachmentEnded(attachmentId: UUID) extends Command
+  private[tuner] final case class AttachmentEnded(attachmentId: UUID, cause: Option[Throwable]) extends Command
   private[tuner] final case class AttachmentMaterializeTimeout(attachmentId: UUID) extends Command
   private[tuner] final case class OpenCompleted(
     channel: ChannelKey
@@ -172,8 +172,8 @@ object SessionManager {
         case AttachmentStarted(attachmentId) =>
           onAttachmentStarted(attachmentId)
           Behaviors.same
-        case AttachmentEnded(attachmentId) =>
-          onAttachmentEnded(attachmentId)
+        case AttachmentEnded(attachmentId, cause) =>
+          onAttachmentEnded(attachmentId, cause)
           Behaviors.same
         case AttachmentMaterializeTimeout(attachmentId) =>
           onAttachmentMaterializeTimeout(attachmentId)
@@ -200,19 +200,60 @@ object SessionManager {
 
     private def reservations: Int = channels.size
 
+    private def ch(channel: ChannelKey): String =
+      channel match {
+        case Gen4Channel(id) => id
+        case LegacyChannel(id) => id.toString
+      }
+
+    private def shortId(id: UUID): String = id.toString.take(8)
+
+    private def clientCount(state: SessionRuntimeState): Int = state.attachments.size
+
     private def onAcquire(channel: ChannelKey, replyTo: ActorRef[AcquireResult]): Unit =
       channels.get(channel) match {
         case Some(Opening(reservationId, waiters)) =>
+          val pending = waiters.size + 1
           channels = channels.updated(channel, Opening(reservationId, waiters :+ PendingAcquire(replyTo)))
+          log.info(
+            "[session] client queue channel={} state=opening pending={} reserved={} total={}"
+          , ch(channel)
+          , pending
+          , reservations
+          , cachedTuners
+          )
         case Some(Active(state)) =>
-          replyAttached(channel, state, replyTo, Active.apply)
+          replyAttached(channel, state, replyTo, shared = true, Active.apply)
         case Some(Replacing(state)) =>
-          channels = channels.updated(channel, Replacing(state.copy(queued = state.queued :+ PendingAcquire(replyTo))))
-        case Some(Closing(_)) =>
+          val pending = state.queued.size + 1
+          channels = channels.updated(
+            channel
+          , Replacing(state.copy(queued = state.queued :+ PendingAcquire(replyTo)))
+          )
+          log.info(
+            "[session] client queue channel={} sessionId={} state=replacing pending={} clients={}"
+          , ch(channel)
+          , state.runtime.sessionId
+          , pending
+          , clientCount(state)
+          )
+        case Some(Closing(sessionId)) =>
+          log.warn(
+            "[session] reject channel={} sessionId={} state=closing reserved={} total={}"
+          , ch(channel)
+          , sessionId
+          , reservations
+          , cachedTuners
+          )
           replyTo ! NoAvailableTuners
         case None =>
           if (reservations >= cachedTuners) {
-            log.info("[session] no available tuners channel={} reserved={} total={}", channel, reservations, cachedTuners)
+            log.warn(
+              "[session] no available tuners channel={} reserved={} total={}"
+            , ch(channel)
+            , reservations
+            , cachedTuners
+            )
             val _ = backend.refreshTuners().map { tuners =>
               cachedTuners = tuners
             }
@@ -226,7 +267,13 @@ object SessionManager {
       val reservationId = UUID.randomUUID()
       channels = channels.updated(channel, Opening(reservationId, Vector(PendingAcquire(replyTo))))
       timers.startSingleTimer(OpenKey(channel, reservationId), OpenTimedOut(channel, reservationId), settings.openTimeout)
-      log.info("[session] opening channel={} reservation={} reserved={}", channel, reservationId, reservations)
+      log.info(
+        "[session] opening channel={} reservation={} reserved={} total={}"
+      , ch(channel)
+      , shortId(reservationId)
+      , reservations
+      , cachedTuners
+      )
       context.pipeToSelf(backend.open(channel)) {
         case Success(session) => OpenCompleted(channel, reservationId, Right(session))
         case Failure(ex) => OpenCompleted(channel, reservationId, Left(ex))
@@ -246,19 +293,63 @@ object SessionManager {
               activate(channel, session, waiters)
             case Left(ex) =>
               channels = channels - channel
-              failWaiters(waiters, ex)
+              log.warn(
+                "[session] open failed channel={} reservation={} waiters={} reserved={}"
+              , ch(channel)
+              , shortId(reservationId)
+              , waiters.size
+              , reservations
+              , ex
+              )
+              failWaiters(channel, waiters, ex)
               if (isNoTuners(ex)) {
                 val _ = backend.refreshTuners().map { tuners => cachedTuners = tuners }
               }
           }
-        case _ => ()
+        case Some(Opening(id, _)) =>
+          log.debug(
+            "[session] ignore stale open result channel={} expected={} actual={}"
+          , ch(channel)
+          , shortId(reservationId)
+          , shortId(id)
+          )
+        case _ =>
+          result match {
+            case Right(session) =>
+              log.warn(
+                "[session] open completed after cancel channel={} sessionId={}, closing orphan"
+              , ch(channel)
+              , session.sessionId
+              )
+              context.pipeToSelf(backend.close(session.sessionId)) {
+                case Success(_) => CloseCompleted(channel, session.sessionId)
+                case Failure(ex) =>
+                  log.warn(
+                    "[session] orphan close failed channel={} sessionId={}"
+                  , ch(channel)
+                  , session.sessionId
+                  , ex
+                  )
+                  CloseCompleted(channel, session.sessionId)
+              }
+            case Left(ex) =>
+              log.debug("[session] ignore late open failure channel={}", ch(channel), ex)
+          }
       }
 
     private def onOpenTimedOut(channel: ChannelKey, reservationId: UUID): Unit =
       channels.get(channel) match {
         case Some(Opening(id, waiters)) if id == reservationId =>
           channels = channels - channel
-          failWaiters(waiters, new java.util.concurrent.TimeoutException(s"open timed out for $channel"))
+          val ex = new java.util.concurrent.TimeoutException(s"open timed out for ${ch(channel)}")
+          log.warn(
+            "[session] open timed out channel={} reservation={} waiters={} reserved={}"
+          , ch(channel)
+          , shortId(reservationId)
+          , waiters.size
+          , reservations
+          )
+          failWaiters(channel, waiters, ex)
         case _ => ()
       }
 
@@ -277,14 +368,16 @@ object SessionManager {
       sessionIndex = sessionIndex.updated(session.sessionId, channel)
       var state = SessionRuntimeState(runtime, Map.empty)
       waiters.foreach { waiter =>
-        state = grantAttachment(state, waiter.replyTo)
+        state = grantAttachment(channel, state, waiter.replyTo, shared = waiters.size > 1)
       }
       channels = channels.updated(channel, Active(state))
       log.info(
-        "[session] active channel={} sessionId={} attachments={}"
-      , channel
+        "[session] active channel={} sessionId={} clients={} reserved={} total={}"
+      , ch(channel)
       , session.sessionId
-      , state.attachments.size
+      , clientCount(state)
+      , reservations
+      , cachedTuners
       )
     }
 
@@ -292,15 +385,18 @@ object SessionManager {
       channel: ChannelKey
     , state: SessionRuntimeState
     , replyTo: ActorRef[AcquireResult]
+    , shared: Boolean
     , wrap: SessionRuntimeState => SessionEntry
     ): Unit = {
-      val next = grantAttachment(state, replyTo)
+      val next = grantAttachment(channel, state, replyTo, shared)
       channels = channels.updated(channel, wrap(next))
     }
 
     private def grantAttachment(
-      state: SessionRuntimeState
+      channel: ChannelKey
+    , state: SessionRuntimeState
     , replyTo: ActorRef[AcquireResult]
+    , shared: Boolean
     ): SessionRuntimeState = {
       val attachmentId = UUID.randomUUID()
       val source = wrapSource(attachmentId, state.runtime.hubSource)
@@ -310,7 +406,17 @@ object SessionManager {
       , settings.materializationTimeout
       )
       replyTo ! Attached(attachmentId, source)
-      state.copy(attachments = state.attachments.updated(attachmentId, Granted))
+      val next = state.copy(attachments = state.attachments.updated(attachmentId, Granted))
+      log.info(
+        "[session] client grant channel={} sessionId={} attachment={} shared={} clients={} reserved={}"
+      , ch(channel)
+      , state.runtime.sessionId
+      , shortId(attachmentId)
+      , shared
+      , clientCount(next)
+      , reservations
+      )
+      next
     }
 
     private def wrapSource(
@@ -320,8 +426,9 @@ object SessionManager {
       hub
         .watchTermination() { (_, done) =>
           context.self ! AttachmentStarted(attachmentId)
-          done.onComplete { _ =>
-            context.self ! AttachmentEnded(attachmentId)
+          done.onComplete {
+            case Success(_) => context.self ! AttachmentEnded(attachmentId, None)
+            case Failure(ex) => context.self ! AttachmentEnded(attachmentId, Some(ex))
           }
           NotUsed
         }
@@ -333,15 +440,50 @@ object SessionManager {
             timers.cancel(MaterializeKey(attachmentId))
             val next = state.copy(attachments = state.attachments.updated(attachmentId, Materialized))
             channels = channels.updated(channel, updateEntry(entry, next))
-          case _ => ()
+            log.info(
+              "[session] client connect channel={} sessionId={} attachment={} clients={} shared={}"
+            , ch(channel)
+            , state.runtime.sessionId
+            , shortId(attachmentId)
+            , clientCount(next)
+            , clientCount(next) > 1
+            )
+          case Some(Materialized) =>
+            log.debug(
+              "[session] ignore duplicate connect channel={} attachment={}"
+            , ch(channel)
+            , shortId(attachmentId)
+            )
+          case None => ()
         }
       }
     }
 
-    private def onAttachmentEnded(attachmentId: UUID): Unit = {
+    private def onAttachmentEnded(attachmentId: UUID, cause: Option[Throwable]): Unit = {
       timers.cancel(MaterializeKey(attachmentId))
       findAttachment(attachmentId).foreach { case (channel, entry, state) =>
         val next = state.copy(attachments = state.attachments - attachmentId)
+        val remaining = clientCount(next)
+        cause match {
+          case None =>
+            log.info(
+              "[session] client disconnect channel={} sessionId={} attachment={} clientsRemaining={} shared={}"
+            , ch(channel)
+            , state.runtime.sessionId
+            , shortId(attachmentId)
+            , remaining
+            , remaining > 1
+            )
+          case Some(ex) =>
+            log.warn(
+              "[session] client stream failed channel={} sessionId={} attachment={} clientsRemaining={}"
+            , ch(channel)
+            , state.runtime.sessionId
+            , shortId(attachmentId)
+            , remaining
+            , ex
+            )
+        }
         if (next.attachments.isEmpty && next.queued.isEmpty)
           beginClosing(channel, next.runtime)
         else
@@ -354,7 +496,13 @@ object SessionManager {
         state.attachments.get(attachmentId) match {
           case Some(Granted) =>
             val next = state.copy(attachments = state.attachments - attachmentId)
-            log.warn("[session] attachment materialize timeout id={} channel={}", attachmentId, channel)
+            log.warn(
+              "[session] client materialize timeout channel={} sessionId={} attachment={} clientsRemaining={}"
+            , ch(channel)
+            , state.runtime.sessionId
+            , shortId(attachmentId)
+            , clientCount(next)
+            )
             if (next.attachments.isEmpty && next.queued.isEmpty)
               beginClosing(channel, next.runtime)
             else
@@ -366,13 +514,23 @@ object SessionManager {
     private def beginClosing(channel: ChannelKey, runtime: SessionRuntime): Unit = {
       val sessionId = runtime.sessionId
       channels = channels.updated(channel, Closing(sessionId))
-      try runtime.stop() catch { case ex: Throwable => log.warn("[session] stop failed channel={}", channel, ex) }
+      try runtime.stop()
+      catch {
+        case ex: Throwable =>
+          log.warn("[session] stop failed channel={} sessionId={}", ch(channel), sessionId, ex)
+      }
       timers.startSingleTimer(CloseKey(channel, sessionId), CloseTimedOut(channel, sessionId), settings.closeTimeout)
-      log.info("[session] closing channel={} sessionId={}", channel, sessionId)
+      log.info(
+        "[session] closing channel={} sessionId={} reserved={} total={}"
+      , ch(channel)
+      , sessionId
+      , reservations
+      , cachedTuners
+      )
       context.pipeToSelf(backend.close(sessionId)) {
         case Success(_) => CloseCompleted(channel, sessionId)
         case Failure(ex) =>
-          log.warn("[session] close failed channel={} sessionId={}", channel, sessionId, ex)
+          log.warn("[session] close failed channel={} sessionId={}", ch(channel), sessionId, ex)
           CloseCompleted(channel, sessionId)
       }
     }
@@ -383,7 +541,13 @@ object SessionManager {
           timers.cancel(CloseKey(channel, sessionId))
           sessionIndex = sessionIndex - sessionId
           channels = channels - channel
-          log.info("[session] closed channel={} sessionId={}", channel, sessionId)
+          log.info(
+            "[session] closed channel={} sessionId={} reserved={} total={}"
+          , ch(channel)
+          , sessionId
+          , reservations
+          , cachedTuners
+          )
         case _ =>
           sessionIndex = sessionIndex - sessionId
       }
@@ -393,19 +557,61 @@ object SessionManager {
         case Some(Closing(id)) if id == sessionId =>
           sessionIndex = sessionIndex - sessionId
           channels = channels - channel
-          log.warn("[session] close timed out channel={} sessionId={}", channel, sessionId)
+          log.warn(
+            "[session] close timed out channel={} sessionId={} reserved={}"
+          , ch(channel)
+          , sessionId
+          , reservations
+          )
         case _ => ()
       }
 
     private def onUpstreamTerminated(channel: ChannelKey, cause: Option[Throwable]): Unit =
       channels.get(channel) match {
         case Some(Active(state)) =>
-          failQueued(state.queued, cause.getOrElse(new RuntimeException("upstream terminated")))
+          cause match {
+            case Some(ex) =>
+              log.warn(
+                "[session] upstream failed channel={} sessionId={} clients={}"
+              , ch(channel)
+              , state.runtime.sessionId
+              , clientCount(state)
+              , ex
+              )
+            case None =>
+              log.info(
+                "[session] upstream complete channel={} sessionId={} clients={}"
+              , ch(channel)
+              , state.runtime.sessionId
+              , clientCount(state)
+              )
+          }
+          failQueued(channel, state.queued, cause.getOrElse(new RuntimeException("upstream terminated")))
           beginClosing(channel, state.runtime)
         case Some(Replacing(state)) =>
-          failQueued(state.queued, cause.getOrElse(new RuntimeException("upstream terminated")))
+          cause match {
+            case Some(ex) =>
+              log.warn(
+                "[session] upstream failed during replace channel={} sessionId={} clients={}"
+              , ch(channel)
+              , state.runtime.sessionId
+              , clientCount(state)
+              , ex
+              )
+            case None =>
+              log.info(
+                "[session] upstream complete during replace channel={} sessionId={} clients={}"
+              , ch(channel)
+              , state.runtime.sessionId
+              , clientCount(state)
+              )
+          }
+          failQueued(channel, state.queued, cause.getOrElse(new RuntimeException("upstream terminated")))
           beginClosing(channel, state.runtime)
-        case _ => ()
+        case _ =>
+          cause.foreach { ex =>
+            log.debug("[session] ignore upstream terminate channel={} state=absent", ch(channel), ex)
+          }
       }
 
     private def onReplace(
@@ -416,17 +622,38 @@ object SessionManager {
       channels.get(channel) match {
         case Some(Active(state)) if state.runtime.sessionId == priorSessionId =>
           channels = channels.updated(channel, Replacing(state))
-          log.info("[session] replacing channel={} sessionId={}", channel, priorSessionId)
+          log.info(
+            "[session] replacing channel={} sessionId={} clients={}"
+          , ch(channel)
+          , priorSessionId
+          , clientCount(state)
+          )
           context.pipeToSelf(backend.close(priorSessionId)) {
             case Success(_) => ReplaceClosed(channel, priorSessionId, replyTo)
             case Failure(ex) =>
-              log.warn("[session] replace close failed channel={} sessionId={}", channel, priorSessionId, ex)
+              log.warn(
+                "[session] replace close failed channel={} sessionId={}"
+              , ch(channel)
+              , priorSessionId
+              , ex
+              )
               ReplaceClosed(channel, priorSessionId, replyTo)
           }
         case Some(Replacing(state)) if state.runtime.sessionId == priorSessionId =>
+          log.warn(
+            "[session] replace already in progress channel={} sessionId={}"
+          , ch(channel)
+          , priorSessionId
+          )
           replyTo ! ReplaceFailed(new IllegalStateException("replace already in progress"))
-        case _ =>
-          replyTo ! ReplaceFailed(new IllegalStateException(s"channel not active for replace: $channel"))
+        case other =>
+          log.warn(
+            "[session] replace rejected channel={} sessionId={} state={}"
+          , ch(channel)
+          , priorSessionId
+          , other.map(_.getClass.getSimpleName).getOrElse("absent")
+          )
+          replyTo ! ReplaceFailed(new IllegalStateException(s"channel not active for replace: ${ch(channel)}"))
       }
 
     private def onReplaceClosed(
@@ -437,12 +664,18 @@ object SessionManager {
       channels.get(channel) match {
         case Some(Replacing(_)) =>
           sessionIndex = sessionIndex - priorSessionId
+          log.info("[session] replace closed prior session channel={} sessionId={}", ch(channel), priorSessionId)
           context.pipeToSelf(backend.open(channel)) {
             case Success(session) => ReplaceOpened(channel, priorSessionId, replyTo, Right(session))
             case Failure(ex) => ReplaceOpened(channel, priorSessionId, replyTo, Left(ex))
           }
         case _ =>
-          replyTo ! ReplaceFailed(new IllegalStateException(s"channel left replacing state: $channel"))
+          log.warn(
+            "[session] replace close completed after state change channel={} sessionId={}"
+          , ch(channel)
+          , priorSessionId
+          )
+          replyTo ! ReplaceFailed(new IllegalStateException(s"channel left replacing state: ${ch(channel)}"))
       }
 
     private def onReplaceOpened(
@@ -461,24 +694,46 @@ object SessionManager {
               val waiters = nextState.queued
               var activeState = nextState.copy(queued = Vector.empty)
               waiters.foreach { waiter =>
-                activeState = grantAttachment(activeState, waiter.replyTo)
+                activeState = grantAttachment(channel, activeState, waiter.replyTo, shared = true)
               }
               channels = channels.updated(channel, Active(activeState))
               replyTo ! Replaced(session)
               log.info(
-                "[session] replaced channel={} prior={} next={}"
-              , channel
+                "[session] replaced channel={} prior={} next={} clients={} queuedGranted={}"
+              , ch(channel)
               , priorSessionId
               , session.sessionId
+              , clientCount(activeState)
+              , waiters.size
               )
             case Left(ex) =>
               replyTo ! ReplaceFailed(ex)
               if (isNoTuners(ex))
-                log.info("[session] replace open no tuners channel={}", channel)
+                log.warn(
+                  "[session] replace open no tuners channel={} prior={} clients={}"
+                , ch(channel)
+                , priorSessionId
+                , clientCount(state)
+                )
+              else
+                log.warn(
+                  "[session] replace open failed channel={} prior={} clients={}"
+                , ch(channel)
+                , priorSessionId
+                , clientCount(state)
+                , ex
+                )
           }
         case _ =>
-          result.foreach(session => context.pipeToSelf(backend.close(session.sessionId))(_ => CloseCompleted(channel, session.sessionId)))
-          replyTo ! ReplaceFailed(new IllegalStateException(s"channel left replacing state: $channel"))
+          result.foreach { session =>
+            log.warn(
+              "[session] replace opened after state change channel={} sessionId={}, closing orphan"
+            , ch(channel)
+            , session.sessionId
+            )
+            context.pipeToSelf(backend.close(session.sessionId))(_ => CloseCompleted(channel, session.sessionId))
+          }
+          replyTo ! ReplaceFailed(new IllegalStateException(s"channel left replacing state: ${ch(channel)}"))
       }
 
     private def findAttachment(
@@ -498,14 +753,22 @@ object SessionManager {
         case other => other
       }
 
-    private def failWaiters(waiters: Vector[PendingAcquire], ex: Throwable): Unit =
+    private def failWaiters(channel: ChannelKey, waiters: Vector[PendingAcquire], ex: Throwable): Unit = {
+      if (waiters.nonEmpty)
+        log.warn(
+          "[session] failing waiters channel={} count={} reason={}"
+        , ch(channel)
+        , waiters.size
+        , ex.toString
+        )
       waiters.foreach { waiter =>
         if (isNoTuners(ex)) waiter.replyTo ! NoAvailableTuners
         else waiter.replyTo ! AcquireFailed(ex)
       }
+    }
 
-    private def failQueued(queued: Vector[PendingAcquire], ex: Throwable): Unit =
-      failWaiters(queued, ex)
+    private def failQueued(channel: ChannelKey, queued: Vector[PendingAcquire], ex: Throwable): Unit =
+      failWaiters(channel, queued, ex)
 
     private def isNoTuners(ex: Throwable): Boolean =
       ex == NoAvailableTunersError ||

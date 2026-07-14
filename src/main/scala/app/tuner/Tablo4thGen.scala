@@ -1057,7 +1057,12 @@ object Tablo4thGen {
               SessionManager.Acquire(SessionManager.Gen4Channel(channelId), _)
             )
           onComplete(acquire) {
-            case Success(SessionManager.Attached(_, source)) =>
+            case Success(SessionManager.Attached(attachmentId, source)) =>
+              log.info(
+                "[channel] streaming channelId={} attachment={}"
+              , channelId
+              , attachmentId.toString.take(8)
+              )
               val videoMp2t = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
               complete(
                 HttpEntity.Chunked.fromData(
@@ -1066,6 +1071,7 @@ object Tablo4thGen {
                 )
               )
             case Success(SessionManager.NoAvailableTuners) =>
+              log.warn("[channel] no available tuners channelId={}", channelId)
               complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
             case Success(SessionManager.AcquireFailed(ex)) =>
               log.warn("[channel] acquire failed channelId={}", channelId, ex)
