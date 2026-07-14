@@ -127,12 +127,7 @@ object SharedChannelStream {
         currentSession.set(updated)
         true
       } else {
-        log.debug(
-          "[shared] ignore stale session update label={} requested={} current={}"
-        , channelLabel
-        , requested.sessionId
-        , current.sessionId
-        )
+        log.debug("[shared] ignore stale session update label={} requested={} current={}", channelLabel, requested.sessionId, current.sessionId)
         false
       }
     }
@@ -144,12 +139,7 @@ object SharedChannelStream {
           ops.keepalive(requested).onComplete {
             case Success(updated) =>
               if (!leaseStopped.get() && !replaceInProgress.get() && applySessionUpdate(requested, updated)) {
-                log.debug(
-                  "[shared] keepalive ok label={} expires={} keepalive={}"
-                , channelLabel
-                , updated.expires.map(_.toString).getOrElse("unknown")
-                , updated.keepalive.map(_.toString).getOrElse("unknown")
-                )
+                log.debug("[shared] keepalive ok label={} expires={} keepalive={}", channelLabel, updated.expires.map(_.toString).getOrElse("unknown"), updated.keepalive.map(_.toString).getOrElse("unknown"))
                 if (requested.playlistUrl != updated.playlistUrl) {
                   log.info("[shared] playlist url changed label={}, restarting hls", channelLabel)
                   streamKillSwitch.get().foreach(_.shutdown())
@@ -215,32 +205,18 @@ object SharedChannelStream {
       pauseKeepalive()
       replaceInProgress.set(true)
       val promise = Promise[PlayerSession]()
-      log.info(
-        "[shared] replace requested label={} sessionId={}"
-      , channelLabel
-      , prior.sessionId
-      )
+      log.info("[shared] replace requested label={} sessionId={}", channelLabel, prior.sessionId)
       val replyAdapter = system.systemActorOf(
         Behaviors.receiveMessage[ReplaceResult] {
           case Replaced(session) =>
-            log.info(
-              "[shared] replace completed label={} prior={} next={}"
-            , channelLabel
-            , prior.sessionId
-            , session.sessionId
-            )
+            log.info("[shared] replace completed label={} prior={} next={}", channelLabel, prior.sessionId, session.sessionId)
             currentSession.set(session)
             replaceInProgress.set(false)
             scheduleKeepalive()
             val _ = promise.trySuccess(session)
             Behaviors.stopped
           case ReplaceFailed(cause) =>
-            log.warn(
-              "[shared] replace failed label={} sessionId={}"
-            , channelLabel
-            , prior.sessionId
-            , cause
-            )
+            log.warn("[shared] replace failed label={} sessionId={}", channelLabel, prior.sessionId, cause)
             replaceInProgress.set(false)
             val _ = promise.tryFailure(cause)
             Behaviors.stopped
@@ -252,13 +228,7 @@ object SharedChannelStream {
     }
 
     def streamFromSession(session: PlayerSession): Source[ByteString, ?] = {
-      log.info(
-        "[shared] stream label={} expires={} keepalive={} playlist={}"
-      , channelLabel
-      , session.expires.map(_.toString).getOrElse("unknown")
-      , session.keepalive.map(_.toString).getOrElse("unknown")
-      , LogConfig.truncate(session.playlistUrl)
-      )
+      log.info("[shared] stream label={} expires={} keepalive={} playlist={}", channelLabel, session.expires.map(_.toString).getOrElse("unknown"), session.keepalive.map(_.toString).getOrElse("unknown"), LogConfig.truncate(session.playlistUrl))
       StreamBackend().stream(session.playlistUrl, channelLabel)
         .viaMat(KillSwitches.single)(Keep.right)
         .mapMaterializedValue { killSwitch =>

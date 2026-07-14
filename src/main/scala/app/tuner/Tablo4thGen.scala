@@ -1062,11 +1062,7 @@ object Tablo4thGen {
             )
           onComplete(acquire) {
             case Success(SessionManager.Attached(attachmentId, source)) =>
-              log.info(
-                "[channel] streaming channelId={} attachment={}"
-              , channelId
-              , attachmentId.toString.take(8)
-              )
+              log.info("[channel] streaming channelId={} attachment={}", channelId, attachmentId.toString.take(8))
               val videoMp2t = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
               complete(
                 HttpEntity.Chunked.fromData(

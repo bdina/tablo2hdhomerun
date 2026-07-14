@@ -262,11 +262,7 @@ object SessionManager {
       }
 
     private def closeOrphan(channel: ChannelKey, sessionId: SessionId): Unit = {
-      log.warn(
-        "[session] closing orphan session channel={} sessionId={}"
-      , ch(channel)
-      , sessionId
-      )
+      log.warn("[session] closing orphan session channel={} sessionId={}", ch(channel), sessionId)
       context.pipeToSelf(backend.close(sessionId)) {
         case Success(_) => CloseCompleted(channel, sessionId)
         case Failure(ex) =>
@@ -280,13 +276,7 @@ object SessionManager {
         case Some(Opening(reservationId, waiters)) =>
           val pending = waiters.size + 1
           channels = channels.updated(channel, Opening(reservationId, waiters :+ PendingAcquire(replyTo)))
-          log.info(
-            "[session] client queue channel={} state=opening pending={} reserved={} total={}"
-          , ch(channel)
-          , pending
-          , reservations
-          , cachedTuners
-          )
+          log.info("[session] client queue channel={} state=opening pending={} reserved={} total={}", ch(channel), pending, reservations, cachedTuners)
         case Some(Active(state)) =>
           replyAttached(channel, state, replyTo, shared = true, Active.apply)
         case Some(Replacing(state, priorSessionId, busy)) =>
@@ -295,29 +285,13 @@ object SessionManager {
             channel
           , Replacing(state.copy(queued = state.queued :+ PendingAcquire(replyTo)), priorSessionId, busy)
           )
-          log.info(
-            "[session] client queue channel={} sessionId={} state=replacing pending={} clients={}"
-          , ch(channel)
-          , state.runtime.sessionId
-          , pending
-          , clientCount(state)
-          )
+          log.info("[session] client queue channel={} sessionId={} state=replacing pending={} clients={}", ch(channel), state.runtime.sessionId, pending, clientCount(state))
         case Some(Closing(sessionId, waiters)) =>
           channels = channels.updated(channel, Closing(sessionId, waiters :+ PendingAcquire(replyTo)))
-          log.info(
-            "[session] client queue channel={} sessionId={} state=closing pending={}"
-          , ch(channel)
-          , sessionId
-          , waiters.size + 1
-          )
+          log.info("[session] client queue channel={} sessionId={} state=closing pending={}", ch(channel), sessionId, waiters.size + 1)
         case None =>
           if (reservations >= cachedTuners) {
-            log.warn(
-              "[session] no available tuners channel={} reserved={} total={}"
-            , ch(channel)
-            , reservations
-            , cachedTuners
-            )
+            log.warn("[session] no available tuners channel={} reserved={} total={}", ch(channel), reservations, cachedTuners)
             requestTunerRefresh()
             replyTo ! NoAvailableTuners
           } else {
@@ -329,14 +303,7 @@ object SessionManager {
       val reservationId = UUID.randomUUID()
       channels = channels.updated(channel, Opening(reservationId, waiters))
       timers.startSingleTimer(OpenKey(channel, reservationId), OpenTimedOut(channel, reservationId), settings.openTimeout)
-      log.info(
-        "[session] opening channel={} reservation={} waiters={} reserved={} total={}"
-      , ch(channel)
-      , shortId(reservationId)
-      , waiters.size
-      , reservations
-      , cachedTuners
-      )
+      log.info("[session] opening channel={} reservation={} waiters={} reserved={} total={}", ch(channel), shortId(reservationId), waiters.size, reservations, cachedTuners)
       context.pipeToSelf(backend.open(channel)) {
         case Success(session) => OpenCompleted(channel, reservationId, Right(session))
         case Failure(ex) => OpenCompleted(channel, reservationId, Left(ex))
@@ -356,45 +323,22 @@ object SessionManager {
               activate(channel, session, waiters)
             case Left(ex) =>
               channels = channels - channel
-              log.warn(
-                "[session] open failed channel={} reservation={} waiters={} reserved={}"
-              , ch(channel)
-              , shortId(reservationId)
-              , waiters.size
-              , reservations
-              , ex
-              )
+              log.warn("[session] open failed channel={} reservation={} waiters={} reserved={}", ch(channel), shortId(reservationId), waiters.size, reservations, ex)
               failWaiters(channel, waiters, ex)
               if (isNoTuners(ex)) requestTunerRefresh()
           }
         case Some(Opening(id, _)) =>
           result match {
             case Right(session) =>
-              log.warn(
-                "[session] stale open success channel={} expected={} actual={} sessionId={}"
-              , ch(channel)
-              , shortId(reservationId)
-              , shortId(id)
-              , session.sessionId
-              )
+              log.warn("[session] stale open success channel={} expected={} actual={} sessionId={}", ch(channel), shortId(reservationId), shortId(id), session.sessionId)
               closeOrphan(channel, session.sessionId)
             case Left(ex) =>
-              log.debug(
-                "[session] ignore stale open failure channel={} expected={} actual={}"
-              , ch(channel)
-              , shortId(reservationId)
-              , shortId(id)
-              , ex
-              )
+              log.debug("[session] ignore stale open failure channel={} expected={} actual={}", ch(channel), shortId(reservationId), shortId(id), ex)
           }
         case _ =>
           result match {
             case Right(session) =>
-              log.warn(
-                "[session] open completed after cancel channel={} sessionId={}"
-              , ch(channel)
-              , session.sessionId
-              )
+              log.warn("[session] open completed after cancel channel={} sessionId={}", ch(channel), session.sessionId)
               closeOrphan(channel, session.sessionId)
             case Left(ex) =>
               log.debug("[session] ignore late open failure channel={}", ch(channel), ex)
@@ -406,13 +350,7 @@ object SessionManager {
         case Some(Opening(id, waiters)) if id == reservationId =>
           channels = channels - channel
           val ex = Error.OpenTimedOut(ch(channel))
-          log.warn(
-            "[session] open timed out channel={} reservation={} waiters={} reserved={}"
-          , ch(channel)
-          , shortId(reservationId)
-          , waiters.size
-          , reservations
-          )
+          log.warn("[session] open timed out channel={} reservation={} waiters={} reserved={}", ch(channel), shortId(reservationId), waiters.size, reservations)
           failWaiters(channel, waiters, ex)
         case _ => ()
       }
@@ -435,14 +373,7 @@ object SessionManager {
         state = grantAttachment(channel, state, waiter.replyTo, shared = waiters.size > 1)
       }
       channels = channels.updated(channel, Active(state))
-      log.info(
-        "[session] active channel={} sessionId={} clients={} reserved={} total={}"
-      , ch(channel)
-      , session.sessionId
-      , clientCount(state)
-      , reservations
-      , cachedTuners
-      )
+      log.info("[session] active channel={} sessionId={} clients={} reserved={} total={}", ch(channel), session.sessionId, clientCount(state), reservations, cachedTuners)
     }
 
     private def replyAttached(
@@ -472,15 +403,7 @@ object SessionManager {
       )
       replyTo ! Attached(attachmentId, source)
       val next = state.copy(attachments = state.attachments.updated(attachmentId, Granted(killSwitch)))
-      log.info(
-        "[session] client grant channel={} sessionId={} attachment={} shared={} clients={} reserved={}"
-      , ch(channel)
-      , state.runtime.sessionId
-      , shortId(attachmentId)
-      , shared
-      , clientCount(next)
-      , reservations
-      )
+      log.info("[session] client grant channel={} sessionId={} attachment={} shared={} clients={} reserved={}", ch(channel), state.runtime.sessionId, shortId(attachmentId), shared, clientCount(next), reservations)
       next
     }
 
@@ -507,20 +430,9 @@ object SessionManager {
             timers.cancel(MaterializeKey(attachmentId))
             val next = state.copy(attachments = state.attachments.updated(attachmentId, Materialized))
             channels = channels.updated(channel, updateEntry(entry, next))
-            log.info(
-              "[session] client connect channel={} sessionId={} attachment={} clients={} shared={}"
-            , ch(channel)
-            , state.runtime.sessionId
-            , shortId(attachmentId)
-            , clientCount(next)
-            , clientCount(next) > 1
-            )
+            log.info("[session] client connect channel={} sessionId={} attachment={} clients={} shared={}", ch(channel), state.runtime.sessionId, shortId(attachmentId), clientCount(next), clientCount(next) > 1)
           case Some(Materialized) =>
-            log.debug(
-              "[session] ignore duplicate connect channel={} attachment={}"
-            , ch(channel)
-            , shortId(attachmentId)
-            )
+            log.debug("[session] ignore duplicate connect channel={} attachment={}", ch(channel), shortId(attachmentId))
           case None => ()
         }
       }
@@ -534,24 +446,9 @@ object SessionManager {
         val remaining = clientCount(next)
         cause match {
           case None =>
-            log.info(
-              "[session] client disconnect channel={} sessionId={} attachment={} clientsRemaining={} shared={}"
-            , ch(channel)
-            , state.runtime.sessionId
-            , shortId(attachmentId)
-            , remaining
-            , wasShared
-            )
+            log.info("[session] client disconnect channel={} sessionId={} attachment={} clientsRemaining={} shared={}", ch(channel), state.runtime.sessionId, shortId(attachmentId), remaining, wasShared)
           case Some(ex) =>
-            log.warn(
-              "[session] client stream failed channel={} sessionId={} attachment={} clientsRemaining={} shared={}"
-            , ch(channel)
-            , state.runtime.sessionId
-            , shortId(attachmentId)
-            , remaining
-            , wasShared
-            , ex
-            )
+            log.warn("[session] client stream failed channel={} sessionId={} attachment={} clientsRemaining={} shared={}", ch(channel), state.runtime.sessionId, shortId(attachmentId), remaining, wasShared, ex)
         }
         if (next.attachments.isEmpty && next.queued.isEmpty)
           beginClosing(channel, next.runtime)
@@ -566,13 +463,7 @@ object SessionManager {
           case Some(Granted(killSwitch)) =>
             killSwitch.shutdown()
             val next = state.copy(attachments = state.attachments - attachmentId)
-            log.warn(
-              "[session] client materialize timeout channel={} sessionId={} attachment={} clientsRemaining={}"
-            , ch(channel)
-            , state.runtime.sessionId
-            , shortId(attachmentId)
-            , clientCount(next)
-            )
+            log.warn("[session] client materialize timeout channel={} sessionId={} attachment={} clientsRemaining={}", ch(channel), state.runtime.sessionId, shortId(attachmentId), clientCount(next))
             if (next.attachments.isEmpty && next.queued.isEmpty)
               beginClosing(channel, next.runtime)
             else
@@ -594,13 +485,7 @@ object SessionManager {
           log.warn("[session] stop failed channel={} sessionId={}", ch(channel), sessionId, ex)
       }
       timers.startSingleTimer(CloseKey(channel, sessionId), CloseTimedOut(channel, sessionId), settings.closeTimeout)
-      log.info(
-        "[session] closing channel={} sessionId={} reserved={} total={}"
-      , ch(channel)
-      , sessionId
-      , reservations
-      , cachedTuners
-      )
+      log.info("[session] closing channel={} sessionId={} reserved={} total={}", ch(channel), sessionId, reservations, cachedTuners)
       context.pipeToSelf(backend.close(sessionId)) {
         case Success(_) => CloseCompleted(channel, sessionId)
         case Failure(ex) =>
@@ -615,14 +500,7 @@ object SessionManager {
           timers.cancel(CloseKey(channel, sessionId))
           sessionIndex = sessionIndex - sessionId
           channels = channels - channel
-          log.info(
-            "[session] closed channel={} sessionId={} reserved={} total={} pendingReopen={}"
-          , ch(channel)
-          , sessionId
-          , reservations
-          , cachedTuners
-          , waiters.size
-          )
+          log.info("[session] closed channel={} sessionId={} reserved={} total={} pendingReopen={}", ch(channel), sessionId, reservations, cachedTuners, waiters.size)
           if (waiters.nonEmpty) {
             if (reservations >= cachedTuners) {
               failWaiters(channel, waiters, Error.NoAvailableTuners)
@@ -640,13 +518,7 @@ object SessionManager {
         case Some(Closing(id, waiters)) if id == sessionId =>
           sessionIndex = sessionIndex - sessionId
           channels = channels - channel
-          log.warn(
-            "[session] close timed out channel={} sessionId={} reserved={} pendingReopen={}"
-          , ch(channel)
-          , sessionId
-          , reservations
-          , waiters.size
-          )
+          log.warn("[session] close timed out channel={} sessionId={} reserved={} pendingReopen={}", ch(channel), sessionId, reservations, waiters.size)
           if (waiters.nonEmpty) {
             if (reservations >= cachedTuners) {
               failWaiters(channel, waiters, Error.NoAvailableTuners)
@@ -663,40 +535,18 @@ object SessionManager {
         case Some(Active(state)) =>
           cause match {
             case Some(ex) =>
-              log.warn(
-                "[session] upstream failed channel={} sessionId={} clients={}"
-              , ch(channel)
-              , state.runtime.sessionId
-              , clientCount(state)
-              , ex
-              )
+              log.warn("[session] upstream failed channel={} sessionId={} clients={}", ch(channel), state.runtime.sessionId, clientCount(state), ex)
             case None =>
-              log.info(
-                "[session] upstream complete channel={} sessionId={} clients={}"
-              , ch(channel)
-              , state.runtime.sessionId
-              , clientCount(state)
-              )
+              log.info("[session] upstream complete channel={} sessionId={} clients={}", ch(channel), state.runtime.sessionId, clientCount(state))
           }
           failQueued(channel, state.queued, cause.getOrElse(Error.UpstreamTerminated))
           beginClosing(channel, state.runtime)
         case Some(Replacing(state, _, _)) =>
           cause match {
             case Some(ex) =>
-              log.warn(
-                "[session] upstream failed during replace channel={} sessionId={} clients={}"
-              , ch(channel)
-              , state.runtime.sessionId
-              , clientCount(state)
-              , ex
-              )
+              log.warn("[session] upstream failed during replace channel={} sessionId={} clients={}", ch(channel), state.runtime.sessionId, clientCount(state), ex)
             case None =>
-              log.info(
-                "[session] upstream complete during replace channel={} sessionId={} clients={}"
-              , ch(channel)
-              , state.runtime.sessionId
-              , clientCount(state)
-              )
+              log.info("[session] upstream complete during replace channel={} sessionId={} clients={}", ch(channel), state.runtime.sessionId, clientCount(state))
           }
           failQueued(channel, state.queued, cause.getOrElse(Error.UpstreamTerminated))
           beginClosing(channel, state.runtime)
@@ -714,51 +564,27 @@ object SessionManager {
       channels.get(channel) match {
         case Some(Active(state)) if state.runtime.sessionId == priorSessionId =>
           channels = channels.updated(channel, Replacing(state, priorSessionId, busy = true))
-          log.info(
-            "[session] replacing channel={} sessionId={} clients={}"
-          , ch(channel)
-          , priorSessionId
-          , clientCount(state)
-          )
+          log.info("[session] replacing channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
           context.pipeToSelf(backend.close(priorSessionId)) {
             case Success(_) => ReplaceClosed(channel, priorSessionId, replyTo)
             case Failure(ex) =>
-              log.warn(
-                "[session] replace close failed channel={} sessionId={}"
-              , ch(channel)
-              , priorSessionId
-              , ex
-              )
+              log.warn("[session] replace close failed channel={} sessionId={}", ch(channel), priorSessionId, ex)
               ReplaceClosed(channel, priorSessionId, replyTo)
           }
         case Some(Replacing(state, prior, busy)) if prior == priorSessionId =>
           if (busy) {
-            log.warn(
-              "[session] replace already in progress channel={} sessionId={}"
-            , ch(channel)
-            , priorSessionId
-            )
+            log.warn("[session] replace already in progress channel={} sessionId={}", ch(channel), priorSessionId)
             replyTo ! ReplaceFailed(Error.ReplaceAlreadyInProgress)
           } else {
             channels = channels.updated(channel, Replacing(state, priorSessionId, busy = true))
-            log.info(
-              "[session] replace retry open channel={} sessionId={} clients={}"
-            , ch(channel)
-            , priorSessionId
-            , clientCount(state)
-            )
+            log.info("[session] replace retry open channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
             context.pipeToSelf(backend.open(channel)) {
               case Success(session) => ReplaceOpened(channel, priorSessionId, replyTo, Right(session))
               case Failure(ex) => ReplaceOpened(channel, priorSessionId, replyTo, Left(ex))
             }
           }
         case other =>
-          log.warn(
-            "[session] replace rejected channel={} sessionId={} state={}"
-          , ch(channel)
-          , priorSessionId
-          , other.map(_.getClass.getSimpleName).getOrElse("absent")
-          )
+          log.warn("[session] replace rejected channel={} sessionId={} state={}", ch(channel), priorSessionId, other.map(_.getClass.getSimpleName).getOrElse("absent"))
           replyTo ! ReplaceFailed(Error.ReplaceNotActive(ch(channel)))
       }
 
@@ -776,11 +602,7 @@ object SessionManager {
             case Failure(ex) => ReplaceOpened(channel, priorSessionId, replyTo, Left(ex))
           }
         case _ =>
-          log.warn(
-            "[session] replace close completed after state change channel={} sessionId={}"
-          , ch(channel)
-          , priorSessionId
-          )
+          log.warn("[session] replace close completed after state change channel={} sessionId={}", ch(channel), priorSessionId)
           replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
       }
 
@@ -804,33 +626,15 @@ object SessionManager {
               }
               channels = channels.updated(channel, Active(activeState))
               replyTo ! Replaced(session)
-              log.info(
-                "[session] replaced channel={} prior={} next={} clients={} queuedGranted={}"
-              , ch(channel)
-              , priorSessionId
-              , session.sessionId
-              , clientCount(activeState)
-              , waiters.size
-              )
+              log.info("[session] replaced channel={} prior={} next={} clients={} queuedGranted={}", ch(channel), priorSessionId, session.sessionId, clientCount(activeState), waiters.size)
             case Left(ex) =>
               channels = channels.updated(channel, Replacing(state, priorSessionId, busy = false))
               replyTo ! ReplaceFailed(ex)
               if (isNoTuners(ex)) {
-                log.warn(
-                  "[session] replace open no tuners channel={} prior={} clients={}"
-                , ch(channel)
-                , priorSessionId
-                , clientCount(state)
-                )
+                log.warn("[session] replace open no tuners channel={} prior={} clients={}", ch(channel), priorSessionId, clientCount(state))
                 requestTunerRefresh()
               } else
-                log.warn(
-                  "[session] replace open failed channel={} prior={} clients={}"
-                , ch(channel)
-                , priorSessionId
-                , clientCount(state)
-                , ex
-                )
+                log.warn("[session] replace open failed channel={} prior={} clients={}", ch(channel), priorSessionId, clientCount(state), ex)
           }
         case _ =>
           result.foreach { session =>
@@ -858,12 +662,7 @@ object SessionManager {
 
     private def failWaiters(channel: ChannelKey, waiters: Vector[PendingAcquire], ex: Throwable): Unit = {
       if (waiters.nonEmpty)
-        log.warn(
-          "[session] failing waiters channel={} count={} reason={}"
-        , ch(channel)
-        , waiters.size
-        , ex.toString
-        )
+        log.warn("[session] failing waiters channel={} count={} reason={}", ch(channel), waiters.size, ex.toString)
       waiters.foreach { waiter =>
         if (isNoTuners(ex)) waiter.replyTo ! NoAvailableTuners
         else waiter.replyTo ! AcquireFailed(ex)

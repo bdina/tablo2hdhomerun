@@ -873,11 +873,7 @@ object TabloLegacy {
                   .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
               HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
                 import Response.JsonProtocol._
-                log.debug(
-                  "[channel] http POST /guide/channels/{}/watch status={}"
-                , channelId
-                , response.status.intValue()
-                )
+                log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
                 if (response.status == StatusCodes.ServiceUnavailable) {
                   val _ = response.entity.discardBytes()
                   Future.failed(Error.NoAvailableTuners)
@@ -920,11 +916,7 @@ object TabloLegacy {
               )
             onComplete(acquire) {
               case Success(SessionManager.Attached(attachmentId, source)) =>
-                log.info(
-                  "[channel] streaming channelId={} attachment={}"
-                , channelId
-                , attachmentId.toString.take(8)
-                )
+                log.info("[channel] streaming channelId={} attachment={}", channelId, attachmentId.toString.take(8))
                 val videoMp2t = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
                 complete(
                   HttpEntity.Chunked.fromData(
