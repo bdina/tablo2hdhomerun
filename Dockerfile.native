@@ -53,6 +53,11 @@ WORKDIR ${GRAALVM_WORKDIR}
 # Copy the entire project and build it
 # This layer is rebuilt when a file changes in the project directory
 COPY . ${GRAALVM_WORKDIR}
+
+FROM build AS test
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon test
+
+FROM test AS native
 RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon nativeImage
 
 # Create a staging image (this will be part of the distribution)
@@ -80,7 +85,7 @@ ENV PATH=${APP_HOME}/bin:${PATH}
 
 WORKDIR ${APP_HOME}
 
-COPY --from=build /graalvm/src/project/build/tablo2hdhomerun* ${APP_HOME}/
+COPY --from=native /graalvm/src/project/build/tablo2hdhomerun* ${APP_HOME}/
 
 CMD [ "/bin/bash" ]
 

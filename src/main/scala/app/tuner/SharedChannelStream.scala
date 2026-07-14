@@ -25,7 +25,8 @@ import app.tuner.SessionManager.{
 , SessionRuntime
 }
 
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.time.Instant
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
 
 import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.concurrent.duration._
@@ -39,6 +40,74 @@ object SharedChannelStream {
   , fetch: PlayerSession => Future[PlayerSession]
   )
 
+  private[tuner] final case class ReplaceAttempt(
+    generation: Long
+  , promise: Promise[PlayerSession]
+  )
+
+  private[tuner] sealed trait KeepaliveSettleAction
+  private[tuner] case object ScheduleKeepalive extends KeepaliveSettleAction
+  private[tuner] case object ScheduleKeepaliveRetry extends KeepaliveSettleAction
+  private[tuner] case object KeepaliveIdle extends KeepaliveSettleAction
+
+  private[tuner] def settleKeepaliveAction(
+    stillCurrent: Boolean
+  , applied: Boolean
+  ): KeepaliveSettleAction =
+    if (!stillCurrent) KeepaliveIdle
+    else if (applied) ScheduleKeepalive
+    else ScheduleKeepaliveRetry
+
+  private[tuner] final class ReplaceAttemptOwner {
+    private val generation = new AtomicLong(0)
+    private val active = new AtomicReference[Option[ReplaceAttempt]](None)
+
+    def currentGeneration: Long = generation.get()
+
+    def activeFuture: Option[Future[PlayerSession]] =
+      active.get().map(_.promise.future)
+
+    def begin(): Either[SessionManager.Error.ReplaceAlreadyInProgress.type, ReplaceAttempt] = {
+      var decided: Either[SessionManager.Error.ReplaceAlreadyInProgress.type, ReplaceAttempt] =
+        Left(SessionManager.Error.ReplaceAlreadyInProgress)
+      var done = false
+      while (!done) {
+        val current = active.get()
+        if (current.isDefined)
+          done = true
+        else {
+          val attempt = ReplaceAttempt(generation.incrementAndGet(), Promise[PlayerSession]())
+          if (active.compareAndSet(None, Some(attempt))) {
+            decided = Right(attempt)
+            done = true
+          }
+        }
+      }
+      decided
+    }
+
+    def isCurrent(attempt: ReplaceAttempt): Boolean =
+      active.get() match {
+        case Some(current) =>
+          current.generation == attempt.generation && (current.promise eq attempt.promise)
+        case None => false
+      }
+
+    def release(attempt: ReplaceAttempt): Unit = {
+      val current = active.get()
+      current match {
+        case Some(owned) if owned.generation == attempt.generation && (owned.promise eq attempt.promise) =>
+          val _ = active.compareAndSet(current, None)
+        case _ => ()
+      }
+    }
+
+    def abort(cause: Throwable): Unit =
+      active.getAndSet(None).foreach { attempt =>
+        val _ = attempt.promise.tryFailure(cause)
+      }
+  }
+
   final case class SharedRuntimeFactory(
     keepaliveOpsFor: ChannelKey => Option[KeepaliveOps]
   )(implicit system: ActorSystem[?]) extends RuntimeFactory {
@@ -47,7 +116,9 @@ object SharedChannelStream {
     , session: PlayerSession
     , onTerminated: Option[Throwable] => Unit
     , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
+    , onSessionUpdated: PlayerSession => Unit
     , backpressureTimeout: FiniteDuration
+    , replaceTimeout: FiniteDuration
     ): SessionRuntime = {
       implicit val mat: Materializer = Materializer(system)
       implicit val ec: ExecutionContext = system.executionContext
@@ -61,7 +132,9 @@ object SharedChannelStream {
       , keepaliveOps = keepaliveOpsFor(channel)
       , onTerminated = onTerminated
       , requestReplace = requestReplace
+      , onSessionUpdated = onSessionUpdated
       , backpressureTimeout = backpressureTimeout
+      , replaceTimeout = replaceTimeout
       )
     }
   }
@@ -77,7 +150,13 @@ object SharedChannelStream {
   , keepaliveOps: Option[KeepaliveOps]
   , onTerminated: Option[Throwable] => Unit
   , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
+  , onSessionUpdated: PlayerSession => Unit
   , backpressureTimeout: FiniteDuration
+  , replaceTimeout: FiniteDuration
+  , replaceAttempts: ReplaceAttemptOwner = new ReplaceAttemptOwner
+  , streamBackend: StreamBackend = StreamBackend()
+  , now: () => Instant = () => Instant.now()
+  , afterKeepaliveProgressCheck: () => Unit = () => ()
   )(implicit system: ActorSystem[?], mat: Materializer, ec: ExecutionContext): SessionRuntime = {
     val currentSession = new AtomicReference(firstSession)
     val streamKillSwitch = new AtomicReference[Option[UniqueKillSwitch]](None)
@@ -85,6 +164,8 @@ object SharedChannelStream {
     val replaceInProgress = new AtomicBoolean(false)
     val firstStreamAttempt = new AtomicBoolean(true)
     @volatile var keepaliveTask: Option[org.apache.pekko.actor.Cancellable] = None
+    @volatile var replaceTimeoutTask: Option[org.apache.pekko.actor.Cancellable] = None
+    val activeReplaceAdapter = new AtomicReference[Option[ActorRef[ReplaceResult]]](None)
     var keepaliveMissingLogged = false
     val terminatedReported = new AtomicBoolean(false)
 
@@ -98,9 +179,38 @@ object SharedChannelStream {
       pauseKeepalive()
     }
 
+    def stopReplaceAdapter(adapter: ActorRef[ReplaceResult]): Unit = {
+      import org.apache.pekko.actor.typed.scaladsl.adapter._
+      try system.toClassic.stop(adapter.toClassic)
+      catch {
+        case _: Throwable => ()
+      }
+    }
+
+    def clearReplaceAdapter(): Unit =
+      activeReplaceAdapter.getAndSet(None).foreach(stopReplaceAdapter)
+
+    def releaseReplaceAdapter(adapter: ActorRef[ReplaceResult]): Unit = {
+      val current = activeReplaceAdapter.get()
+      current match {
+        case Some(ref) if ref eq adapter =>
+          val _ = activeReplaceAdapter.compareAndSet(current, None)
+        case _ => ()
+      }
+    }
+
+    def abortReplace(cause: Throwable): Unit = {
+      replaceTimeoutTask.foreach(_.cancel())
+      replaceTimeoutTask = None
+      replaceAttempts.abort(cause)
+      replaceInProgress.set(false)
+      clearReplaceAdapter()
+    }
+
     def reportTerminated(cause: Option[Throwable]): Unit =
       if (terminatedReported.compareAndSet(false, true)) {
         cancelKeepalive()
+        abortReplace(cause.getOrElse(SessionManager.Error.UpstreamTerminated))
         cause match {
           case Some(ex) =>
             log.warn("[shared] upstream terminated label={} sessionId={}", channelLabel, currentSession.get().sessionId, ex)
@@ -113,6 +223,7 @@ object SharedChannelStream {
     def scheduleKeepaliveRetry(): Unit =
       if (!leaseStopped.get() && !replaceInProgress.get() && keepaliveOps.isDefined) {
         import org.apache.pekko.actor.typed.scaladsl.adapter._
+        pauseKeepalive()
         log.debug("[shared] keepalive retry scheduled label={}", channelLabel)
         keepaliveTask = Some(
           system.toClassic.scheduler.scheduleOnce(
@@ -125,6 +236,8 @@ object SharedChannelStream {
       val current = currentSession.get()
       if (current.sessionId == requested.sessionId) {
         currentSession.set(updated)
+        if (requested.sessionId != updated.sessionId)
+          onSessionUpdated(updated)
         true
       } else {
         log.debug("[shared] ignore stale session update label={} requested={} current={}", channelLabel, requested.sessionId, current.sessionId)
@@ -132,32 +245,59 @@ object SharedChannelStream {
       }
     }
 
+    def keepaliveStillCurrent(startedGen: Long): Boolean =
+      !leaseStopped.get() && !replaceInProgress.get() && startedGen == replaceAttempts.currentGeneration
+
+    def applyKeepaliveSettle(action: KeepaliveSettleAction): Unit =
+      action match {
+        case ScheduleKeepalive => scheduleKeepalive()
+        case ScheduleKeepaliveRetry => scheduleKeepaliveRetry()
+        case KeepaliveIdle => ()
+      }
+
     def runKeepalive(): Unit =
       keepaliveOps.foreach { ops =>
+        val startedGen = replaceAttempts.currentGeneration
         if (!leaseStopped.get() && !replaceInProgress.get()) {
-          val requested = currentSession.get()
-          ops.keepalive(requested).onComplete {
-            case Success(updated) =>
-              if (!leaseStopped.get() && !replaceInProgress.get() && applySessionUpdate(requested, updated)) {
-                log.debug("[shared] keepalive ok label={} expires={} keepalive={}", channelLabel, updated.expires.map(_.toString).getOrElse("unknown"), updated.keepalive.map(_.toString).getOrElse("unknown"))
-                if (requested.playlistUrl != updated.playlistUrl) {
-                  log.info("[shared] playlist url changed label={}, restarting hls", channelLabel)
-                  streamKillSwitch.get().foreach(_.shutdown())
-                }
-                scheduleKeepalive()
-              }
-            case Failure(ex) =>
-              if (!leaseStopped.get() && !replaceInProgress.get()) {
-                log.warn("[shared] keepalive failed label={}", channelLabel, ex)
-                val fetchRequested = currentSession.get()
-                ops.fetch(fetchRequested).foreach { updated =>
-                  if (!leaseStopped.get() && !replaceInProgress.get()) {
-                    val _ = applySessionUpdate(fetchRequested, updated)
+          afterKeepaliveProgressCheck()
+          if (keepaliveStillCurrent(startedGen)) {
+            val requested = currentSession.get()
+            ops.keepalive(requested).onComplete {
+              case Success(updated) =>
+                val stillCurrent = keepaliveStillCurrent(startedGen)
+                val applied = stillCurrent && applySessionUpdate(requested, updated)
+                if (applied) {
+                  log.debug("[shared] keepalive ok label={} expires={} keepalive={}", channelLabel, updated.expires.map(_.toString).getOrElse("unknown"), updated.keepalive.map(_.toString).getOrElse("unknown"))
+                  if (requested.playlistUrl != updated.playlistUrl) {
+                    log.info("[shared] playlist url changed label={} restarting=hls", channelLabel)
+                    streamKillSwitch.get().foreach(_.shutdown())
                   }
+                } else if (startedGen != replaceAttempts.currentGeneration)
+                  log.debug("[shared] ignore stale keepalive success label={} startedGen={} currentGen={}", channelLabel, startedGen, replaceAttempts.currentGeneration)
+                applyKeepaliveSettle(settleKeepaliveAction(stillCurrent, applied))
+              case Failure(ex) =>
+                if (keepaliveStillCurrent(startedGen)) {
+                  log.warn("[shared] keepalive failed label={}", channelLabel, ex)
+                  val fetchRequested = currentSession.get()
+                  ops.fetch(fetchRequested).onComplete {
+                    case Success(updated) =>
+                      val stillCurrent = keepaliveStillCurrent(startedGen)
+                      val applied = stillCurrent && applySessionUpdate(fetchRequested, updated)
+                      if (applied && fetchRequested.playlistUrl != updated.playlistUrl) {
+                        log.info("[shared] playlist url changed via fetch label={} restarting=hls", channelLabel)
+                        streamKillSwitch.get().foreach(_.shutdown())
+                      } else if (startedGen != replaceAttempts.currentGeneration)
+                        log.debug("[shared] ignore stale keepalive fetch label={} startedGen={} currentGen={}", channelLabel, startedGen, replaceAttempts.currentGeneration)
+                      applyKeepaliveSettle(settleKeepaliveAction(stillCurrent, applied))
+                    case Failure(fetchEx) =>
+                      if (keepaliveStillCurrent(startedGen)) {
+                        log.warn("[shared] keepalive fetch failed label={}", channelLabel, fetchEx)
+                        scheduleKeepaliveRetry()
+                      }
+                  }(ec)
                 }
-                scheduleKeepaliveRetry()
-              }
-          }(ec)
+            }(ec)
+          }
         }
       }
 
@@ -175,12 +315,13 @@ object SharedChannelStream {
                 var delay = math.max(5, keepalive - lead)
                 session.expires.foreach { exp =>
                   val untilExpiry =
-                    java.time.Duration.between(java.time.Instant.now(), exp).getSeconds.toInt
+                    java.time.Duration.between(now(), exp).getSeconds.toInt
                   val expiryDelay =
                     math.max(5, untilExpiry - Tablo4thGen.Channel.WatchSession.expiryRetuneLeadSec)
                   if (expiryDelay < delay) delay = expiryDelay
                 }
                 import org.apache.pekko.actor.typed.scaladsl.adapter._
+                pauseKeepalive()
                 keepaliveTask = Some(
                   system.toClassic.scheduler.scheduleOnce(delay.seconds) { runKeepalive() }(ec)
                 )
@@ -196,40 +337,95 @@ object SharedChannelStream {
     def shouldRefresh(session: PlayerSession): Boolean =
       session.expires.isEmpty ||
         session.expires.exists { exp =>
-          !java.time.Instant.now().isBefore(
+          !now().isBefore(
             exp.minusSeconds(Tablo4thGen.Channel.WatchSession.expiryRetuneLeadSec.toLong)
           )
         }
 
-    def replaceSession(prior: PlayerSession): Future[PlayerSession] = {
-      pauseKeepalive()
-      replaceInProgress.set(true)
-      val promise = Promise[PlayerSession]()
-      log.info("[shared] replace requested label={} sessionId={}", channelLabel, prior.sessionId)
-      val replyAdapter = system.systemActorOf(
-        Behaviors.receiveMessage[ReplaceResult] {
-          case Replaced(session) =>
-            log.info("[shared] replace completed label={} prior={} next={}", channelLabel, prior.sessionId, session.sessionId)
-            currentSession.set(session)
-            replaceInProgress.set(false)
-            scheduleKeepalive()
-            val _ = promise.trySuccess(session)
-            Behaviors.stopped
-          case ReplaceFailed(cause) =>
-            log.warn("[shared] replace failed label={} sessionId={}", channelLabel, prior.sessionId, cause)
-            replaceInProgress.set(false)
-            val _ = promise.tryFailure(cause)
-            Behaviors.stopped
-        }
-      , s"replace-reply-${java.util.UUID.randomUUID().toString.take(8)}"
-      )
-      requestReplace(prior.sessionId, replyAdapter)
-      promise.future
+    def shouldResumeKeepaliveAfterReplaceFailure(cause: Throwable): Boolean =
+      cause match {
+        case _: SessionManager.Error.ReplaceTimedOut => false
+        case SessionManager.Error.ReplaceAlreadyInProgress => false
+        case _: SessionManager.Error.ReplaceOpenFailed => false
+        case _ => true
+      }
+
+    def finishReplaceAttempt(attempt: ReplaceAttempt): Unit = {
+      replaceAttempts.release(attempt)
+      replaceInProgress.set(false)
     }
+
+    def replaceSession(prior: PlayerSession): Future[PlayerSession] =
+      if (!replaceInProgress.compareAndSet(false, true))
+        Future.failed(SessionManager.Error.ReplaceAlreadyInProgress)
+      else
+        replaceAttempts.begin() match {
+          case Left(already) =>
+            replaceInProgress.set(false)
+            Future.failed(already)
+          case Right(attempt) =>
+            pauseKeepalive()
+            log.info("[shared] replace requested label={} sessionId={} generation={}", channelLabel, prior.sessionId, attempt.generation)
+            import org.apache.pekko.actor.typed.scaladsl.adapter._
+            replaceTimeoutTask.foreach(_.cancel())
+            clearReplaceAdapter()
+            lazy val replyAdapter: ActorRef[ReplaceResult] = system.systemActorOf(
+              Behaviors.receiveMessage[ReplaceResult] {
+                case Replaced(session) =>
+                  if (replaceAttempts.isCurrent(attempt)) {
+                    replaceTimeoutTask.foreach(_.cancel())
+                    replaceTimeoutTask = None
+                  }
+                  releaseReplaceAdapter(replyAdapter)
+                  if (replaceAttempts.isCurrent(attempt) && attempt.promise.trySuccess(session)) {
+                    log.info("[shared] replace completed label={} prior={} next={}", channelLabel, prior.sessionId, session.sessionId)
+                    currentSession.set(session)
+                    finishReplaceAttempt(attempt)
+                    scheduleKeepalive()
+                  } else {
+                    log.warn("[shared] ignore late replace success label={} sessionId={}", channelLabel, session.sessionId)
+                    if (replaceAttempts.isCurrent(attempt))
+                      finishReplaceAttempt(attempt)
+                  }
+                  Behaviors.stopped
+                case ReplaceFailed(cause) =>
+                  if (replaceAttempts.isCurrent(attempt)) {
+                    replaceTimeoutTask.foreach(_.cancel())
+                    replaceTimeoutTask = None
+                  }
+                  releaseReplaceAdapter(replyAdapter)
+                  if (replaceAttempts.isCurrent(attempt) && attempt.promise.tryFailure(cause)) {
+                    log.warn("[shared] replace failed label={} sessionId={}", channelLabel, prior.sessionId, cause)
+                    finishReplaceAttempt(attempt)
+                    if (shouldResumeKeepaliveAfterReplaceFailure(cause))
+                      scheduleKeepalive()
+                  } else {
+                    log.debug("[shared] ignore late replace failure label={} sessionId={}", channelLabel, prior.sessionId)
+                    if (replaceAttempts.isCurrent(attempt))
+                      finishReplaceAttempt(attempt)
+                  }
+                  Behaviors.stopped
+              }
+            , s"replace-reply-${java.util.UUID.randomUUID().toString.take(8)}"
+            )
+            activeReplaceAdapter.set(Some(replyAdapter))
+            replaceTimeoutTask = Some(
+              system.toClassic.scheduler.scheduleOnce(replaceTimeout) {
+                if (replaceAttempts.isCurrent(attempt) &&
+                    attempt.promise.tryFailure(SessionManager.Error.ReplaceTimedOut(channelLabel))) {
+                  log.warn("[shared] replace reply timed out label={} sessionId={}", channelLabel, prior.sessionId)
+                  finishReplaceAttempt(attempt)
+                  clearReplaceAdapter()
+                }
+              }(ec)
+            )
+            requestReplace(prior.sessionId, replyAdapter)
+            attempt.promise.future
+        }
 
     def streamFromSession(session: PlayerSession): Source[ByteString, ?] = {
       log.info("[shared] stream label={} expires={} keepalive={} playlist={}", channelLabel, session.expires.map(_.toString).getOrElse("unknown"), session.keepalive.map(_.toString).getOrElse("unknown"), LogConfig.truncate(session.playlistUrl))
-      StreamBackend().stream(session.playlistUrl, channelLabel)
+      streamBackend.stream(session.playlistUrl, channelLabel)
         .viaMat(KillSwitches.single)(Keep.right)
         .mapMaterializedValue { killSwitch =>
           streamKillSwitch.set(Some(killSwitch))
@@ -277,7 +473,12 @@ object SharedChannelStream {
     , stop = () => {
         log.info("[shared] stop label={} sessionId={}", channelLabel, currentSession.get().sessionId)
         cancelKeepalive()
+        abortReplace(SessionManager.Error.UpstreamTerminated)
         killSwitch.shutdown()
+      }
+    , resumeKeepalive = () => {
+        if (!leaseStopped.get() && !replaceInProgress.get())
+          scheduleKeepalive()
       }
     )
   }

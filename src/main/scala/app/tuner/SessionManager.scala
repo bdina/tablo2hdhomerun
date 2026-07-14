@@ -39,6 +39,8 @@ object SessionManager {
   , materializationTimeout: FiniteDuration = 5.seconds
   , closeTimeout: FiniteDuration = 5.seconds
   , backpressureTimeout: FiniteDuration = 30.seconds
+  , replaceTimeout: FiniteDuration = 10.seconds
+  , startupRefreshTimeout: FiniteDuration = 10.seconds
   )
 
   sealed trait Command
@@ -80,9 +82,18 @@ object SessionManager {
   private[tuner] final case class ReplaceOpened(
     channel: ChannelKey
   , priorSessionId: SessionId
+  , attemptId: UUID
   , replyTo: ActorRef[ReplaceResult]
   , result: Either[Throwable, PlayerSession]
   ) extends Command
+  private[tuner] final case class ReplaceCloseFailed(
+    channel: ChannelKey
+  , priorSessionId: SessionId
+  , replyTo: ActorRef[ReplaceResult]
+  , cause: Throwable
+  ) extends Command
+  private[tuner] final case class ReplaceTimedOut(channel: ChannelKey, priorSessionId: SessionId, attemptId: UUID) extends Command
+  private[tuner] final case class SessionUpdated(channel: ChannelKey, session: PlayerSession) extends Command
   private[tuner] final case class TunersUpdated(count: Int) extends Command
 
   sealed trait Error extends Exception
@@ -95,6 +106,10 @@ object SessionManager {
         extends Exception(s"channel not active for replace: $channel") with Error
     case class ReplaceStateChanged(channel: String)
         extends Exception(s"channel left replacing state: $channel") with Error
+    case class ReplaceTimedOut(channel: String)
+        extends Exception(s"replace timed out for $channel") with Error
+    case class ReplaceOpenFailed(channel: String, cause: Throwable)
+        extends Exception(s"replace open failed for $channel: ${cause.getMessage}", cause) with Error
   }
 
   trait SessionBackend {
@@ -108,6 +123,7 @@ object SessionManager {
     sessionId: SessionId
   , hubSource: Source[ByteString, NotUsed]
   , stop: () => Unit
+  , resumeKeepalive: () => Unit = () => ()
   )
 
   trait RuntimeFactory {
@@ -116,7 +132,9 @@ object SessionManager {
     , session: PlayerSession
     , onTerminated: Option[Throwable] => Unit
     , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
+    , onSessionUpdated: PlayerSession => Unit
     , backpressureTimeout: FiniteDuration
+    , replaceTimeout: FiniteDuration
     ): SessionRuntime
   }
 
@@ -132,6 +150,12 @@ object SessionManager {
   , queued: Vector[PendingAcquire] = Vector.empty
   )
 
+  private sealed trait ReplacePhase
+  private case object ClosingPrior extends ReplacePhase
+  private case object OpeningNext extends ReplacePhase
+  private case object ReadyToRetryOpen extends ReplacePhase
+  private case object WaitingForLateClose extends ReplacePhase
+
   private sealed trait SessionEntry
   private final case class Opening(
     reservationId: UUID
@@ -141,7 +165,9 @@ object SessionManager {
   private final case class Replacing(
     state: SessionRuntimeState
   , priorSessionId: SessionId
-  , busy: Boolean
+  , phase: ReplacePhase
+  , replyTo: Option[ActorRef[ReplaceResult]] = None
+  , attemptId: UUID = new UUID(0, 0)
   ) extends SessionEntry
   private final case class Closing(
     sessionId: SessionId
@@ -152,6 +178,8 @@ object SessionManager {
   private final case class MaterializeKey(id: UUID) extends TimerKey
   private final case class OpenKey(channel: ChannelKey, reservationId: UUID) extends TimerKey
   private final case class CloseKey(channel: ChannelKey, sessionId: SessionId) extends TimerKey
+  private final case class ReplaceKey(channel: ChannelKey, priorSessionId: SessionId, attemptId: UUID) extends TimerKey
+  private case object StartupKey extends TimerKey
 
   def apply(
     backend: SessionBackend
@@ -161,6 +189,7 @@ object SessionManager {
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
         val manager = Manager(context, timers, backend, runtimeFactory, settings)
+        timers.startSingleTimer(StartupKey, TunersUpdated(backend.totalTuners), settings.startupRefreshTimeout)
         context.pipeToSelf(backend.refreshTuners()) {
           case Success(tuners) => TunersUpdated(tuners)
           case Failure(ex) =>
@@ -197,7 +226,8 @@ object SessionManager {
           }
           Behaviors.same
         case TunersUpdated(count) =>
-          cachedTuners = math.max(1, count)
+          timers.cancel(StartupKey)
+          cachedTuners = math.max(0, count)
           log.info("[session] tuners updated total={}", cachedTuners)
           startupGate match {
             case Some(pending) =>
@@ -230,8 +260,17 @@ object SessionManager {
         case ReplaceClosed(channel, priorSessionId, replyTo) =>
           onReplaceClosed(channel, priorSessionId, replyTo)
           Behaviors.same
-        case ReplaceOpened(channel, priorSessionId, replyTo, result) =>
-          onReplaceOpened(channel, priorSessionId, replyTo, result)
+        case ReplaceCloseFailed(channel, priorSessionId, replyTo, cause) =>
+          onReplaceCloseFailed(channel, priorSessionId, replyTo, cause)
+          Behaviors.same
+        case ReplaceOpened(channel, priorSessionId, attemptId, replyTo, result) =>
+          onReplaceOpened(channel, priorSessionId, attemptId, replyTo, result)
+          Behaviors.same
+        case ReplaceTimedOut(channel, priorSessionId, attemptId) =>
+          onReplaceTimedOut(channel, priorSessionId, attemptId)
+          Behaviors.same
+        case SessionUpdated(channel, session) =>
+          onSessionUpdated(channel, session)
           Behaviors.same
         case CloseCompleted(channel, sessionId) =>
           onCloseCompleted(channel, sessionId)
@@ -271,6 +310,13 @@ object SessionManager {
       }
     }
 
+    private def armReplaceTimer(channel: ChannelKey, priorSessionId: SessionId, attemptId: UUID): Unit =
+      timers.startSingleTimer(
+        ReplaceKey(channel, priorSessionId, attemptId)
+      , ReplaceTimedOut(channel, priorSessionId, attemptId)
+      , settings.replaceTimeout
+      )
+
     private def onAcquire(channel: ChannelKey, replyTo: ActorRef[AcquireResult]): Unit =
       channels.get(channel) match {
         case Some(Opening(reservationId, waiters)) =>
@@ -279,18 +325,19 @@ object SessionManager {
           log.info("[session] client queue channel={} state=opening pending={} reserved={} total={}", ch(channel), pending, reservations, cachedTuners)
         case Some(Active(state)) =>
           replyAttached(channel, state, replyTo, shared = true, Active.apply)
-        case Some(Replacing(state, priorSessionId, busy)) =>
-          val pending = state.queued.size + 1
-          channels = channels.updated(
+        case Some(Replacing(state, priorSessionId, phase, replaceReply, aid)) =>
+          replyAttached(
             channel
-          , Replacing(state.copy(queued = state.queued :+ PendingAcquire(replyTo)), priorSessionId, busy)
+          , state
+          , replyTo
+          , shared = true
+          , next => Replacing(next, priorSessionId, phase, replaceReply, aid)
           )
-          log.info("[session] client queue channel={} sessionId={} state=replacing pending={} clients={}", ch(channel), state.runtime.sessionId, pending, clientCount(state))
         case Some(Closing(sessionId, waiters)) =>
           channels = channels.updated(channel, Closing(sessionId, waiters :+ PendingAcquire(replyTo)))
           log.info("[session] client queue channel={} sessionId={} state=closing pending={}", ch(channel), sessionId, waiters.size + 1)
         case None =>
-          if (reservations >= cachedTuners) {
+          if (cachedTuners <= 0 || reservations >= cachedTuners) {
             log.warn("[session] no available tuners channel={} reserved={} total={}", ch(channel), reservations, cachedTuners)
             requestTunerRefresh()
             replyTo ! NoAvailableTuners
@@ -365,7 +412,9 @@ object SessionManager {
       , session
       , cause => context.self ! UpstreamTerminated(channel, cause)
       , (priorId, replyTo) => context.self ! Replace(channel, priorId, replyTo)
+      , updated => context.self ! SessionUpdated(channel, updated)
       , settings.backpressureTimeout
+      , settings.replaceTimeout * 2 + settings.replaceTimeout / 5
       )
       sessionIndex = sessionIndex.updated(session.sessionId, channel)
       var state = SessionRuntimeState(runtime, Map.empty)
@@ -472,11 +521,29 @@ object SessionManager {
         }
       }
 
+    private def priorClosed(phase: ReplacePhase): Boolean =
+      phase == OpeningNext || phase == ReadyToRetryOpen
+
+    private sealed trait BeginCloseMode
+    private case object DeleteNow extends BeginCloseMode
+    private case object AlreadyDeleted extends BeginCloseMode
+    private case object AwaitInFlightDelete extends BeginCloseMode
+
     private def beginClosing(channel: ChannelKey, runtime: SessionRuntime): Unit = {
       val sessionId = runtime.sessionId
-      val waiters = channels.get(channel) match {
-        case Some(Closing(_, queued)) => queued
-        case _ => Vector.empty
+      val (waiters, mode) = channels.get(channel) match {
+        case Some(Closing(_, queued)) => (queued, DeleteNow)
+        case Some(Replacing(state, prior, phase, replyTo, aid)) =>
+          timers.cancel(ReplaceKey(channel, prior, aid))
+          replyTo.foreach { ref =>
+            ref ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
+          }
+          val closeMode =
+            if (priorClosed(phase)) AlreadyDeleted
+            else AwaitInFlightDelete
+          (state.queued, closeMode)
+        case Some(Active(state)) => (state.queued, DeleteNow)
+        case _ => (Vector.empty, DeleteNow)
       }
       channels = channels.updated(channel, Closing(sessionId, waiters))
       try runtime.stop()
@@ -484,15 +551,35 @@ object SessionManager {
         case ex: Throwable =>
           log.warn("[session] stop failed channel={} sessionId={}", ch(channel), sessionId, ex)
       }
-      timers.startSingleTimer(CloseKey(channel, sessionId), CloseTimedOut(channel, sessionId), settings.closeTimeout)
-      log.info("[session] closing channel={} sessionId={} reserved={} total={}", ch(channel), sessionId, reservations, cachedTuners)
-      context.pipeToSelf(backend.close(sessionId)) {
-        case Success(_) => CloseCompleted(channel, sessionId)
-        case Failure(ex) =>
-          log.warn("[session] close failed channel={} sessionId={}", ch(channel), sessionId, ex)
-          CloseCompleted(channel, sessionId)
+      mode match {
+        case AlreadyDeleted =>
+          log.info("[session] closing channel={} sessionId={} priorAlreadyClosed=true reserved={} total={}", ch(channel), sessionId, reservations, cachedTuners)
+          onCloseCompleted(channel, sessionId)
+        case AwaitInFlightDelete =>
+          val wait = settings.closeTimeout.max(settings.replaceTimeout)
+          timers.startSingleTimer(CloseKey(channel, sessionId), CloseTimedOut(channel, sessionId), wait)
+          log.info("[session] closing channel={} sessionId={} awaitingInFlightReplaceClose=true reserved={} total={}", ch(channel), sessionId, reservations, cachedTuners)
+        case DeleteNow =>
+          timers.startSingleTimer(CloseKey(channel, sessionId), CloseTimedOut(channel, sessionId), settings.closeTimeout)
+          log.info("[session] closing channel={} sessionId={} reserved={} total={}", ch(channel), sessionId, reservations, cachedTuners)
+          context.pipeToSelf(backend.close(sessionId)) {
+            case Success(_) => CloseCompleted(channel, sessionId)
+            case Failure(ex) =>
+              log.warn("[session] close failed channel={} sessionId={}", ch(channel), sessionId, ex)
+              CloseCompleted(channel, sessionId)
+          }
       }
     }
+
+    private def sessionStillTracked(sessionId: SessionId): Boolean =
+      channels.exists {
+        case (_, Active(state)) => state.runtime.sessionId == sessionId
+        case (_, Replacing(state, prior, phase, _, _)) =>
+          state.runtime.sessionId == sessionId ||
+            (prior == sessionId && !priorClosed(phase))
+        case (_, Closing(id, _)) => id == sessionId
+        case _ => false
+      }
 
     private def onCloseCompleted(channel: ChannelKey, sessionId: SessionId): Unit =
       channels.get(channel) match {
@@ -502,7 +589,7 @@ object SessionManager {
           channels = channels - channel
           log.info("[session] closed channel={} sessionId={} reserved={} total={} pendingReopen={}", ch(channel), sessionId, reservations, cachedTuners, waiters.size)
           if (waiters.nonEmpty) {
-            if (reservations >= cachedTuners) {
+            if (cachedTuners <= 0 || reservations >= cachedTuners) {
               failWaiters(channel, waiters, Error.NoAvailableTuners)
               requestTunerRefresh()
             } else {
@@ -510,7 +597,8 @@ object SessionManager {
             }
           }
         case _ =>
-          sessionIndex = sessionIndex - sessionId
+          if (!sessionStillTracked(sessionId))
+            sessionIndex = sessionIndex - sessionId
       }
 
     private def onCloseTimedOut(channel: ChannelKey, sessionId: SessionId): Unit =
@@ -520,7 +608,7 @@ object SessionManager {
           channels = channels - channel
           log.warn("[session] close timed out channel={} sessionId={} reserved={} pendingReopen={}", ch(channel), sessionId, reservations, waiters.size)
           if (waiters.nonEmpty) {
-            if (reservations >= cachedTuners) {
+            if (cachedTuners <= 0 || reservations >= cachedTuners) {
               failWaiters(channel, waiters, Error.NoAvailableTuners)
               requestTunerRefresh()
             } else {
@@ -541,20 +629,37 @@ object SessionManager {
           }
           failQueued(channel, state.queued, cause.getOrElse(Error.UpstreamTerminated))
           beginClosing(channel, state.runtime)
-        case Some(Replacing(state, _, _)) =>
+        case Some(Replacing(state, _, _, _, _)) =>
           cause match {
             case Some(ex) =>
               log.warn("[session] upstream failed during replace channel={} sessionId={} clients={}", ch(channel), state.runtime.sessionId, clientCount(state), ex)
             case None =>
               log.info("[session] upstream complete during replace channel={} sessionId={} clients={}", ch(channel), state.runtime.sessionId, clientCount(state))
           }
-          failQueued(channel, state.queued, cause.getOrElse(Error.UpstreamTerminated))
+          val terminateCause = cause.getOrElse(Error.UpstreamTerminated)
+          failQueued(channel, state.queued, terminateCause)
           beginClosing(channel, state.runtime)
         case _ =>
           cause.foreach { ex =>
             log.debug("[session] ignore upstream terminate channel={} state=absent", ch(channel), ex)
           }
       }
+
+    private def startReplaceOpen(
+      channel: ChannelKey
+    , state: SessionRuntimeState
+    , priorSessionId: SessionId
+    , replyTo: ActorRef[ReplaceResult]
+    ): Unit = {
+      val aid = UUID.randomUUID()
+      channels = channels.updated(channel, Replacing(state, priorSessionId, OpeningNext, Some(replyTo), aid))
+      armReplaceTimer(channel, priorSessionId, aid)
+      log.info("[session] replace open channel={} prior={} attempt={} clients={}", ch(channel), priorSessionId, shortId(aid), clientCount(state))
+      context.pipeToSelf(backend.open(channel)) {
+        case Success(session) => ReplaceOpened(channel, priorSessionId, aid, replyTo, Right(session))
+        case Failure(ex) => ReplaceOpened(channel, priorSessionId, aid, replyTo, Left(ex))
+      }
+    }
 
     private def onReplace(
       channel: ChannelKey
@@ -563,26 +668,21 @@ object SessionManager {
     ): Unit =
       channels.get(channel) match {
         case Some(Active(state)) if state.runtime.sessionId == priorSessionId =>
-          channels = channels.updated(channel, Replacing(state, priorSessionId, busy = true))
-          log.info("[session] replacing channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
+          val aid = UUID.randomUUID()
+          channels = channels.updated(channel, Replacing(state, priorSessionId, ClosingPrior, Some(replyTo), aid))
+          armReplaceTimer(channel, priorSessionId, aid)
+          log.info("[session] replacing channel={} sessionId={} attempt={} clients={}", ch(channel), priorSessionId, shortId(aid), clientCount(state))
           context.pipeToSelf(backend.close(priorSessionId)) {
             case Success(_) => ReplaceClosed(channel, priorSessionId, replyTo)
             case Failure(ex) =>
               log.warn("[session] replace close failed channel={} sessionId={}", ch(channel), priorSessionId, ex)
-              ReplaceClosed(channel, priorSessionId, replyTo)
+              ReplaceCloseFailed(channel, priorSessionId, replyTo, ex)
           }
-        case Some(Replacing(state, prior, busy)) if prior == priorSessionId =>
-          if (busy) {
-            log.warn("[session] replace already in progress channel={} sessionId={}", ch(channel), priorSessionId)
-            replyTo ! ReplaceFailed(Error.ReplaceAlreadyInProgress)
-          } else {
-            channels = channels.updated(channel, Replacing(state, priorSessionId, busy = true))
-            log.info("[session] replace retry open channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
-            context.pipeToSelf(backend.open(channel)) {
-              case Success(session) => ReplaceOpened(channel, priorSessionId, replyTo, Right(session))
-              case Failure(ex) => ReplaceOpened(channel, priorSessionId, replyTo, Left(ex))
-            }
-          }
+        case Some(Replacing(state, prior, ReadyToRetryOpen, _, _)) if prior == priorSessionId =>
+          startReplaceOpen(channel, state, priorSessionId, replyTo)
+        case Some(Replacing(_, prior, phase, _, _)) if prior == priorSessionId =>
+          log.warn("[session] replace already in progress channel={} sessionId={} phase={}", ch(channel), priorSessionId, phase)
+          replyTo ! ReplaceFailed(Error.ReplaceAlreadyInProgress)
         case other =>
           log.warn("[session] replace rejected channel={} sessionId={} state={}", ch(channel), priorSessionId, other.map(_.getClass.getSimpleName).getOrElse("absent"))
           replyTo ! ReplaceFailed(Error.ReplaceNotActive(ch(channel)))
@@ -594,26 +694,54 @@ object SessionManager {
     , replyTo: ActorRef[ReplaceResult]
     ): Unit =
       channels.get(channel) match {
-        case Some(Replacing(_, prior, _)) if prior == priorSessionId =>
+        case Some(Replacing(state, prior, ClosingPrior, _, _)) if prior == priorSessionId =>
           sessionIndex = sessionIndex - priorSessionId
           log.info("[session] replace closed prior session channel={} sessionId={}", ch(channel), priorSessionId)
-          context.pipeToSelf(backend.open(channel)) {
-            case Success(session) => ReplaceOpened(channel, priorSessionId, replyTo, Right(session))
-            case Failure(ex) => ReplaceOpened(channel, priorSessionId, replyTo, Left(ex))
-          }
+          startReplaceOpen(channel, state, priorSessionId, replyTo)
+        case Some(Replacing(state, prior, WaitingForLateClose, _, aid)) if prior == priorSessionId =>
+          sessionIndex = sessionIndex - priorSessionId
+          channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid))
+          log.info("[session] late replace close after timeout channel={} sessionId={}; ready to retry open", ch(channel), priorSessionId)
+        case Some(Replacing(_, prior, phase, _, _)) if prior == priorSessionId && priorClosed(phase) =>
+          sessionIndex = sessionIndex - priorSessionId
+          log.debug("[session] ignore duplicate replace close channel={} sessionId={} phase={}", ch(channel), priorSessionId, phase)
+        case Some(Closing(id, _)) if id == priorSessionId =>
+          onCloseCompleted(channel, priorSessionId)
         case _ =>
           log.warn("[session] replace close completed after state change channel={} sessionId={}", ch(channel), priorSessionId)
           replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
       }
 
+    private def onReplaceCloseFailed(
+      channel: ChannelKey
+    , priorSessionId: SessionId
+    , replyTo: ActorRef[ReplaceResult]
+    , cause: Throwable
+    ): Unit =
+      channels.get(channel) match {
+        case Some(Replacing(state, prior, ClosingPrior, _, aid)) if prior == priorSessionId =>
+          timers.cancel(ReplaceKey(channel, priorSessionId, aid))
+          log.warn("[session] replace close failed, returning to active channel={} sessionId={}", ch(channel), priorSessionId, cause)
+          channels = channels.updated(channel, Active(state))
+          replyTo ! ReplaceFailed(cause)
+        case Some(Replacing(state, prior, WaitingForLateClose, _, _)) if prior == priorSessionId =>
+          log.warn("[session] late replace close failed after timeout, returning to active channel={} sessionId={}", ch(channel), priorSessionId, cause)
+          channels = channels.updated(channel, Active(state))
+          state.runtime.resumeKeepalive()
+        case _ =>
+          log.debug("[session] ignore late replace close failure channel={} sessionId={}", ch(channel), priorSessionId)
+      }
+
     private def onReplaceOpened(
       channel: ChannelKey
     , priorSessionId: SessionId
+    , attemptId: UUID
     , replyTo: ActorRef[ReplaceResult]
     , result: Either[Throwable, PlayerSession]
     ): Unit =
       channels.get(channel) match {
-        case Some(Replacing(state, prior, _)) if prior == priorSessionId =>
+        case Some(Replacing(state, prior, OpeningNext, _, aid)) if prior == priorSessionId && aid == attemptId =>
+          timers.cancel(ReplaceKey(channel, priorSessionId, attemptId))
           result match {
             case Right(session) =>
               sessionIndex = sessionIndex.updated(session.sessionId, channel)
@@ -626,15 +754,25 @@ object SessionManager {
               }
               channels = channels.updated(channel, Active(activeState))
               replyTo ! Replaced(session)
-              log.info("[session] replaced channel={} prior={} next={} clients={} queuedGranted={}", ch(channel), priorSessionId, session.sessionId, clientCount(activeState), waiters.size)
+              log.info("[session] replaced channel={} prior={} next={} attempt={} clients={} queuedGranted={}", ch(channel), priorSessionId, session.sessionId, shortId(attemptId), clientCount(activeState), waiters.size)
             case Left(ex) =>
-              channels = channels.updated(channel, Replacing(state, priorSessionId, busy = false))
-              replyTo ! ReplaceFailed(ex)
+              channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid))
+              replyTo ! ReplaceFailed(Error.ReplaceOpenFailed(ch(channel), ex))
               if (isNoTuners(ex)) {
                 log.warn("[session] replace open no tuners channel={} prior={} clients={}", ch(channel), priorSessionId, clientCount(state))
                 requestTunerRefresh()
               } else
                 log.warn("[session] replace open failed channel={} prior={} clients={}", ch(channel), priorSessionId, clientCount(state), ex)
+          }
+        case Some(Replacing(_, prior, OpeningNext, _, aid)) if prior == priorSessionId && aid != attemptId =>
+          log.warn("[session] stale replace open attempt channel={} staleAttempt={} currentAttempt={}", ch(channel), shortId(attemptId), shortId(aid))
+          result.foreach { session =>
+            closeOrphan(channel, session.sessionId)
+          }
+        case Some(Replacing(_, prior, phase, _, _)) if prior == priorSessionId && phase != OpeningNext =>
+          result.foreach { session =>
+            log.warn("[session] late replace open after timeout channel={} sessionId={}", ch(channel), session.sessionId)
+            closeOrphan(channel, session.sessionId)
           }
         case _ =>
           result.foreach { session =>
@@ -643,20 +781,61 @@ object SessionManager {
           replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
       }
 
+    private def onReplaceTimedOut(channel: ChannelKey, priorSessionId: SessionId, attemptId: UUID): Unit =
+      channels.get(channel) match {
+        case Some(Replacing(state, prior, ClosingPrior, replyTo, aid)) if prior == priorSessionId && aid == attemptId =>
+          val ex = Error.ReplaceTimedOut(ch(channel))
+          log.warn("[session] replace close timed out channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
+          channels = channels.updated(channel, Replacing(state, priorSessionId, WaitingForLateClose, None, aid))
+          replyTo.foreach(_ ! ReplaceFailed(ex))
+        case Some(Replacing(state, prior, OpeningNext, replyTo, aid)) if prior == priorSessionId && aid == attemptId =>
+          val ex = Error.ReplaceTimedOut(ch(channel))
+          log.warn("[session] replace open timed out channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
+          channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid))
+          replyTo.foreach(_ ! ReplaceFailed(ex))
+        case _ => ()
+      }
+
+    private def onSessionUpdated(channel: ChannelKey, session: PlayerSession): Unit =
+      channels.get(channel) match {
+        case Some(Active(state)) =>
+          val previous = state.runtime.sessionId
+          if (previous != session.sessionId) {
+            sessionIndex = (sessionIndex - previous).updated(session.sessionId, channel)
+            val next = state.copy(runtime = state.runtime.copy(sessionId = session.sessionId))
+            channels = channels.updated(channel, Active(next))
+            log.info("[session] session id updated channel={} prior={} next={}", ch(channel), previous, session.sessionId)
+          }
+        case Some(Replacing(state, prior, phase, replyTo, aid)) =>
+          if (phase == ClosingPrior || phase == WaitingForLateClose)
+            log.debug("[session] ignore session update during replace close channel={} phase={} sessionId={}", ch(channel), phase, session.sessionId)
+          else {
+            val previous = state.runtime.sessionId
+            if (previous != session.sessionId) {
+              sessionIndex = (sessionIndex - previous).updated(session.sessionId, channel)
+              val next = state.copy(runtime = state.runtime.copy(sessionId = session.sessionId))
+              channels = channels.updated(channel, Replacing(next, prior, phase, replyTo, aid))
+              log.info("[session] session id updated during replace channel={} prior={} next={}", ch(channel), previous, session.sessionId)
+            }
+          }
+        case _ =>
+          log.debug("[session] ignore session update channel={} sessionId={}", ch(channel), session.sessionId)
+      }
+
     private def findAttachment(
       attachmentId: UUID
     ): Option[(ChannelKey, SessionEntry, SessionRuntimeState)] =
       channels.collectFirst {
         case (channel, entry @ Active(state)) if state.attachments.contains(attachmentId) =>
           (channel, entry, state)
-        case (channel, entry @ Replacing(state, _, _)) if state.attachments.contains(attachmentId) =>
+        case (channel, entry @ Replacing(state, _, _, _, _)) if state.attachments.contains(attachmentId) =>
           (channel, entry, state)
       }
 
     private def updateEntry(entry: SessionEntry, state: SessionRuntimeState): SessionEntry =
       entry match {
         case _: Active => Active(state)
-        case Replacing(_, prior, busy) => Replacing(state, prior, busy)
+        case Replacing(_, prior, phase, replyTo, aid) => Replacing(state, prior, phase, replyTo, aid)
         case other => other
       }
 
@@ -673,9 +852,11 @@ object SessionManager {
       failWaiters(channel, queued, ex)
 
     private def isNoTuners(ex: Throwable): Boolean =
-      ex == Error.NoAvailableTuners ||
-        ex == Tablo4thGen.Error.NoAvailableTuners ||
-        ex == TabloLegacy.Channel.Error.NoAvailableTuners ||
-        Option(ex.getMessage).exists(_.toLowerCase.contains("no available tuners"))
+      ex match {
+        case Error.NoAvailableTuners => true
+        case Tablo4thGen.Error.NoAvailableTuners => true
+        case TabloLegacy.Channel.Error.NoAvailableTuners => true
+        case other => Option(other.getMessage).exists(_.toLowerCase.contains("no available tuners"))
+      }
   }
 }

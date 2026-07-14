@@ -852,11 +852,17 @@ object TabloLegacy {
 
         def refreshTuners(): Future[Int] =
           HttpCtx.singleRequest(Request.Tuners.httpRequest).flatMap { response =>
-            import Response.Tuners.JsonProtocol.tunersFormat
-            Unmarshal(response.entity).to[String].map { body =>
-              val tuners = body.parseJson.convertTo[Seq[Response.Tuners]]
-              cachedTuners = math.max(1, tuners.size)
-              cachedTuners
+            if (response.status.isSuccess()) {
+              import Response.Tuners.JsonProtocol.tunersFormat
+              Unmarshal(response.entity).to[String].map { body =>
+                val tuners = body.parseJson.convertTo[Seq[Response.Tuners]]
+                cachedTuners = math.max(0, tuners.size)
+                cachedTuners
+              }
+            } else {
+              val _ = response.entity.discardBytes()
+              log.warn("[channel] legacy tuners refresh status={}", response.status.intValue())
+              Future.successful(cachedTuners)
             }
           }.recover {
             case ex =>
@@ -895,7 +901,7 @@ object TabloLegacy {
                   }
                 }
               }
-            case other => Future.failed(Error.UnsupportedChannel(other.toString))
+            case SessionManager.Gen4Channel(id) => Future.failed(Error.UnsupportedChannel(id))
           }
 
         def close(sessionId: SessionManager.SessionId): Future[Unit] =

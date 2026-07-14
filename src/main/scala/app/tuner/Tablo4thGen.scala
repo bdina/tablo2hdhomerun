@@ -55,6 +55,7 @@ object Tablo4thGen {
         extends Exception(s"session DELETE failed: $status $body") with Error
     case class SessionRequestFailed(method: String, status: Int)
         extends Exception(s"session $method failed: $status") with Error
+    case object MissingSessionToken extends Exception("watch response omitted session token") with Error
   }
 
   object Auth {
@@ -899,38 +900,47 @@ object Tablo4thGen {
             watchChannel(channelId).flatMap { data =>
               WatchSession.fromResponse(data) match {
                 case Right(session) =>
-                  val sessionId = session.token.getOrElse(java.util.UUID.randomUUID().toString)
-                  Future.successful(
-                    SessionManager.PlayerSession(
-                      sessionId = sessionId
-                    , playlistUrl = session.playlistUrl
-                    , expires = session.expires
-                    , keepalive = session.keepalive
-                    )
-                  )
+                  session.token match {
+                    case Some(sessionId) =>
+                      Future.successful(
+                        SessionManager.PlayerSession(
+                          sessionId = sessionId
+                        , playlistUrl = session.playlistUrl
+                        , expires = session.expires
+                        , keepalive = session.keepalive
+                        )
+                      )
+                    case None => Future.failed(Error.MissingSessionToken)
+                  }
                 case Left(message) => Future.failed(Error.InvalidWatchResponse(message))
               }
             }
-          case other => Future.failed(Error.UnsupportedChannel(other.toString))
+          case SessionManager.LegacyChannel(id) => Future.failed(Error.UnsupportedChannel(id.toString))
         }
 
       def close(sessionId: SessionManager.SessionId): Future[Unit] = endSession(sessionId)
 
       def keepalive(session: SessionManager.PlayerSession): Future[SessionManager.PlayerSession] =
         requestSession(WatchSession.keepalivePath(session.sessionId), HttpMethods.POST, Some(session.sessionId))
-          .map(toPlayerSession)
+          .flatMap(toPlayerSession)
 
       def fetch(session: SessionManager.PlayerSession): Future[SessionManager.PlayerSession] =
         requestSession(WatchSession.sessionPath(session.sessionId), HttpMethods.GET, Some(session.sessionId))
-          .map(toPlayerSession)
+          .flatMap(toPlayerSession)
 
-      private def toPlayerSession(session: WatchSession.Session): SessionManager.PlayerSession =
-        SessionManager.PlayerSession(
-          sessionId = session.token.getOrElse(java.util.UUID.randomUUID().toString)
-        , playlistUrl = session.playlistUrl
-        , expires = session.expires
-        , keepalive = session.keepalive
-        )
+      private def toPlayerSession(session: WatchSession.Session): Future[SessionManager.PlayerSession] =
+        session.token match {
+          case Some(sessionId) =>
+            Future.successful(
+              SessionManager.PlayerSession(
+                sessionId = sessionId
+              , playlistUrl = session.playlistUrl
+              , expires = session.expires
+              , keepalive = session.keepalive
+              )
+            )
+          case None => Future.failed(Error.MissingSessionToken)
+        }
 
       private def fetchServerInfo(): Future[Int] = {
         import Channel.Response.JsonProtocol._
@@ -974,7 +984,7 @@ object Tablo4thGen {
         , headers = headers.toList
         , entity = HttpEntity(ContentTypes.`application/json`, watchBody)
         )
-        log.info("[4thgen-channel] guide/channels/{}/watch (POST) - {}", channelId, watchUri)
+        log.info("[channel] guide/channels/{}/watch (POST) - {}", channelId, watchUri)
         HttpCtx.singleRequest(request).flatMap { response =>
           log.debug("[channel] watch status={} attempt={}", response.status.intValue(), attempt)
           response.status match {
