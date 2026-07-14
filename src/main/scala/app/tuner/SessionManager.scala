@@ -85,7 +85,17 @@ object SessionManager {
   ) extends Command
   private[tuner] final case class TunersUpdated(count: Int) extends Command
 
-  case object NoAvailableTunersError extends Exception("No available tuners")
+  sealed trait Error extends Exception
+  object Error {
+    case object NoAvailableTuners extends Exception("No available tuners") with Error
+    case class OpenTimedOut(channel: String) extends Exception(s"open timed out for $channel") with Error
+    case object UpstreamTerminated extends Exception("upstream terminated") with Error
+    case object ReplaceAlreadyInProgress extends Exception("replace already in progress") with Error
+    case class ReplaceNotActive(channel: String)
+        extends Exception(s"channel not active for replace: $channel") with Error
+    case class ReplaceStateChanged(channel: String)
+        extends Exception(s"channel left replacing state: $channel") with Error
+  }
 
   trait SessionBackend {
     def open(channel: ChannelKey): Future[PlayerSession]
@@ -150,7 +160,7 @@ object SessionManager {
   ): Behavior[Command] =
     Behaviors.setup { context =>
       Behaviors.withTimers { timers =>
-        val manager = new Manager(context, timers, backend, runtimeFactory, settings)
+        val manager = Manager(context, timers, backend, runtimeFactory, settings)
         context.pipeToSelf(backend.refreshTuners()) {
           case Success(tuners) => TunersUpdated(tuners)
           case Failure(ex) =>
@@ -161,7 +171,7 @@ object SessionManager {
       }
     }
 
-  private final class Manager(
+  private final case class Manager(
     context: ActorContext[Command]
   , timers: TimerScheduler[Command]
   , backend: SessionBackend
@@ -395,7 +405,7 @@ object SessionManager {
       channels.get(channel) match {
         case Some(Opening(id, waiters)) if id == reservationId =>
           channels = channels - channel
-          val ex = new java.util.concurrent.TimeoutException(s"open timed out for ${ch(channel)}")
+          val ex = Error.OpenTimedOut(ch(channel))
           log.warn(
             "[session] open timed out channel={} reservation={} waiters={} reserved={}"
           , ch(channel)
@@ -615,7 +625,7 @@ object SessionManager {
           )
           if (waiters.nonEmpty) {
             if (reservations >= cachedTuners) {
-              failWaiters(channel, waiters, NoAvailableTunersError)
+              failWaiters(channel, waiters, Error.NoAvailableTuners)
               requestTunerRefresh()
             } else {
               startOpening(channel, waiters)
@@ -639,7 +649,7 @@ object SessionManager {
           )
           if (waiters.nonEmpty) {
             if (reservations >= cachedTuners) {
-              failWaiters(channel, waiters, NoAvailableTunersError)
+              failWaiters(channel, waiters, Error.NoAvailableTuners)
               requestTunerRefresh()
             } else {
               startOpening(channel, waiters)
@@ -668,7 +678,7 @@ object SessionManager {
               , clientCount(state)
               )
           }
-          failQueued(channel, state.queued, cause.getOrElse(new RuntimeException("upstream terminated")))
+          failQueued(channel, state.queued, cause.getOrElse(Error.UpstreamTerminated))
           beginClosing(channel, state.runtime)
         case Some(Replacing(state, _, _)) =>
           cause match {
@@ -688,7 +698,7 @@ object SessionManager {
               , clientCount(state)
               )
           }
-          failQueued(channel, state.queued, cause.getOrElse(new RuntimeException("upstream terminated")))
+          failQueued(channel, state.queued, cause.getOrElse(Error.UpstreamTerminated))
           beginClosing(channel, state.runtime)
         case _ =>
           cause.foreach { ex =>
@@ -728,7 +738,7 @@ object SessionManager {
             , ch(channel)
             , priorSessionId
             )
-            replyTo ! ReplaceFailed(new IllegalStateException("replace already in progress"))
+            replyTo ! ReplaceFailed(Error.ReplaceAlreadyInProgress)
           } else {
             channels = channels.updated(channel, Replacing(state, priorSessionId, busy = true))
             log.info(
@@ -749,7 +759,7 @@ object SessionManager {
           , priorSessionId
           , other.map(_.getClass.getSimpleName).getOrElse("absent")
           )
-          replyTo ! ReplaceFailed(new IllegalStateException(s"channel not active for replace: ${ch(channel)}"))
+          replyTo ! ReplaceFailed(Error.ReplaceNotActive(ch(channel)))
       }
 
     private def onReplaceClosed(
@@ -771,7 +781,7 @@ object SessionManager {
           , ch(channel)
           , priorSessionId
           )
-          replyTo ! ReplaceFailed(new IllegalStateException(s"channel left replacing state: ${ch(channel)}"))
+          replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
       }
 
     private def onReplaceOpened(
@@ -826,7 +836,7 @@ object SessionManager {
           result.foreach { session =>
             closeOrphan(channel, session.sessionId)
           }
-          replyTo ! ReplaceFailed(new IllegalStateException(s"channel left replacing state: ${ch(channel)}"))
+          replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
       }
 
     private def findAttachment(
@@ -864,9 +874,9 @@ object SessionManager {
       failWaiters(channel, queued, ex)
 
     private def isNoTuners(ex: Throwable): Boolean =
-      ex == NoAvailableTunersError ||
+      ex == Error.NoAvailableTuners ||
         ex == Tablo4thGen.Error.NoAvailableTuners ||
-        ex == TabloLegacy.Channel.Response.NoAvailableTunersError ||
+        ex == TabloLegacy.Channel.Error.NoAvailableTuners ||
         Option(ex.getMessage).exists(_.toLowerCase.contains("no available tuners"))
   }
 }

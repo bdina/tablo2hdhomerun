@@ -47,6 +47,14 @@ object Tablo4thGen {
     case object NoDevicesFound extends Exception("No devices found in account") with Error
     case class SelectFailed(message: String) extends Exception(s"Select failed: $message") with Error
     case object NoAvailableTuners extends Exception("No available tuners") with Error
+    case class InvalidWatchResponse(message: String) extends Exception(message) with Error
+    case class UnsupportedChannel(channel: String) extends Exception(s"unsupported channel $channel") with Error
+    case class WatchFailed(status: Int, body: String)
+        extends Exception(s"watch failed: $status $body") with Error
+    case class SessionDeleteFailed(status: Int, body: String)
+        extends Exception(s"session DELETE failed: $status $body") with Error
+    case class SessionRequestFailed(method: String, status: Int)
+        extends Exception(s"session $method failed: $status") with Error
   }
 
   object Auth {
@@ -872,7 +880,7 @@ object Tablo4thGen {
         before.playlistUrl != after.playlistUrl
     }
 
-    final class SessionBackend(authContext: Auth.AuthContext)(implicit system: ActorSystem[?])
+    final case class SessionBackend(authContext: Auth.AuthContext)(implicit system: ActorSystem[?])
         extends SessionManager.SessionBackend {
       import pekko.http.scaladsl.unmarshalling.Unmarshal
       import org.apache.pekko.actor.typed.scaladsl.adapter._
@@ -900,10 +908,10 @@ object Tablo4thGen {
                     , keepalive = session.keepalive
                     )
                   )
-                case Left(message) => Future.failed(new RuntimeException(message))
+                case Left(message) => Future.failed(Error.InvalidWatchResponse(message))
               }
             }
-          case other => Future.failed(new IllegalArgumentException(s"unsupported channel $other"))
+          case other => Future.failed(Error.UnsupportedChannel(other.toString))
         }
 
       def close(sessionId: SessionManager.SessionId): Future[Unit] = endSession(sessionId)
@@ -978,9 +986,7 @@ object Tablo4thGen {
               Future.failed(Error.NoAvailableTuners)
             case status if !status.isSuccess() =>
               Unmarshal(response.entity).to[String].flatMap { body =>
-                Future.failed(
-                  new RuntimeException(s"watch failed: ${status.intValue()} ${LogConfig.truncate(body)}")
-                )
+                Future.failed(Error.WatchFailed(status.intValue(), LogConfig.truncate(body)))
               }
             case _ =>
               Unmarshal(response.entity).to[String].map { body =>
@@ -1003,9 +1009,7 @@ object Tablo4thGen {
           } else {
             Unmarshal(response.entity).to[String].flatMap { body =>
               Future.failed(
-                new RuntimeException(
-                  s"session DELETE failed: ${response.status.intValue()} ${LogConfig.truncate(body)}"
-                )
+                Error.SessionDeleteFailed(response.status.intValue(), LogConfig.truncate(body))
               )
             }
           }
@@ -1033,12 +1037,12 @@ object Tablo4thGen {
             Unmarshal(response.entity).to[String].flatMap { body =>
               parseSessionResponse(body, fallbackToken) match {
                 case Right(session) => Future.successful(session)
-                case Left(message) => Future.failed(new RuntimeException(message))
+                case Left(message) => Future.failed(Error.InvalidWatchResponse(message))
               }
             }
           } else {
             val _ = response.entity.discardBytes()
-            Future.failed(new RuntimeException(s"session ${method.value} failed: ${response.status.intValue()}"))
+            Future.failed(Error.SessionRequestFailed(method.value, response.status.intValue()))
           }
         }
       }

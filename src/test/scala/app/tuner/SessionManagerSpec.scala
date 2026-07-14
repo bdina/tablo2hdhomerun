@@ -38,10 +38,13 @@ class SessionManagerSpec
   private def player(id: String): PlayerSession =
     PlayerSession(id, s"http://example/$id.m3u8", None, Some(30))
 
-  private final class StubBackend(
+  private final case class TestFailure(message: String) extends Exception(message)
+
+  private final case class StubBackend(
     openImpl: ChannelKey => Future[PlayerSession]
-  , var tuners: Int = 2
+  , initialTuners: Int = 2
   ) extends SessionBackend {
+    @volatile var tuners: Int = initialTuners
     val openCount = new AtomicInteger(0)
     val closeCount = new AtomicInteger(0)
     val closedIds = new AtomicReference(Vector.empty[String])
@@ -62,7 +65,7 @@ class SessionManagerSpec
     def refreshTuners(): Future[Int] = Future.successful(tuners)
   }
 
-  private final class StubRuntimeFactory(
+  private final case class StubRuntimeFactory(
     sourceFactory: () => Source[ByteString, NotUsed] =
       () => Source.never[ByteString].mapMaterializedValue(_ => NotUsed)
   ) extends RuntimeFactory {
@@ -85,12 +88,78 @@ class SessionManagerSpec
     }
   }
 
+  private final case class CapturingRuntimeFactory(
+    onTerminatedRef: AtomicReference[Option[Throwable] => Unit] =
+      new AtomicReference[Option[Throwable] => Unit](_ => ())
+  , replaceFnRef: AtomicReference[(SessionId, ActorRef[ReplaceResult]) => Unit] =
+      new AtomicReference[(SessionId, ActorRef[ReplaceResult]) => Unit]((_, _) => ())
+  ) extends RuntimeFactory {
+    def start(
+      channel: ChannelKey
+    , session: PlayerSession
+    , onTerminated: Option[Throwable] => Unit
+    , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
+    , backpressureTimeout: FiniteDuration
+    ): SessionRuntime = {
+      onTerminatedRef.set(onTerminated)
+      replaceFnRef.set(requestReplace)
+      SessionRuntime(
+        session.sessionId
+      , Source.never[ByteString].mapMaterializedValue(_ => NotUsed)
+      , () => ()
+      )
+    }
+  }
+
+  private final case class EventRecordingBackend(
+    events: AtomicReference[Vector[String]] = new AtomicReference(Vector.empty[String])
+  , tuners: Int = 2
+  ) extends SessionBackend {
+    def open(channel: ChannelKey): Future[PlayerSession] = {
+      events.getAndUpdate(_ :+ "open")
+      val n = events.get().count(_ == "open")
+      Future.successful(player(s"tok-$n"))
+    }
+    def close(sessionId: SessionId): Future[Unit] = {
+      events.getAndUpdate(_ :+ s"close:$sessionId")
+      Future.successful(())
+    }
+    def totalTuners: Int = tuners
+    def refreshTuners(): Future[Int] = Future.successful(tuners)
+  }
+
+  private final case class GatedOpenBackend(
+    openResults: AtomicReference[Vector[Promise[PlayerSession]]] =
+      new AtomicReference(Vector.empty[Promise[PlayerSession]])
+  , tuners: Int = 2
+  ) extends SessionBackend {
+    def open(channel: ChannelKey): Future[PlayerSession] = {
+      val promise = Promise[PlayerSession]()
+      openResults.getAndUpdate(_ :+ promise)
+      promise.future
+    }
+    def close(sessionId: SessionId): Future[Unit] = Future.successful(())
+    def totalTuners: Int = tuners
+    def refreshTuners(): Future[Int] = Future.successful(tuners)
+  }
+
+  private final case class DeferredRefreshBackend(
+    refreshGate: Promise[Int]
+  , tuners: Int = 4
+  ) extends SessionBackend {
+    def open(channel: ChannelKey): Future[PlayerSession] =
+      Future.successful(player("tok"))
+    def close(sessionId: SessionId): Future[Unit] = Future.successful(())
+    def totalTuners: Int = tuners
+    def refreshTuners(): Future[Int] = refreshGate.future
+  }
+
   "SessionManager" should {
 
     "share one opener for concurrent same-channel acquires" in {
       val openGate = Promise[PlayerSession]()
-      val backend = new StubBackend(_ => openGate.future, tuners = 2)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => openGate.future, initialTuners = 2)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe1 = createTestProbe[AcquireResult]()
       val probe2 = createTestProbe[AcquireResult]()
@@ -107,11 +176,11 @@ class SessionManagerSpec
     }
 
     "reject an extra distinct channel when at capacity" in {
-      val backend = new StubBackend(
+      val backend = StubBackend(
         { case Gen4Channel(id) => Future.successful(player(s"tok-$id")) }
-      , tuners = 1
+      , initialTuners = 1
       )
-      val runtime = new StubRuntimeFactory()
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val first = createTestProbe[AcquireResult]()
       val second = createTestProbe[AcquireResult]()
@@ -127,8 +196,8 @@ class SessionManagerSpec
 
     "count Opening reservations toward capacity" in {
       val gate = Promise[PlayerSession]()
-      val backend = new StubBackend(_ => gate.future, tuners = 1)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => gate.future, initialTuners = 1)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val first = createTestProbe[AcquireResult]()
       val second = createTestProbe[AcquireResult]()
@@ -144,8 +213,8 @@ class SessionManagerSpec
     }
 
     "fail waiters when open fails with no tuners" in {
-      val backend = new StubBackend(_ => Future.failed(NoAvailableTunersError), tuners = 2)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => Future.failed(Error.NoAvailableTuners), initialTuners = 2)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch1"), probe.ref)
@@ -153,8 +222,8 @@ class SessionManagerSpec
     }
 
     "keep session active after one of two attachments ends" in {
-      val backend = new StubBackend(_ => Future.successful(player("tok")), tuners = 2)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => Future.successful(player("tok")), initialTuners = 2)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val p1 = createTestProbe[AcquireResult]()
       val p2 = createTestProbe[AcquireResult]()
@@ -177,8 +246,8 @@ class SessionManagerSpec
     }
 
     "close exactly once when last attachment ends" in {
-      val backend = new StubBackend(_ => Future.successful(player("tok-last")), tuners = 2)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => Future.successful(player("tok-last")), initialTuners = 2)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), probe.ref)
@@ -193,8 +262,8 @@ class SessionManagerSpec
     }
 
     "expire a never-materialized attachment and close the session" in {
-      val backend = new StubBackend(_ => Future.successful(player("tok-exp")), tuners = 2)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => Future.successful(player("tok-exp")), initialTuners = 2)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), probe.ref)
@@ -206,8 +275,8 @@ class SessionManagerSpec
     }
 
     "ignore duplicate attachment end messages" in {
-      val backend = new StubBackend(_ => Future.successful(player("tok-dup")), tuners = 2)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => Future.successful(player("tok-dup")), initialTuners = 2)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), probe.ref)
@@ -223,31 +292,15 @@ class SessionManagerSpec
     }
 
     "close once on upstream termination" in {
-      val backend = new StubBackend(_ => Future.successful(player("tok-up")), tuners = 2)
-      var terminate: Option[Throwable] => Unit = _ => ()
-      val runtime = new RuntimeFactory {
-        def start(
-          channel: ChannelKey
-        , session: PlayerSession
-        , onTerminated: Option[Throwable] => Unit
-        , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
-        , backpressureTimeout: FiniteDuration
-        ): SessionRuntime = {
-          terminate = onTerminated
-          SessionRuntime(
-            session.sessionId
-          , Source.never[ByteString].mapMaterializedValue(_ => NotUsed)
-          , () => ()
-          )
-        }
-      }
+      val backend = StubBackend(_ => Future.successful(player("tok-up")), initialTuners = 2)
+      val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
-      terminate(Some(new RuntimeException("boom")))
+      runtime.onTerminatedRef.get().apply(Some(TestFailure("boom")))
       eventually {
         backend.closeCount.get() shouldBe 1
       }
@@ -255,37 +308,8 @@ class SessionManagerSpec
     }
 
     "replace closes old session before opening the next" in {
-      val events = new AtomicReference(Vector.empty[String])
-      val backend = new SessionBackend {
-        def open(channel: ChannelKey): Future[PlayerSession] = {
-          events.getAndUpdate(_ :+ "open")
-          val n = events.get().count(_ == "open")
-          Future.successful(player(s"tok-$n"))
-        }
-        def close(sessionId: SessionId): Future[Unit] = {
-          events.getAndUpdate(_ :+ s"close:$sessionId")
-          Future.successful(())
-        }
-        def totalTuners: Int = 2
-        def refreshTuners(): Future[Int] = Future.successful(2)
-      }
-      var replaceFn: (SessionId, ActorRef[ReplaceResult]) => Unit = (_, _) => ()
-      val runtime = new RuntimeFactory {
-        def start(
-          channel: ChannelKey
-        , session: PlayerSession
-        , onTerminated: Option[Throwable] => Unit
-        , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
-        , backpressureTimeout: FiniteDuration
-        ): SessionRuntime = {
-          replaceFn = requestReplace
-          SessionRuntime(
-            session.sessionId
-          , Source.never[ByteString].mapMaterializedValue(_ => NotUsed)
-          , () => ()
-          )
-        }
-      }
+      val backend = EventRecordingBackend()
+      val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), probe.ref)
@@ -293,11 +317,11 @@ class SessionManagerSpec
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
       val replaceProbe = createTestProbe[ReplaceResult]()
-      replaceFn("tok-1", replaceProbe.ref)
+      runtime.replaceFnRef.get().apply("tok-1", replaceProbe.ref)
       val replaced = replaceProbe.expectMessageType[Replaced]
       replaced.session.sessionId shouldBe "tok-2"
       eventually {
-        val e = events.get()
+        val e = backend.events.get()
         val closeIdx = e.indexWhere(_.startsWith("close:tok-1"))
         val secondOpen = e.zipWithIndex.collect { case ("open", i) if i > 0 => i }.head
         closeIdx should be < secondOpen
@@ -306,11 +330,11 @@ class SessionManagerSpec
     }
 
     "block new opens after capacity decreases without ending active sessions" in {
-      val backend = new StubBackend(
+      val backend = StubBackend(
         { case Gen4Channel(id) => Future.successful(player(s"tok-$id")) }
-      , tuners = 2
+      , initialTuners = 2
       )
-      val runtime = new StubRuntimeFactory()
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val a = createTestProbe[AcquireResult]()
       val b = createTestProbe[AcquireResult]()
@@ -336,14 +360,14 @@ class SessionManagerSpec
       val firstOpen = Promise[PlayerSession]()
       val secondOpen = Promise[PlayerSession]()
       val openCalls = new AtomicInteger(0)
-      val backend = new StubBackend(
+      val backend = StubBackend(
         _ => {
           if (openCalls.incrementAndGet() == 1) firstOpen.future
           else secondOpen.future
         }
-      , tuners = 1
+      , initialTuners = 1
       )
-      val runtime = new StubRuntimeFactory()
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings.copy(openTimeout = 100.millis)))
       val first = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), first.ref)
@@ -365,64 +389,38 @@ class SessionManagerSpec
     }
 
     "retry replace open after a transient failure" in {
-      val openResults = new AtomicReference(Vector.empty[Promise[PlayerSession]])
-      val backend = new SessionBackend {
-        def open(channel: ChannelKey): Future[PlayerSession] = {
-          val promise = Promise[PlayerSession]()
-          openResults.getAndUpdate(_ :+ promise)
-          promise.future
-        }
-        def close(sessionId: SessionId): Future[Unit] = Future.successful(())
-        def totalTuners: Int = 2
-        def refreshTuners(): Future[Int] = Future.successful(2)
-      }
-      var replaceFn: (SessionId, ActorRef[ReplaceResult]) => Unit = (_, _) => ()
-      val runtime = new RuntimeFactory {
-        def start(
-          channel: ChannelKey
-        , session: PlayerSession
-        , onTerminated: Option[Throwable] => Unit
-        , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
-        , backpressureTimeout: FiniteDuration
-        ): SessionRuntime = {
-          replaceFn = requestReplace
-          SessionRuntime(
-            session.sessionId
-          , Source.never[ByteString].mapMaterializedValue(_ => NotUsed)
-          , () => ()
-          )
-        }
-      }
+      val backend = GatedOpenBackend()
+      val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), probe.ref)
       eventually {
-        openResults.get().size shouldBe 1
+        backend.openResults.get().size shouldBe 1
       }
-      openResults.get().head.success(player("tok-1"))
+      backend.openResults.get().head.success(player("tok-1"))
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
       val failProbe = createTestProbe[ReplaceResult]()
-      replaceFn("tok-1", failProbe.ref)
+      runtime.replaceFnRef.get().apply("tok-1", failProbe.ref)
       eventually {
-        openResults.get().size shouldBe 2
+        backend.openResults.get().size shouldBe 2
       }
-      openResults.get()(1).failure(new RuntimeException("transient"))
+      backend.openResults.get()(1).failure(TestFailure("transient"))
       failProbe.expectMessageType[ReplaceFailed]
       val retryProbe = createTestProbe[ReplaceResult]()
-      replaceFn("tok-1", retryProbe.ref)
+      runtime.replaceFnRef.get().apply("tok-1", retryProbe.ref)
       eventually {
-        openResults.get().size shouldBe 3
+        backend.openResults.get().size shouldBe 3
       }
-      openResults.get()(2).success(player("tok-2"))
+      backend.openResults.get()(2).success(player("tok-2"))
       retryProbe.expectMessageType[Replaced].session.sessionId shouldBe "tok-2"
       control.cancel()
     }
 
     "queue acquire during closing and reopen after close completes" in {
-      val backend = new StubBackend(_ => Future.successful(player("tok-reopen")), tuners = 1)
-      val runtime = new StubRuntimeFactory()
+      val backend = StubBackend(_ => Future.successful(player("tok-reopen")), initialTuners = 1)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val first = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), first.ref)
@@ -443,14 +441,8 @@ class SessionManagerSpec
 
     "apply TunersUpdated before admitting opens" in {
       val refreshGate = Promise[Int]()
-      val backend = new SessionBackend {
-        def open(channel: ChannelKey): Future[PlayerSession] =
-          Future.successful(player("tok"))
-        def close(sessionId: SessionId): Future[Unit] = Future.successful(())
-        def totalTuners: Int = 4
-        def refreshTuners(): Future[Int] = refreshGate.future
-      }
-      val runtime = new StubRuntimeFactory()
+      val backend = DeferredRefreshBackend(refreshGate)
+      val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("ch"), probe.ref)

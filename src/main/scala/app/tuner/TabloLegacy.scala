@@ -784,6 +784,15 @@ object TabloLegacy {
     }
 
     object Channel {
+      sealed trait Error extends Exception
+      object Error {
+        case object NoAvailableTuners extends Exception("No available tuners") with Error
+        case class UnsupportedChannel(channel: String)
+            extends Exception(s"unsupported channel $channel") with Error
+        case class WatchFailed(status: Int, body: String)
+            extends Exception(s"legacy watch failed: $status $body") with Error
+      }
+
       object Request {
         case class WatchRequest(
           bandwidth: Int = 1000
@@ -820,7 +829,6 @@ object TabloLegacy {
         , bif_url_hd: Option[Uri]
         , video_details: VideoDetails
         )
-        case object NoAvailableTunersError extends Exception("No available tuners")
         object JsonProtocol {
           import TabloLegacy.Response.JsonProtocol.uriFormat
           implicit val videoDetailsFormat: JsonFormat[VideoDetails] = jsonFormat2(VideoDetails.apply)
@@ -836,7 +844,7 @@ object TabloLegacy {
         }
       }
 
-      final class SessionBackend()(implicit system: ActorSystem[?]) extends SessionManager.SessionBackend {
+      final case class SessionBackend()(implicit system: ActorSystem[?]) extends SessionManager.SessionBackend {
         implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
         @volatile private var cachedTuners: Int = 4
 
@@ -872,7 +880,7 @@ object TabloLegacy {
                 )
                 if (response.status == StatusCodes.ServiceUnavailable) {
                   val _ = response.entity.discardBytes()
-                  Future.failed(Response.NoAvailableTunersError)
+                  Future.failed(Error.NoAvailableTuners)
                 } else if (response.status.isSuccess()) {
                   Unmarshal(response.entity).to[String].map { body =>
                     val data = body.parseJson.convertTo[Response.WatchResponse]
@@ -886,14 +894,12 @@ object TabloLegacy {
                 } else {
                   Unmarshal(response.entity).to[String].flatMap { body =>
                     Future.failed(
-                      new RuntimeException(
-                        s"legacy watch failed: ${response.status.intValue()} ${LogConfig.truncate(body)}"
-                      )
+                      Error.WatchFailed(response.status.intValue(), LogConfig.truncate(body))
                     )
                   }
                 }
               }
-            case other => Future.failed(new IllegalArgumentException(s"unsupported channel $other"))
+            case other => Future.failed(Error.UnsupportedChannel(other.toString))
           }
 
         def close(sessionId: SessionManager.SessionId): Future[Unit] =

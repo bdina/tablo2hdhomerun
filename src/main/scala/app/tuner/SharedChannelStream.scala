@@ -39,33 +39,37 @@ object SharedChannelStream {
   , fetch: PlayerSession => Future[PlayerSession]
   )
 
+  final case class SharedRuntimeFactory(
+    keepaliveOpsFor: ChannelKey => Option[KeepaliveOps]
+  )(implicit system: ActorSystem[?]) extends RuntimeFactory {
+    def start(
+      channel: ChannelKey
+    , session: PlayerSession
+    , onTerminated: Option[Throwable] => Unit
+    , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
+    , backpressureTimeout: FiniteDuration
+    ): SessionRuntime = {
+      implicit val mat: Materializer = Materializer(system)
+      implicit val ec: ExecutionContext = system.executionContext
+      val label = channel match {
+        case Gen4Channel(id) => s"4thgen-channel-$id"
+        case LegacyChannel(id) => s"legacy-channel-$id"
+      }
+      startShared(
+        channelLabel = label
+      , firstSession = session
+      , keepaliveOps = keepaliveOpsFor(channel)
+      , onTerminated = onTerminated
+      , requestReplace = requestReplace
+      , backpressureTimeout = backpressureTimeout
+      )
+    }
+  }
+
   def runtimeFactory(
     keepaliveOpsFor: ChannelKey => Option[KeepaliveOps]
   )(implicit system: ActorSystem[?]): RuntimeFactory =
-    new RuntimeFactory {
-      def start(
-        channel: ChannelKey
-      , session: PlayerSession
-      , onTerminated: Option[Throwable] => Unit
-      , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
-      , backpressureTimeout: FiniteDuration
-      ): SessionRuntime = {
-        implicit val mat: Materializer = Materializer(system)
-        implicit val ec: ExecutionContext = system.executionContext
-        val label = channel match {
-          case Gen4Channel(id) => s"4thgen-channel-$id"
-          case LegacyChannel(id) => s"legacy-channel-$id"
-        }
-        startShared(
-          channelLabel = label
-        , firstSession = session
-        , keepaliveOps = keepaliveOpsFor(channel)
-        , onTerminated = onTerminated
-        , requestReplace = requestReplace
-        , backpressureTimeout = backpressureTimeout
-        )
-      }
-    }
+    SharedRuntimeFactory(keepaliveOpsFor)
 
   def startShared(
     channelLabel: String
