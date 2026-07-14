@@ -4,6 +4,8 @@
 
 Tablo2HDHomeRun is an HTTP proxy server that exposes a TabloTV DVR device as an HDHomeRun-compatible tuner. This allows applications and media servers that support HDHomeRun devices (like Plex, Jellyfin, or Channels DVR) to stream live TV from a Tablo device.
 
+Live channel sessions and tuner capacity are described in [session-sharing.md](session-sharing.md).
+
 ## Technology Stack
 
 | Component | Technology |
@@ -36,7 +38,7 @@ Tablo2HDHomeRun is an HTTP proxy server that exposes a TabloTV DVR device as an 
 │  │  /discover.json │  │  LineupActor     │  │  FFmpeg or HLS backend     │ │
 │  │  /lineup.json   │  │  GuideActor      │  │  (STREAM_BACKEND env)      │ │
 │  │  /lineup_status │  │  FsMonitor       │  │  Chunked HTTP streaming     │ │
-│  │  /channel/{id}  │  │  FsNotify        │  │                             │ │
+│  │  /channel/{id}  │  │  SessionManager  │  │  Shared BroadcastHub        │ │
 │  │  /guide.xml     │  │  FFMpegDelegate  │  │                             │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
@@ -138,17 +140,21 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
 
 ```
 1. Client requests GET /channel/{channelId}
-2. Proxy checks tuner availability via GET /server/tuners
-3. If tuner available:
-   a. POST /guide/channels/{id}/watch to Tablo
-   b. Receive watch response with HLS playlist URL, expiry, and keepalive metadata
-   c. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
-   d. 4th gen: periodically POST /player/sessions/{token}/keepalive while the client stream is active
-   e. 4th gen recovery retunes via `/watch` when the HLS session stalls, expires, or degrades
-   f. Stream output as chunked HTTP response
-   g. On client disconnect, DELETE /player/sessions/{token} to release the Tablo tuner and cancel keepalive
-4. If no tuners: return 500 error
+2. Proxy asks SessionManager to acquire the channel
+3. If the channel already has an active player session:
+   a. Attach the client to the shared BroadcastHub source
+4. Else if capacity reservations are below totalTuners:
+   a. Reserve one local tuner slot (Opening)
+   b. POST /guide/channels/{id}/watch to Tablo
+   c. Materialize one shared HLS/FFmpeg upstream into a BroadcastHub
+   d. 4th gen: keepalive once per session (not per client)
+   e. Reply with an attachment source to each waiting client
+5. Else or Tablo returns 503: respond with HTTP 503 No available tuners
+6. On last client disconnect: stop upstream, DELETE player session (4th gen), free reservation
 ```
+
+Same-channel clients share one Tablo player session. Distinct channels each consume one reservation.
+See [session-sharing.md](session-sharing.md) for the state machine and edge cases.
 
 ### Program Guide Workflow
 

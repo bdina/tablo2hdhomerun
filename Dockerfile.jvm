@@ -25,6 +25,11 @@ WORKDIR ${OPENJDK_WORKDIR}
 # Copy the entire project and build it
 # This layer is rebuilt when a file changes in the project directory
 COPY . ${OPENJDK_WORKDIR}
+
+FROM build AS test
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon test
+
+FROM build AS jar
 RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon shadowJar
 
 # This results in a single layer image
@@ -38,7 +43,7 @@ ENV PATH=${tablo2hdhomerun_HOME}/bin:${PATH}
 
 WORKDIR ${tablo2hdhomerun_HOME}
 
-COPY --from=build ${OPENJDK_WORKDIR}/tablo2hdhomerun* ${OPENJDK_WORKDIR}/build/libs/* ${tablo2hdhomerun_HOME}/
+COPY --from=jar ${OPENJDK_WORKDIR}/tablo2hdhomerun* ${OPENJDK_WORKDIR}/build/libs/* ${tablo2hdhomerun_HOME}/
 
 # And we finally create the application layer
 FROM tablo2hdhomerun-base AS tablo2hdhomerun

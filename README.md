@@ -108,6 +108,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 
 - [Architecture Guide](docs/ARCHITECTURE.md) - System design, components, and data flows
 - [Usage Guide](docs/USAGE.md) - Deployment, configuration, and troubleshooting
+- [Tuner Session Sharing Design](docs/session-sharing.md) - Shared channel sessions and tuner capacity
 - [OpenAPI: Legacy Tablo API](docs/openapi/tablo-legacy.yaml) - Legacy Tablo TV device native API specification
 - [OpenAPI: Tablo 4th Gen API](docs/openapi/tablo-4thgen.yaml) - Tablo 4th Generation API specification (cloud + local device)
 - [Tablo 4th Gen API Guide](docs/tablo-api-guide.md) - Authentication, workflows, and PCAP regeneration

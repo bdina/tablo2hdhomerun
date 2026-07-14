@@ -310,10 +310,11 @@ docker run -d \
 
 ### Stream Won't Start
 
-1. Check tuner availability (legacy: `curl http://<tablo-ip>:8885/server/tuners`; 4th gen tuners are managed via player sessions)
-2. If using `STREAM_BACKEND=ffmpeg`: verify FFmpeg is installed (`ffmpeg -version`). The default `hls` backend does not require FFmpeg
-3. Check for concurrent recording conflicts
-
+1. Check whether all Tablo tuners are in use (`HTTP 503` from the proxy means no available session capacity)
+2. Legacy: inspect slots with `curl http://<tablo-ip>:8885/server/tuners`; 4th gen capacity comes from `/server/info` and player sessions
+3. If using `STREAM_BACKEND=ffmpeg`: verify FFmpeg is installed (`ffmpeg -version`). The default `hls` backend does not require FFmpeg
+4. Check for concurrent recording conflicts on the Tablo itself
+5. Confirm another client is not already holding a different channel on every tuner
 ### Container Issues
 
 ```bash
@@ -387,9 +388,8 @@ For systems with limited memory, these can be adjusted at build time in `build.g
 
 ### Concurrent Streams
 
-The number of concurrent streams is limited by:
-1. Available Tablo tuners
-2. Network bandwidth
-3. FFmpeg process overhead
+The number of **distinct channel sessions** is limited by available Tablo tuners (plus network and stream-backend overhead). Multiple clients tuned to the **same channel** share one Tablo player session via a broadcast hub; they do not each consume a tuner.
 
-Typically, one tuner per concurrent stream is required.
+When all tuners are reserved, `GET /channel/{id}` for a new channel returns HTTP `503 Service Unavailable`. Late subscribers on an existing channel receive future live bytes only (no replay). A stalled HTTP client is detached with a backpressure timeout so it cannot pause every other viewer on that channel.
+
+See [session-sharing.md](session-sharing.md) for the full design.

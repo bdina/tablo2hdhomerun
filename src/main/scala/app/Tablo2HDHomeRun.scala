@@ -133,10 +133,40 @@ object Tablo2HDHomeRun {
         implicit val sys: ActorSystem[?] = context.system
         val authContext = app.tuner.Tablo4thGen.Auth.initialize(tabloAuth)
         val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
-        app.tuner.Tablo4thGen.routes(lineup, authContext)
+        val sessionBackend = new app.tuner.Tablo4thGen.Channel.SessionBackend(authContext)
+        val _ = sessionBackend.refreshTuners()
+        val runtimeFactory = app.tuner.SharedChannelStream.runtimeFactory {
+          case app.tuner.SessionManager.Gen4Channel(_) =>
+            Some(
+              app.tuner.SharedChannelStream.KeepaliveOps(
+                sessionBackend.keepalive
+              , sessionBackend.fetch
+              )
+            )
+          case _ => None
+        }
+        val sessionManager =
+          context.spawn(
+            app.tuner.SessionManager(sessionBackend, runtimeFactory)
+          , "session-manager-4thgen"
+          )
+        app.tuner.Tablo4thGen.routes(lineup, authContext, sessionManager)
       case TabloGen.Legacy =>
+        implicit val sys: ActorSystem[?] = context.system
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
-        Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route ~ Guide.route ~ Favicon.route
+        val sessionBackend = new Channel.SessionBackend()
+        val _ = sessionBackend.refreshTuners()
+        val runtimeFactory = app.tuner.SharedChannelStream.runtimeFactory(_ => None)
+        val sessionManager =
+          context.spawn(
+            app.tuner.SessionManager(sessionBackend, runtimeFactory)
+          , "session-manager-legacy"
+          )
+        Response.Discover.route ~
+        Lineup.route(lineup) ~
+        Channel.route(sessionManager) ~
+        Guide.route ~
+        Favicon.route
     }
 
     startHttp(config, routes, daemon)
