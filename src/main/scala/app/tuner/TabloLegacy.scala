@@ -870,14 +870,27 @@ object TabloLegacy {
                 , channelId
                 , response.status.intValue()
                 )
-                Unmarshal(response.entity).to[String].map { body =>
-                  val data = body.parseJson.convertTo[Response.WatchResponse]
-                  SessionManager.PlayerSession(
-                    sessionId = data.token
-                  , playlistUrl = data.playlist_url.toString
-                  , expires = scala.util.Try(java.time.Instant.parse(data.expires)).toOption
-                  , keepalive = Some(data.keepalive)
-                  )
+                if (response.status == StatusCodes.ServiceUnavailable) {
+                  val _ = response.entity.discardBytes()
+                  Future.failed(Response.NoAvailableTunersError)
+                } else if (response.status.isSuccess()) {
+                  Unmarshal(response.entity).to[String].map { body =>
+                    val data = body.parseJson.convertTo[Response.WatchResponse]
+                    SessionManager.PlayerSession(
+                      sessionId = data.token
+                    , playlistUrl = data.playlist_url.toString
+                    , expires = scala.util.Try(java.time.Instant.parse(data.expires)).toOption
+                    , keepalive = Some(data.keepalive)
+                    )
+                  }
+                } else {
+                  Unmarshal(response.entity).to[String].flatMap { body =>
+                    Future.failed(
+                      new RuntimeException(
+                        s"legacy watch failed: ${response.status.intValue()} ${LogConfig.truncate(body)}"
+                      )
+                    )
+                  }
                 }
               }
             case other => Future.failed(new IllegalArgumentException(s"unsupported channel $other"))

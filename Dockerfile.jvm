@@ -29,7 +29,7 @@ COPY . ${OPENJDK_WORKDIR}
 FROM build AS test
 RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon test
 
-FROM build AS jar
+FROM test AS jar
 RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon shadowJar
 
 # This results in a single layer image

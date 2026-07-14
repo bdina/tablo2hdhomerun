@@ -156,8 +156,10 @@ passing the capacity check while earlier opens are unresolved.
 - Retain the old token in the session-ID index until its DELETE succeeds or reaches a bounded timeout, then remove it.
 - Issue the replacement watch only after the close step finishes.
 - On replacement success, add the new token to the index and return to `Active`.
-- A transient replacement failure keeps the `Replacing` reservation while `ResilientHlsSource` retries.
+- A transient replacement failure clears the in-flight flag, keeps the `Replacing` reservation, and lets
+  `ResilientHlsSource` retry replacement open without re-closing the already deleted prior session.
 - If recovery reaches its terminal timeout, terminate the shared stream, fail queued acquires, and clean up the entry.
+- Acquires during `Closing` are queued and reopened after close completes when capacity allows.
 
 All true replacement requests go through `SessionManager`, which owns close-before-open ordering and the session-ID
 index. `SharedChannelStream` requests replacement and receives the resulting session asynchronously.
@@ -245,13 +247,19 @@ Session lifecycle uses the `[session]` prefix. Shared upstream events use `[shar
 | Session open / active / close | info | `channel`, `sessionId`, `clients`, `reserved`, `total` |
 | Capacity rejection / open failure / replace failure | warn | `channel`, reason/exception |
 
-`shared=true` and `clients>1` indicate more than one HTTP client on the same Tablo player session.
+On disconnect, `shared=true` means the session had more than one client before this disconnect. `clientsRemaining`
+is the post-disconnect count. On connect/grant, `shared=true` and `clients>1` mean multiple clients are currently
+attached.
+
+SessionManager refreshes tuner capacity at startup and gates acquires until that refresh completes. Later refreshes
+are applied through an actor mailbox message after capacity-related failures.
 
 ## Legacy support
 
-Deliver legacy support as milestone two of the same implementation. Use the same manager with `LegacyChannel`. The
-legacy watch-response token is its `SessionId`. The current legacy implementation has no keepalive or DELETE behavior,
-so teardown only stops the shared stream.
+Legacy Tablo uses the same `SessionManager` with `LegacyChannel`. The watch-response token is its `SessionId`. Legacy
+has no keepalive or DELETE behavior, so teardown only stops the shared stream. HLS recovery requests a close-first
+replacement watch through `SessionManager`, matching previous self-heal behavior. Legacy watch HTTP 503 maps to
+`NoAvailableTuners` (proxy HTTP 503).
 
 ## Expected files
 

@@ -78,14 +78,20 @@ object SharedChannelStream {
     val currentSession = new AtomicReference(firstSession)
     val streamKillSwitch = new AtomicReference[Option[UniqueKillSwitch]](None)
     val leaseStopped = new AtomicBoolean(false)
+    val replaceInProgress = new AtomicBoolean(false)
+    val firstStreamAttempt = new AtomicBoolean(true)
     @volatile var keepaliveTask: Option[org.apache.pekko.actor.Cancellable] = None
     var keepaliveMissingLogged = false
     val terminatedReported = new AtomicBoolean(false)
 
-    def cancelKeepalive(): Unit = {
-      leaseStopped.set(true)
+    def pauseKeepalive(): Unit = {
       keepaliveTask.foreach(_.cancel())
       keepaliveTask = None
+    }
+
+    def cancelKeepalive(): Unit = {
+      leaseStopped.set(true)
+      pauseKeepalive()
     }
 
     def reportTerminated(cause: Option[Throwable]): Unit =
@@ -101,7 +107,7 @@ object SharedChannelStream {
       }
 
     def scheduleKeepaliveRetry(): Unit =
-      if (!leaseStopped.get() && keepaliveOps.isDefined) {
+      if (!leaseStopped.get() && !replaceInProgress.get() && keepaliveOps.isDefined) {
         import org.apache.pekko.actor.typed.scaladsl.adapter._
         log.debug("[shared] keepalive retry scheduled label={}", channelLabel)
         keepaliveTask = Some(
@@ -111,39 +117,58 @@ object SharedChannelStream {
         )
       }
 
+    def applySessionUpdate(requested: PlayerSession, updated: PlayerSession): Boolean = {
+      val current = currentSession.get()
+      if (current.sessionId == requested.sessionId) {
+        currentSession.set(updated)
+        true
+      } else {
+        log.debug(
+          "[shared] ignore stale session update label={} requested={} current={}"
+        , channelLabel
+        , requested.sessionId
+        , current.sessionId
+        )
+        false
+      }
+    }
+
     def runKeepalive(): Unit =
       keepaliveOps.foreach { ops =>
-        if (!leaseStopped.get())
-          ops.keepalive(currentSession.get()).onComplete {
+        if (!leaseStopped.get() && !replaceInProgress.get()) {
+          val requested = currentSession.get()
+          ops.keepalive(requested).onComplete {
             case Success(updated) =>
-              if (!leaseStopped.get()) {
-                val previous = currentSession.get()
-                currentSession.set(updated)
+              if (!leaseStopped.get() && !replaceInProgress.get() && applySessionUpdate(requested, updated)) {
                 log.debug(
                   "[shared] keepalive ok label={} expires={} keepalive={}"
                 , channelLabel
                 , updated.expires.map(_.toString).getOrElse("unknown")
                 , updated.keepalive.map(_.toString).getOrElse("unknown")
                 )
-                if (previous.playlistUrl != updated.playlistUrl) {
+                if (requested.playlistUrl != updated.playlistUrl) {
                   log.info("[shared] playlist url changed label={}, restarting hls", channelLabel)
                   streamKillSwitch.get().foreach(_.shutdown())
                 }
                 scheduleKeepalive()
               }
             case Failure(ex) =>
-              if (!leaseStopped.get()) {
+              if (!leaseStopped.get() && !replaceInProgress.get()) {
                 log.warn("[shared] keepalive failed label={}", channelLabel, ex)
-                ops.fetch(currentSession.get()).foreach { updated =>
-                  if (!leaseStopped.get()) currentSession.set(updated)
+                val fetchRequested = currentSession.get()
+                ops.fetch(fetchRequested).foreach { updated =>
+                  if (!leaseStopped.get() && !replaceInProgress.get()) {
+                    val _ = applySessionUpdate(fetchRequested, updated)
+                  }
                 }
                 scheduleKeepaliveRetry()
               }
           }(ec)
+        }
       }
 
     def scheduleKeepalive(): Unit =
-      if (!leaseStopped.get())
+      if (!leaseStopped.get() && !replaceInProgress.get())
         keepaliveOps match {
           case Some(_) =>
             val session = currentSession.get()
@@ -183,6 +208,8 @@ object SharedChannelStream {
         }
 
     def replaceSession(prior: PlayerSession): Future[PlayerSession] = {
+      pauseKeepalive()
+      replaceInProgress.set(true)
       val promise = Promise[PlayerSession]()
       log.info(
         "[shared] replace requested label={} sessionId={}"
@@ -198,6 +225,9 @@ object SharedChannelStream {
             , prior.sessionId
             , session.sessionId
             )
+            currentSession.set(session)
+            replaceInProgress.set(false)
+            scheduleKeepalive()
             val _ = promise.trySuccess(session)
             Behaviors.stopped
           case ReplaceFailed(cause) =>
@@ -207,6 +237,7 @@ object SharedChannelStream {
             , prior.sessionId
             , cause
             )
+            replaceInProgress.set(false)
             val _ = promise.tryFailure(cause)
             Behaviors.stopped
         }
@@ -234,12 +265,14 @@ object SharedChannelStream {
 
     def streamFactory(): Source[ByteString, ?] = {
       val session = currentSession.get()
-      if (!shouldRefresh(session))
+      val isFirst = firstStreamAttempt.compareAndSet(true, false)
+      val needsReplace =
+        shouldRefresh(session) || (keepaliveOps.isEmpty && !isFirst)
+      if (!needsReplace)
         streamFromSession(session)
       else
         Source.futureSource(
           replaceSession(session).map { newSession =>
-            currentSession.set(newSession)
             streamFromSession(newSession)
           }
         )

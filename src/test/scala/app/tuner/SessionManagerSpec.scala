@@ -167,8 +167,9 @@ class SessionManagerSpec
       val _ = c1.request(1)
       val _ = c2.request(1)
       c1.cancel()
-      Thread.sleep(150)
-      backend.closeCount.get() shouldBe 0
+      eventually {
+        backend.closeCount.get() shouldBe 0
+      }
       c2.cancel()
       eventually {
         backend.closeCount.get() shouldBe 1
@@ -322,12 +323,143 @@ class SessionManagerSpec
       val _ = ca.request(1)
       val _ = cb.request(1)
       backend.tuners = 1
+      manager ! TunersUpdated(1)
       val c = createTestProbe[AcquireResult]()
       manager ! Acquire(Gen4Channel("c"), c.ref)
       c.expectMessage(NoAvailableTuners)
       backend.closeCount.get() shouldBe 0
       ca.cancel()
       cb.cancel()
+    }
+
+    "close a late open success after timeout starts a newer reservation" in {
+      val firstOpen = Promise[PlayerSession]()
+      val secondOpen = Promise[PlayerSession]()
+      val openCalls = new AtomicInteger(0)
+      val backend = new StubBackend(
+        _ => {
+          if (openCalls.incrementAndGet() == 1) firstOpen.future
+          else secondOpen.future
+        }
+      , tuners = 1
+      )
+      val runtime = new StubRuntimeFactory()
+      val manager = spawn(SessionManager(backend, runtime, shortSettings.copy(openTimeout = 100.millis)))
+      val first = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), first.ref)
+      first.expectMessageType[AcquireFailed]
+      val second = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), second.ref)
+      eventually {
+        openCalls.get() shouldBe 2
+      }
+      firstOpen.success(player("tok-stale"))
+      secondOpen.success(player("tok-fresh"))
+      val attached = second.expectMessageType[Attached]
+      eventually {
+        backend.closedIds.get() should contain("tok-stale")
+      }
+      val control = attached.source.runWith(TestSink[ByteString]())
+      val _ = control.request(1)
+      control.cancel()
+    }
+
+    "retry replace open after a transient failure" in {
+      val openResults = new AtomicReference(Vector.empty[Promise[PlayerSession]])
+      val backend = new SessionBackend {
+        def open(channel: ChannelKey): Future[PlayerSession] = {
+          val promise = Promise[PlayerSession]()
+          openResults.getAndUpdate(_ :+ promise)
+          promise.future
+        }
+        def close(sessionId: SessionId): Future[Unit] = Future.successful(())
+        def totalTuners: Int = 2
+        def refreshTuners(): Future[Int] = Future.successful(2)
+      }
+      var replaceFn: (SessionId, ActorRef[ReplaceResult]) => Unit = (_, _) => ()
+      val runtime = new RuntimeFactory {
+        def start(
+          channel: ChannelKey
+        , session: PlayerSession
+        , onTerminated: Option[Throwable] => Unit
+        , requestReplace: (SessionId, ActorRef[ReplaceResult]) => Unit
+        , backpressureTimeout: FiniteDuration
+        ): SessionRuntime = {
+          replaceFn = requestReplace
+          SessionRuntime(
+            session.sessionId
+          , Source.never[ByteString].mapMaterializedValue(_ => NotUsed)
+          , () => ()
+          )
+        }
+      }
+      val manager = spawn(SessionManager(backend, runtime, shortSettings))
+      val probe = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      eventually {
+        openResults.get().size shouldBe 1
+      }
+      openResults.get().head.success(player("tok-1"))
+      val attached = probe.expectMessageType[Attached]
+      val control = attached.source.runWith(TestSink[ByteString]())
+      val _ = control.request(1)
+      val failProbe = createTestProbe[ReplaceResult]()
+      replaceFn("tok-1", failProbe.ref)
+      eventually {
+        openResults.get().size shouldBe 2
+      }
+      openResults.get()(1).failure(new RuntimeException("transient"))
+      failProbe.expectMessageType[ReplaceFailed]
+      val retryProbe = createTestProbe[ReplaceResult]()
+      replaceFn("tok-1", retryProbe.ref)
+      eventually {
+        openResults.get().size shouldBe 3
+      }
+      openResults.get()(2).success(player("tok-2"))
+      retryProbe.expectMessageType[Replaced].session.sessionId shouldBe "tok-2"
+      control.cancel()
+    }
+
+    "queue acquire during closing and reopen after close completes" in {
+      val backend = new StubBackend(_ => Future.successful(player("tok-reopen")), tuners = 1)
+      val runtime = new StubRuntimeFactory()
+      val manager = spawn(SessionManager(backend, runtime, shortSettings))
+      val first = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), first.ref)
+      val attached = first.expectMessageType[Attached]
+      val control = attached.source.runWith(TestSink[ByteString]())
+      val _ = control.request(1)
+      control.cancel()
+      val second = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), second.ref)
+      val reattached = second.expectMessageType[Attached]
+      eventually {
+        backend.openCount.get() should be >= 2
+      }
+      val control2 = reattached.source.runWith(TestSink[ByteString]())
+      val _ = control2.request(1)
+      control2.cancel()
+    }
+
+    "apply TunersUpdated before admitting opens" in {
+      val refreshGate = Promise[Int]()
+      val backend = new SessionBackend {
+        def open(channel: ChannelKey): Future[PlayerSession] =
+          Future.successful(player("tok"))
+        def close(sessionId: SessionId): Future[Unit] = Future.successful(())
+        def totalTuners: Int = 4
+        def refreshTuners(): Future[Int] = refreshGate.future
+      }
+      val runtime = new StubRuntimeFactory()
+      val manager = spawn(SessionManager(backend, runtime, shortSettings))
+      val probe = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      probe.expectNoMessage(150.millis)
+      refreshGate.success(1)
+      val attached = probe.expectMessageType[Attached]
+      val control = attached.source.runWith(TestSink[ByteString]())
+      val _ = control.request(1)
+      control.cancel()
     }
   }
 }

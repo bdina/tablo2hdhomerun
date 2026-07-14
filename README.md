@@ -81,6 +81,9 @@ docker build -f Dockerfile.native --tag tablo2hdhomerun:<version> .
 docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 ```
 
+The JVM image `jar` stage depends on the `test` stage, so unit tests run before the release artifact is packaged.
+To run tests alone: `docker build -f Dockerfile.jvm --target test .`
+
 ## Configuration
 
 | Environment Variable | Default | Description |
