@@ -102,14 +102,11 @@ object SessionManager {
     case class OpenTimedOut(channel: String) extends Exception(s"open timed out for $channel") with Error
     case object UpstreamTerminated extends Exception("upstream terminated") with Error
     case object ReplaceAlreadyInProgress extends Exception("replace already in progress") with Error
-    case class ReplaceNotActive(channel: String)
-        extends Exception(s"channel not active for replace: $channel") with Error
-    case class ReplaceStateChanged(channel: String)
-        extends Exception(s"channel left replacing state: $channel") with Error
-    case class ReplaceTimedOut(channel: String)
-        extends Exception(s"replace timed out for $channel") with Error
+    case class ReplaceNotActive(channel: String) extends Exception(s"channel not active for replace: $channel") with Error
+    case class ReplaceStateChanged(channel: String) extends Exception(s"channel left replacing state: $channel") with Error
+    case class ReplaceTimedOut(channel: String) extends Exception(s"replace timed out for $channel") with Error
     case class ReplaceOpenFailed(channel: String, cause: Throwable)
-        extends Exception(s"replace open failed for $channel: ${cause.getMessage}", cause) with Error
+      extends Exception(s"replace open failed for $channel: ${cause.getMessage}", cause) with Error
     case object KeepaliveBoom extends Exception("keepalive boom") with Error
   }
 
@@ -283,11 +280,10 @@ object SessionManager {
 
     private def reservations: Int = channels.size
 
-    private def ch(channel: ChannelKey): String =
-      channel match {
-        case Gen4Channel(id) => id
-        case LegacyChannel(id) => id.toString
-      }
+    private def ch(channel: ChannelKey): String = channel match {
+      case Gen4Channel(id) => id
+      case LegacyChannel(id) => id.toString
+    }
 
     private def shortId(id: UUID): String = id.toString.take(8)
 
@@ -852,12 +848,11 @@ object SessionManager {
     private def failQueued(channel: ChannelKey, queued: Vector[PendingAcquire], ex: Throwable): Unit =
       failWaiters(channel, queued, ex)
 
-    private def isNoTuners(ex: Throwable): Boolean =
-      ex match {
-        case Error.NoAvailableTuners => true
-        case Tablo4thGen.Error.NoAvailableTuners => true
-        case TabloLegacy.Channel.Error.NoAvailableTuners => true
-        case other => Option(other.getMessage).exists(_.toLowerCase.contains("no available tuners"))
-      }
+    private def isNoTuners(ex: Throwable): Boolean = ex match {
+      case Error.NoAvailableTuners => true
+      case Tablo4thGen.Error.NoAvailableTuners => true
+      case TabloLegacy.Channel.Error.NoAvailableTuners => true
+      case other => Option(other.getMessage).exists(_.toLowerCase.contains("no available tuners"))
+    }
   }
 }

@@ -86,12 +86,12 @@ object SharedChannelStream {
       decided
     }
 
-    def isCurrent(attempt: ReplaceAttempt): Boolean =
-      active.get() match {
-        case Some(current) =>
-          current.generation == attempt.generation && (current.promise eq attempt.promise)
-        case None => false
-      }
+    def isCurrent(attempt: ReplaceAttempt): Boolean = active.get() match {
+      case Some(current) =>
+        current.generation == attempt.generation && (current.promise eq attempt.promise)
+      case None =>
+        false
+    }
 
     def release(attempt: ReplaceAttempt): Unit = {
       val current = active.get()
@@ -102,10 +102,9 @@ object SharedChannelStream {
       }
     }
 
-    def abort(cause: Throwable): Unit =
-      active.getAndSet(None).foreach { attempt =>
-        val _ = attempt.promise.tryFailure(cause)
-      }
+    def abort(cause: Throwable): Unit = active.getAndSet(None).foreach { attempt =>
+      val _ = attempt.promise.tryFailure(cause)
+    }
   }
 
   final case class SharedRuntimeFactory(
@@ -187,8 +186,7 @@ object SharedChannelStream {
       }
     }
 
-    def clearReplaceAdapter(): Unit =
-      activeReplaceAdapter.getAndSet(None).foreach(stopReplaceAdapter)
+    def clearReplaceAdapter(): Unit = activeReplaceAdapter.getAndSet(None).foreach(stopReplaceAdapter)
 
     def releaseReplaceAdapter(adapter: ActorRef[ReplaceResult]): Unit = {
       val current = activeReplaceAdapter.get()

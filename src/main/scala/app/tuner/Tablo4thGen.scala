@@ -49,12 +49,9 @@ object Tablo4thGen {
     case object NoAvailableTuners extends Exception("No available tuners") with Error
     case class InvalidWatchResponse(message: String) extends Exception(message) with Error
     case class UnsupportedChannel(channel: String) extends Exception(s"unsupported channel $channel") with Error
-    case class WatchFailed(status: Int, body: String)
-        extends Exception(s"watch failed: $status $body") with Error
-    case class SessionDeleteFailed(status: Int, body: String)
-        extends Exception(s"session DELETE failed: $status $body") with Error
-    case class SessionRequestFailed(method: String, status: Int)
-        extends Exception(s"session $method failed: $status") with Error
+    case class WatchFailed(status: Int, body: String) extends Exception(s"watch failed: $status $body") with Error
+    case class SessionDeleteFailed(status: Int, body: String) extends Exception(s"session DELETE failed: $status $body") with Error
+    case class SessionRequestFailed(method: String, status: Int) extends Exception(s"session $method failed: $status") with Error
     case object MissingSessionToken extends Exception("watch response omitted session token") with Error
   }
 

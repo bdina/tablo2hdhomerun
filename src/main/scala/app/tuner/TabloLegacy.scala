@@ -787,10 +787,8 @@ object TabloLegacy {
       sealed trait Error extends Exception
       object Error {
         case object NoAvailableTuners extends Exception("No available tuners") with Error
-        case class UnsupportedChannel(channel: String)
-            extends Exception(s"unsupported channel $channel") with Error
-        case class WatchFailed(status: Int, body: String)
-            extends Exception(s"legacy watch failed: $status $body") with Error
+        case class UnsupportedChannel(channel: String) extends Exception(s"unsupported channel $channel") with Error
+        case class WatchFailed(status: Int, body: String) extends Exception(s"legacy watch failed: $status $body") with Error
       }
 
       object Request {
