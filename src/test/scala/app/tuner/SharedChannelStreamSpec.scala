@@ -123,7 +123,7 @@ class SharedChannelStreamSpec
 
     "fail the active attempt on abort and remain idempotent" in {
       implicit val ec = system.executionContext
-      val owner = new ReplaceAttemptOwner
+      val owner = ReplaceAttemptOwner()
       val attempt = owner.begin().toOption.get
       owner.abort(SessionManager.Error.UpstreamTerminated)
       eventually {
@@ -137,7 +137,7 @@ class SharedChannelStreamSpec
     }
 
     "reject overlapping begin without orphaning the first promise" in {
-      val owner = new ReplaceAttemptOwner
+      val owner = ReplaceAttemptOwner()
       val first = owner.begin().toOption.get
       owner.begin() shouldBe Left(SessionManager.Error.ReplaceAlreadyInProgress)
       first.promise.isCompleted shouldBe false
@@ -145,7 +145,7 @@ class SharedChannelStreamSpec
     }
 
     "ignore stale release after a newer attempt is active" in {
-      val owner = new ReplaceAttemptOwner
+      val owner = ReplaceAttemptOwner()
       val first = owner.begin().toOption.get
       val _ = first.promise.trySuccess(
         PlayerSession("tok", "http://invalid.example/x.m3u8", None, None)
@@ -158,7 +158,7 @@ class SharedChannelStreamSpec
     }
 
     "mark a completed generation as not current after begin of the next attempt" in {
-      val owner = new ReplaceAttemptOwner
+      val owner = ReplaceAttemptOwner()
       val first = owner.begin().toOption.get
       val firstGen = first.generation
       val _ = first.promise.trySuccess(
@@ -384,7 +384,7 @@ class SharedChannelStreamSpec
       val ops = KeepaliveOps(
         keepalive = session => {
           val n = keepaliveCalls.incrementAndGet()
-          if (n == 1) Future.failed(new Exception("keepalive boom"))
+          if (n == 1) Future.failed(SessionManager.Error.KeepaliveBoom)
           else Future.successful(session)
         }
       , fetch = _ => {
@@ -435,7 +435,7 @@ class SharedChannelStreamSpec
       val ops = KeepaliveOps(
         keepalive = session => {
           val n = keepaliveCalls.incrementAndGet()
-          if (n == 1) Future.failed(new Exception("keepalive boom"))
+          if (n == 1) Future.failed(SessionManager.Error.KeepaliveBoom)
           else Future.successful(session)
         }
       , fetch = _ => {
@@ -482,7 +482,7 @@ class SharedChannelStreamSpec
       val updatedIds = new AtomicReference(Vector.empty[String])
       val backendCalls = new AtomicInteger(0)
       val firstProbe = new AtomicReference[Option[TestPublisher.Probe[ByteString]]](None)
-      val owner = new ReplaceAttemptOwner
+      val owner = ReplaceAttemptOwner()
       val firstSession = PlayerSession(
         "tok"
       , "http://invalid.example/x.m3u8"
@@ -572,7 +572,7 @@ class SharedChannelStreamSpec
       implicit val mat = pekko.stream.Materializer(system)
       implicit val ec = system.executionContext
       val replaceStarted = Promise[Unit]()
-      val owner = new ReplaceAttemptOwner
+      val owner = ReplaceAttemptOwner()
       val runtime = SharedChannelStream.startShared(
         channelLabel = "test-stop-replace"
       , firstSession = PlayerSession(

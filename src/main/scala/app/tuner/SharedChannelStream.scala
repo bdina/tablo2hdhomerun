@@ -58,7 +58,7 @@ object SharedChannelStream {
     else if (applied) ScheduleKeepalive
     else ScheduleKeepaliveRetry
 
-  private[tuner] final class ReplaceAttemptOwner {
+  private[tuner] final case class ReplaceAttemptOwner() {
     private val generation = new AtomicLong(0)
     private val active = new AtomicReference[Option[ReplaceAttempt]](None)
 
@@ -153,7 +153,7 @@ object SharedChannelStream {
   , onSessionUpdated: PlayerSession => Unit
   , backpressureTimeout: FiniteDuration
   , replaceTimeout: FiniteDuration
-  , replaceAttempts: ReplaceAttemptOwner = new ReplaceAttemptOwner
+  , replaceAttempts: ReplaceAttemptOwner = ReplaceAttemptOwner()
   , streamBackend: StreamBackend = StreamBackend()
   , now: () => Instant = () => Instant.now()
   , afterKeepaliveProgressCheck: () => Unit = () => ()

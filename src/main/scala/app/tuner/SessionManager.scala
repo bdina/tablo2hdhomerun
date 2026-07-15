@@ -110,6 +110,7 @@ object SessionManager {
         extends Exception(s"replace timed out for $channel") with Error
     case class ReplaceOpenFailed(channel: String, cause: Throwable)
         extends Exception(s"replace open failed for $channel: ${cause.getMessage}", cause) with Error
+    case object KeepaliveBoom extends Exception("keepalive boom") with Error
   }
 
   trait SessionBackend {
