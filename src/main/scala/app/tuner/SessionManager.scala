@@ -82,20 +82,26 @@ object SessionManager {
   , timedOut: Boolean
   ) extends Command
 
-  private[tuner] sealed trait ReplaceFlowResult
-  private[tuner] case object ReplaceCloseOk extends ReplaceFlowResult
-  private[tuner] final case class ReplaceCloseFailedResult(cause: Throwable) extends ReplaceFlowResult
-  private[tuner] case object ReplaceCloseTimedOutResult extends ReplaceFlowResult
-  private[tuner] final case class ReplaceOpenOk(session: PlayerSession) extends ReplaceFlowResult
-  private[tuner] final case class ReplaceOpenFailedResult(cause: Throwable) extends ReplaceFlowResult
-  private[tuner] case object ReplaceOpenTimedOutResult extends ReplaceFlowResult
+  private[tuner] sealed trait ReplaceMode
+  private[tuner] case object CloseThenOpen extends ReplaceMode
+  private[tuner] case object OpenOnly extends ReplaceMode
 
-  private[tuner] final case class ReplaceFinished(
+  private[tuner] sealed trait ReplaceLanding
+  private[tuner] case object LandActive extends ReplaceLanding
+  private[tuner] case object LandReadyToRetryOpen extends ReplaceLanding
+  private[tuner] case object LandWaitingForLateClose extends ReplaceLanding
+  private[tuner] case object LandReplacedActive extends ReplaceLanding
+
+  private[tuner] sealed trait ReplaceEffect
+  private[tuner] final case class PriorClosed(priorSessionId: SessionId) extends ReplaceEffect
+  private[tuner] final case class AttemptDone(result: ReplaceResult, landing: ReplaceLanding) extends ReplaceEffect
+
+  private[tuner] final case class ReplaceEffectMsg(
     channel: ChannelKey
   , priorSessionId: SessionId
   , attemptId: UUID
   , replyTo: ActorRef[ReplaceResult]
-  , result: ReplaceFlowResult
+  , effect: ReplaceEffect
   ) extends Command
 
   private[tuner] final case class ReplaceLateClose(
@@ -190,45 +196,64 @@ object SessionManager {
         case _: TimeoutException => true
       }
 
-    def replaceClose(
-      backend: SessionBackend
-    , priorSessionId: SessionId
-    , timeout: FiniteDuration
-    , onLateClose: Try[Unit] => Unit
-    )(implicit ec: ExecutionContext): Source[ReplaceFlowResult, NotUsed] = {
-      val closeFut = backend.close(priorSessionId)
-      Source.future(
-        closeFut.transform {
-          case Success(_) => Success(ReplaceCloseOk: ReplaceFlowResult)
-          case Failure(ex) => Success(ReplaceCloseFailedResult(ex))
-        }
-      )
-      .completionTimeout(timeout)
-      .recover {
-        case _: TimeoutException =>
-          closeFut.onComplete(onLateClose)
-          ReplaceCloseTimedOutResult
-      }
-    }
-
-    def replaceOpen(
+    def replace(
       backend: SessionBackend
     , channel: ChannelKey
+    , priorSessionId: SessionId
+    , channelLabel: String
     , timeout: FiniteDuration
-    , onLateSuccess: PlayerSession => Unit
-    )(implicit ec: ExecutionContext): Source[ReplaceFlowResult, NotUsed] = {
-      val openFut = backend.open(channel)
-      Source.future(
-        openFut.transform {
-          case Success(session) => Success(ReplaceOpenOk(session): ReplaceFlowResult)
-          case Failure(ex) => Success(ReplaceOpenFailedResult(ex))
+    , mode: ReplaceMode
+    , killSwitch: SharedKillSwitch
+    , onLateClose: Try[Unit] => Unit
+    , onLateOpen: PlayerSession => Unit
+    )(implicit ec: ExecutionContext): Source[ReplaceEffect, NotUsed] = {
+      def openStep: Source[ReplaceEffect, NotUsed] = {
+        val openFut = backend.open(channel)
+        Source.future(
+          openFut.transform {
+            case Success(session) =>
+              Success(AttemptDone(Replaced(session), LandReplacedActive): ReplaceEffect)
+            case Failure(ex) =>
+              Success(AttemptDone(ReplaceFailed(Error.ReplaceOpenFailed(channelLabel, ex)), LandReadyToRetryOpen))
+          }
+        )
+        .completionTimeout(timeout)
+        .recover {
+          case _: TimeoutException =>
+            openFut.foreach(onLateOpen)
+            AttemptDone(ReplaceFailed(Error.ReplaceTimedOut(channelLabel)), LandReadyToRetryOpen)
         }
-      )
-      .completionTimeout(timeout)
-      .recover {
-        case _: TimeoutException =>
-          openFut.foreach(onLateSuccess)
-          ReplaceOpenTimedOutResult
+      }
+
+      def closeThenOpen: Source[ReplaceEffect, NotUsed] = {
+        val closeFut = backend.close(priorSessionId)
+        Source.future(
+          closeFut.transform {
+            case Success(_) => Success(Right(()): Either[ReplaceEffect, Unit])
+            case Failure(ex) => Success(Left(AttemptDone(ReplaceFailed(ex), LandActive)))
+          }
+        )
+        .completionTimeout(timeout)
+        .recover {
+          case _: TimeoutException =>
+            closeFut.onComplete(onLateClose)
+            Left(AttemptDone(ReplaceFailed(Error.ReplaceTimedOut(channelLabel)), LandWaitingForLateClose))
+        }
+        .flatMapConcat {
+          case Left(done) => Source.single(done)
+          case Right(()) =>
+            Source.single(PriorClosed(priorSessionId): ReplaceEffect)
+              .concat(
+                Source.lazySource(() => openStep)
+                  .via(killSwitch.flow)
+                  .mapMaterializedValue(_ => NotUsed)
+              )
+        }
+      }
+
+      mode match {
+        case CloseThenOpen => closeThenOpen
+        case OpenOnly => openStep.via(killSwitch.flow)
       }
     }
 
@@ -271,6 +296,7 @@ object SessionManager {
   , phase: ReplacePhase
   , replyTo: Option[ActorRef[ReplaceResult]] = None
   , attemptId: UUID = new UUID(0, 0)
+  , killSwitch: Option[SharedKillSwitch] = None
   ) extends SessionEntry
   private final case class Closing(
     sessionId: SessionId
@@ -353,8 +379,8 @@ object SessionManager {
         case Replace(channel, priorSessionId, replyTo) =>
           onReplace(channel, priorSessionId, replyTo)
           Behaviors.same
-        case ReplaceFinished(channel, priorSessionId, attemptId, replyTo, result) =>
-          onReplaceFinished(channel, priorSessionId, attemptId, replyTo, result)
+        case ReplaceEffectMsg(channel, priorSessionId, attemptId, replyTo, effect) =>
+          onReplaceEffect(channel, priorSessionId, attemptId, replyTo, effect)
           Behaviors.same
         case ReplaceLateClose(channel, priorSessionId, result) =>
           onReplaceLateClose(channel, priorSessionId, result)
@@ -417,45 +443,43 @@ object SessionManager {
           context.self ! CloseFinished(channel, sessionId, timedOut = true)
         }
 
-    private def runReplaceCloseFlow(
+    private def runReplaceAttempt(
       channel: ChannelKey
     , priorSessionId: SessionId
     , attemptId: UUID
     , replyTo: ActorRef[ReplaceResult]
+    , mode: ReplaceMode
+    , killSwitch: SharedKillSwitch
     ): Unit =
-      ProtocolFlows.replaceClose(
-        backend
-      , priorSessionId
-      , settings.replaceTimeout
-      , result => context.self ! ReplaceLateClose(channel, priorSessionId, result.toEither)
-      )
-      .runWith(Sink.head)
-      .onComplete {
-        case Success(result) =>
-          context.self ! ReplaceFinished(channel, priorSessionId, attemptId, replyTo, result)
-        case Failure(ex) =>
-          context.self ! ReplaceFinished(channel, priorSessionId, attemptId, replyTo, ReplaceCloseFailedResult(ex))
-      }
-
-    private def runReplaceOpenFlow(
-      channel: ChannelKey
-    , priorSessionId: SessionId
-    , attemptId: UUID
-    , replyTo: ActorRef[ReplaceResult]
-    ): Unit =
-      ProtocolFlows.replaceOpen(
+      ProtocolFlows.replace(
         backend
       , channel
+      , priorSessionId
+      , ch(channel)
       , settings.replaceTimeout
-      , session => context.self ! ReplaceFinished(channel, priorSessionId, attemptId, replyTo, ReplaceOpenOk(session))
+      , mode
+      , killSwitch
+      , result => context.self ! ReplaceLateClose(channel, priorSessionId, result.toEither)
+      , session =>
+          context.self ! ReplaceEffectMsg(
+            channel
+          , priorSessionId
+          , attemptId
+          , replyTo
+          , AttemptDone(Replaced(session), LandReplacedActive)
+          )
       )
-        .runWith(Sink.head)
+        .runWith(Sink.foreach { effect =>
+          context.self ! ReplaceEffectMsg(channel, priorSessionId, attemptId, replyTo, effect)
+        })
         .onComplete {
-          case Success(result) =>
-            context.self ! ReplaceFinished(channel, priorSessionId, attemptId, replyTo, result)
+          case Success(_) => ()
           case Failure(ex) =>
-            context.self ! ReplaceFinished(channel, priorSessionId, attemptId, replyTo, ReplaceOpenFailedResult(ex))
+            log.debug("[session] replace stream ended channel={} sessionId={} attempt={}", ch(channel), priorSessionId, shortId(attemptId), ex)
         }
+
+    private def abortReplaceStream(killSwitch: Option[SharedKillSwitch]): Unit =
+      killSwitch.foreach(_.shutdown())
 
     private def closeOrphan(channel: ChannelKey, sessionId: SessionId): Unit = {
       log.warn("[session] closing orphan session channel={} sessionId={}", ch(channel), sessionId)
@@ -470,13 +494,13 @@ object SessionManager {
           log.info("[session] client queue channel={} state=opening pending={} reserved={} total={}", ch(channel), pending, reservations, cachedTuners)
         case Some(Active(state)) =>
           replyAttached(channel, state, replyTo, shared = true, Active.apply)
-        case Some(Replacing(state, priorSessionId, phase, replaceReply, aid)) =>
+        case Some(Replacing(state, priorSessionId, phase, replaceReply, aid, ks)) =>
           replyAttached(
             channel
           , state
           , replyTo
           , shared = true
-          , next => Replacing(next, priorSessionId, phase, replaceReply, aid)
+          , next => Replacing(next, priorSessionId, phase, replaceReply, aid, ks)
           )
         case Some(Closing(sessionId, waiters)) =>
           channels = channels.updated(channel, Closing(sessionId, waiters :+ PendingAcquire(replyTo)))
@@ -668,7 +692,8 @@ object SessionManager {
       val sessionId = runtime.sessionId
       val (waiters, mode) = channels.get(channel) match {
         case Some(Closing(_, queued)) => (queued, DeleteNow)
-        case Some(Replacing(state, _, phase, replyTo, _)) =>
+        case Some(Replacing(state, _, phase, replyTo, _, ks)) =>
+          abortReplaceStream(ks)
           replyTo.foreach { ref =>
             ref ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
           }
@@ -702,7 +727,7 @@ object SessionManager {
     private def sessionStillTracked(sessionId: SessionId): Boolean =
       channels.exists {
         case (_, Active(state)) => state.runtime.sessionId == sessionId
-        case (_, Replacing(state, prior, phase, _, _)) =>
+        case (_, Replacing(state, prior, phase, _, _, _)) =>
           state.runtime.sessionId == sessionId ||
             (prior == sessionId && !priorClosed(phase))
         case (_, Closing(id, _)) => id == sessionId
@@ -745,7 +770,8 @@ object SessionManager {
           }
           failQueued(channel, state.queued, cause.getOrElse(Error.UpstreamTerminated))
           beginClosing(channel, state.runtime)
-        case Some(Replacing(state, _, _, _, _)) =>
+        case Some(Replacing(state, _, _, _, _, ks)) =>
+          abortReplaceStream(ks)
           cause match {
             case Some(ex) =>
               log.warn("[session] upstream failed during replace channel={} sessionId={} clients={}", ch(channel), state.runtime.sessionId, clientCount(state), ex)
@@ -761,16 +787,24 @@ object SessionManager {
           }
       }
 
-    private def startReplaceOpen(
+    private def startReplaceAttempt(
       channel: ChannelKey
     , state: SessionRuntimeState
     , priorSessionId: SessionId
     , replyTo: ActorRef[ReplaceResult]
+    , mode: ReplaceMode
+    , phase: ReplacePhase
     ): Unit = {
       val aid = UUID.randomUUID()
-      channels = channels.updated(channel, Replacing(state, priorSessionId, OpeningNext, Some(replyTo), aid))
-      log.info("[session] replace open channel={} prior={} attempt={} clients={}", ch(channel), priorSessionId, shortId(aid), clientCount(state))
-      runReplaceOpenFlow(channel, priorSessionId, aid, replyTo)
+      val killSwitch = KillSwitches.shared(s"replace-${shortId(aid)}")
+      channels = channels.updated(channel, Replacing(state, priorSessionId, phase, Some(replyTo), aid, Some(killSwitch)))
+      mode match {
+        case CloseThenOpen =>
+          log.info("[session] replacing channel={} sessionId={} attempt={} clients={}", ch(channel), priorSessionId, shortId(aid), clientCount(state))
+        case OpenOnly =>
+          log.info("[session] replace open channel={} prior={} attempt={} clients={}", ch(channel), priorSessionId, shortId(aid), clientCount(state))
+      }
+      runReplaceAttempt(channel, priorSessionId, aid, replyTo, mode, killSwitch)
     }
 
     private def onReplace(
@@ -780,13 +814,10 @@ object SessionManager {
     ): Unit =
       channels.get(channel) match {
         case Some(Active(state)) if state.runtime.sessionId == priorSessionId =>
-          val aid = UUID.randomUUID()
-          channels = channels.updated(channel, Replacing(state, priorSessionId, ClosingPrior, Some(replyTo), aid))
-          log.info("[session] replacing channel={} sessionId={} attempt={} clients={}", ch(channel), priorSessionId, shortId(aid), clientCount(state))
-          runReplaceCloseFlow(channel, priorSessionId, aid, replyTo)
-        case Some(Replacing(state, prior, ReadyToRetryOpen, _, _)) if prior == priorSessionId =>
-          startReplaceOpen(channel, state, priorSessionId, replyTo)
-        case Some(Replacing(_, prior, phase, _, _)) if prior == priorSessionId =>
+          startReplaceAttempt(channel, state, priorSessionId, replyTo, CloseThenOpen, ClosingPrior)
+        case Some(Replacing(state, prior, ReadyToRetryOpen, _, _, _)) if prior == priorSessionId =>
+          startReplaceAttempt(channel, state, priorSessionId, replyTo, OpenOnly, OpeningNext)
+        case Some(Replacing(_, prior, phase, _, _, _)) if prior == priorSessionId =>
           log.warn("[session] replace already in progress channel={} sessionId={} phase={}", ch(channel), priorSessionId, phase)
           replyTo ! ReplaceFailed(Error.ReplaceAlreadyInProgress)
         case other =>
@@ -794,64 +825,91 @@ object SessionManager {
           replyTo ! ReplaceFailed(Error.ReplaceNotActive(ch(channel)))
       }
 
-    private def onReplaceFinished(
+    private def onReplaceEffect(
       channel: ChannelKey
     , priorSessionId: SessionId
     , attemptId: UUID
     , replyTo: ActorRef[ReplaceResult]
-    , result: ReplaceFlowResult
+    , effect: ReplaceEffect
     ): Unit =
-      result match {
-        case ReplaceCloseOk =>
-          onReplaceCloseOk(channel, priorSessionId, replyTo)
-        case ReplaceCloseFailedResult(cause) =>
-          onReplaceCloseFailed(channel, priorSessionId, replyTo, cause)
-        case ReplaceCloseTimedOutResult =>
-          onReplaceCloseTimedOut(channel, priorSessionId, attemptId, replyTo)
-        case ReplaceOpenOk(session) =>
-          onReplaceOpenOk(channel, priorSessionId, attemptId, replyTo, session)
-        case ReplaceOpenFailedResult(cause) =>
-          onReplaceOpenFailed(channel, priorSessionId, attemptId, replyTo, Left(cause))
-        case ReplaceOpenTimedOutResult =>
-          onReplaceOpenFailed(channel, priorSessionId, attemptId, replyTo, Left(Error.ReplaceTimedOut(ch(channel))))
+      effect match {
+        case PriorClosed(prior) =>
+          onReplacePriorClosed(channel, prior, attemptId, replyTo)
+        case AttemptDone(result, landing) =>
+          onReplaceAttemptDone(channel, priorSessionId, attemptId, replyTo, result, landing)
       }
 
-    private def onReplaceCloseOk(
+    private def onReplacePriorClosed(
       channel: ChannelKey
     , priorSessionId: SessionId
+    , attemptId: UUID
     , replyTo: ActorRef[ReplaceResult]
     ): Unit =
       channels.get(channel) match {
-        case Some(Replacing(state, prior, ClosingPrior, _, _)) if prior == priorSessionId =>
+        case Some(Replacing(state, prior, ClosingPrior, _, aid, ks)) if prior == priorSessionId && aid == attemptId =>
           sessionIndex = sessionIndex - priorSessionId
+          channels = channels.updated(channel, Replacing(state, priorSessionId, OpeningNext, Some(replyTo), aid, ks))
           log.info("[session] replace closed prior session channel={} sessionId={}", ch(channel), priorSessionId)
-          startReplaceOpen(channel, state, priorSessionId, replyTo)
-        case Some(Replacing(state, prior, WaitingForLateClose, _, aid)) if prior == priorSessionId =>
+        case Some(Replacing(state, prior, WaitingForLateClose, _, aid, _)) if prior == priorSessionId =>
           sessionIndex = sessionIndex - priorSessionId
-          channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid))
+          channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid, None))
           log.info("[session] late replace close after timeout channel={} sessionId={}; ready to retry open", ch(channel), priorSessionId)
-        case Some(Replacing(_, prior, phase, _, _)) if prior == priorSessionId && priorClosed(phase) =>
+        case Some(Replacing(_, prior, phase, _, _, _)) if prior == priorSessionId && priorClosed(phase) =>
           sessionIndex = sessionIndex - priorSessionId
           log.debug("[session] ignore duplicate replace close channel={} sessionId={} phase={}", ch(channel), priorSessionId, phase)
         case Some(Closing(id, _)) if id == priorSessionId =>
           onCloseFinished(channel, priorSessionId, timedOut = false)
+        case Some(Replacing(_, prior, _, _, aid, ks)) if prior == priorSessionId && aid == attemptId =>
+          abortReplaceStream(ks)
+          log.warn("[session] replace close completed after state change channel={} sessionId={}", ch(channel), priorSessionId)
+          replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
         case _ =>
           log.warn("[session] replace close completed after state change channel={} sessionId={}", ch(channel), priorSessionId)
           replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
       }
 
+    private def onReplaceAttemptDone(
+      channel: ChannelKey
+    , priorSessionId: SessionId
+    , attemptId: UUID
+    , replyTo: ActorRef[ReplaceResult]
+    , result: ReplaceResult
+    , landing: ReplaceLanding
+    ): Unit =
+      (result, landing) match {
+        case (Replaced(session), LandReplacedActive) =>
+          onReplaceOpenOk(channel, priorSessionId, attemptId, replyTo, session)
+        case (ReplaceFailed(cause), LandActive) =>
+          onReplaceCloseFailed(channel, priorSessionId, attemptId, replyTo, cause)
+        case (ReplaceFailed(_), LandWaitingForLateClose) =>
+          onReplaceCloseTimedOut(channel, priorSessionId, attemptId, replyTo)
+        case (ReplaceFailed(cause), LandReadyToRetryOpen) =>
+          onReplaceOpenFailed(channel, priorSessionId, attemptId, replyTo, cause)
+        case (other, otherLanding) =>
+          log.warn(
+            "[session] unexpected replace landing channel={} sessionId={} attempt={} result={} landing={}"
+          , ch(channel)
+          , priorSessionId
+          , shortId(attemptId)
+          , other.getClass.getSimpleName
+          , otherLanding
+          )
+      }
+
     private def onReplaceCloseFailed(
       channel: ChannelKey
     , priorSessionId: SessionId
+    , attemptId: UUID
     , replyTo: ActorRef[ReplaceResult]
     , cause: Throwable
     ): Unit =
       channels.get(channel) match {
-        case Some(Replacing(state, prior, ClosingPrior, _, _)) if prior == priorSessionId =>
+        case Some(Replacing(state, prior, ClosingPrior, _, aid, ks)) if prior == priorSessionId && aid == attemptId =>
+          abortReplaceStream(ks)
           log.warn("[session] replace close failed, returning to active channel={} sessionId={}", ch(channel), priorSessionId, cause)
           channels = channels.updated(channel, Active(state))
           replyTo ! ReplaceFailed(cause)
-        case Some(Replacing(state, prior, WaitingForLateClose, _, _)) if prior == priorSessionId =>
+        case Some(Replacing(state, prior, WaitingForLateClose, _, _, _)) if prior == priorSessionId =>
           log.warn("[session] late replace close failed after timeout, returning to active channel={} sessionId={}", ch(channel), priorSessionId, cause)
           channels = channels.updated(channel, Active(state))
           state.runtime.resumeKeepalive()
@@ -868,10 +926,11 @@ object SessionManager {
     , replyTo: ActorRef[ReplaceResult]
     ): Unit =
       channels.get(channel) match {
-        case Some(Replacing(state, prior, ClosingPrior, _, aid)) if prior == priorSessionId && aid == attemptId =>
+        case Some(Replacing(state, prior, ClosingPrior, _, aid, ks)) if prior == priorSessionId && aid == attemptId =>
           val ex = Error.ReplaceTimedOut(ch(channel))
           log.warn("[session] replace close timed out channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
-          channels = channels.updated(channel, Replacing(state, priorSessionId, WaitingForLateClose, None, aid))
+          abortReplaceStream(ks)
+          channels = channels.updated(channel, Replacing(state, priorSessionId, WaitingForLateClose, None, aid, None))
           replyTo ! ReplaceFailed(ex)
         case Some(Closing(id, _)) if id == priorSessionId =>
           ()
@@ -884,8 +943,26 @@ object SessionManager {
     , result: Either[Throwable, Unit]
     ): Unit =
       result match {
-        case Right(_) => onReplaceCloseOk(channel, priorSessionId, context.system.ignoreRef)
-        case Left(cause) => onReplaceCloseFailed(channel, priorSessionId, context.system.ignoreRef, cause)
+        case Right(_) =>
+          channels.get(channel) match {
+            case Some(Replacing(state, prior, WaitingForLateClose, _, aid, _)) if prior == priorSessionId =>
+              sessionIndex = sessionIndex - priorSessionId
+              channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid, None))
+              log.info("[session] late replace close after timeout channel={} sessionId={}; ready to retry open", ch(channel), priorSessionId)
+            case Some(Replacing(state, prior, ClosingPrior, replyTo, aid, ks)) if prior == priorSessionId =>
+              sessionIndex = sessionIndex - priorSessionId
+              channels = channels.updated(channel, Replacing(state, priorSessionId, OpeningNext, replyTo, aid, ks))
+              log.info("[session] replace closed prior session channel={} sessionId={}", ch(channel), priorSessionId)
+            case Some(Replacing(_, prior, phase, _, _, _)) if prior == priorSessionId && priorClosed(phase) =>
+              sessionIndex = sessionIndex - priorSessionId
+              log.debug("[session] ignore duplicate late replace close channel={} sessionId={} phase={}", ch(channel), priorSessionId, phase)
+            case Some(Closing(id, _)) if id == priorSessionId =>
+              onCloseFinished(channel, priorSessionId, timedOut = false)
+            case _ =>
+              log.debug("[session] ignore late replace close channel={} sessionId={}", ch(channel), priorSessionId)
+          }
+        case Left(cause) =>
+          onReplaceCloseFailed(channel, priorSessionId, new UUID(0, 0), context.system.ignoreRef, cause)
       }
 
     private def onReplaceOpenOk(
@@ -896,7 +973,8 @@ object SessionManager {
     , session: PlayerSession
     ): Unit =
       channels.get(channel) match {
-        case Some(Replacing(state, prior, OpeningNext, _, aid)) if prior == priorSessionId && aid == attemptId =>
+        case Some(Replacing(state, prior, OpeningNext, _, aid, ks)) if prior == priorSessionId && aid == attemptId =>
+          abortReplaceStream(ks)
           sessionIndex = sessionIndex.updated(session.sessionId, channel)
           val nextRuntime = state.runtime.copy(sessionId = session.sessionId)
           val nextState = state.copy(runtime = nextRuntime)
@@ -908,10 +986,10 @@ object SessionManager {
           channels = channels.updated(channel, Active(activeState))
           replyTo ! Replaced(session)
           log.info("[session] replaced channel={} prior={} next={} attempt={} clients={} queuedGranted={}", ch(channel), priorSessionId, session.sessionId, shortId(attemptId), clientCount(activeState), waiters.size)
-        case Some(Replacing(_, prior, OpeningNext, _, aid)) if prior == priorSessionId && aid != attemptId =>
+        case Some(Replacing(_, prior, OpeningNext, _, aid, _)) if prior == priorSessionId && aid != attemptId =>
           log.warn("[session] stale replace open attempt channel={} staleAttempt={} currentAttempt={}", ch(channel), shortId(attemptId), shortId(aid))
           closeOrphan(channel, session.sessionId)
-        case Some(Replacing(_, prior, phase, _, _)) if prior == priorSessionId && phase != OpeningNext =>
+        case Some(Replacing(_, prior, phase, _, _, _)) if prior == priorSessionId && phase != OpeningNext =>
           log.warn("[session] late replace open after timeout channel={} sessionId={}", ch(channel), session.sessionId)
           closeOrphan(channel, session.sessionId)
         case _ =>
@@ -924,39 +1002,34 @@ object SessionManager {
     , priorSessionId: SessionId
     , attemptId: UUID
     , replyTo: ActorRef[ReplaceResult]
-    , result: Either[Throwable, PlayerSession]
+    , cause: Throwable
     ): Unit =
       channels.get(channel) match {
-        case Some(Replacing(state, prior, OpeningNext, _, aid)) if prior == priorSessionId && aid == attemptId =>
-          result match {
-            case Left(ex: Error.ReplaceTimedOut) =>
+        case Some(Replacing(state, prior, OpeningNext, _, aid, ks)) if prior == priorSessionId && aid == attemptId =>
+          abortReplaceStream(ks)
+          val rootCause = cause match {
+            case Error.ReplaceOpenFailed(_, nested) => nested
+            case other => other
+          }
+          cause match {
+            case ex: Error.ReplaceTimedOut =>
               log.warn("[session] replace open timed out channel={} sessionId={} clients={}", ch(channel), priorSessionId, clientCount(state))
-              channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid))
+              channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid, None))
               replyTo ! ReplaceFailed(ex)
-            case Left(ex) =>
-              channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid))
-              replyTo ! ReplaceFailed(Error.ReplaceOpenFailed(ch(channel), ex))
-              if (isNoTuners(ex)) {
+            case ex =>
+              channels = channels.updated(channel, Replacing(state, priorSessionId, ReadyToRetryOpen, None, aid, None))
+              replyTo ! ReplaceFailed(ex)
+              if (isNoTuners(rootCause)) {
                 log.warn("[session] replace open no tuners channel={} prior={} clients={}", ch(channel), priorSessionId, clientCount(state))
                 requestTunerRefresh()
               } else
                 log.warn("[session] replace open failed channel={} prior={} clients={}", ch(channel), priorSessionId, clientCount(state), ex)
-            case Right(_) => ()
           }
-        case Some(Replacing(_, prior, OpeningNext, _, aid)) if prior == priorSessionId && aid != attemptId =>
+        case Some(Replacing(_, prior, OpeningNext, _, aid, _)) if prior == priorSessionId && aid != attemptId =>
           log.warn("[session] stale replace open attempt channel={} staleAttempt={} currentAttempt={}", ch(channel), shortId(attemptId), shortId(aid))
-          result.foreach { session =>
-            closeOrphan(channel, session.sessionId)
-          }
-        case Some(Replacing(_, prior, phase, _, _)) if prior == priorSessionId && phase != OpeningNext =>
-          result.foreach { session =>
-            log.warn("[session] late replace open after timeout channel={} sessionId={}", ch(channel), session.sessionId)
-            closeOrphan(channel, session.sessionId)
-          }
+        case Some(Replacing(_, prior, phase, _, _, _)) if prior == priorSessionId && phase != OpeningNext =>
+          log.debug("[session] ignore late replace open failure channel={} sessionId={} phase={}", ch(channel), priorSessionId, phase)
         case _ =>
-          result.foreach { session =>
-            closeOrphan(channel, session.sessionId)
-          }
           replyTo ! ReplaceFailed(Error.ReplaceStateChanged(ch(channel)))
       }
 
@@ -970,7 +1043,7 @@ object SessionManager {
             channels = channels.updated(channel, Active(next))
             log.info("[session] session id updated channel={} prior={} next={}", ch(channel), previous, session.sessionId)
           }
-        case Some(Replacing(state, prior, phase, replyTo, aid)) =>
+        case Some(Replacing(state, prior, phase, replyTo, aid, ks)) =>
           if (phase == ClosingPrior || phase == WaitingForLateClose)
             log.debug("[session] ignore session update during replace close channel={} phase={} sessionId={}", ch(channel), phase, session.sessionId)
           else {
@@ -978,7 +1051,7 @@ object SessionManager {
             if (previous != session.sessionId) {
               sessionIndex = (sessionIndex - previous).updated(session.sessionId, channel)
               val next = state.copy(runtime = state.runtime.copy(sessionId = session.sessionId))
-              channels = channels.updated(channel, Replacing(next, prior, phase, replyTo, aid))
+              channels = channels.updated(channel, Replacing(next, prior, phase, replyTo, aid, ks))
               log.info("[session] session id updated during replace channel={} prior={} next={}", ch(channel), previous, session.sessionId)
             }
           }
@@ -992,14 +1065,14 @@ object SessionManager {
       channels.collectFirst {
         case (channel, entry @ Active(state)) if state.attachments.contains(attachmentId) =>
           (channel, entry, state)
-        case (channel, entry @ Replacing(state, _, _, _, _)) if state.attachments.contains(attachmentId) =>
+        case (channel, entry @ Replacing(state, _, _, _, _, _)) if state.attachments.contains(attachmentId) =>
           (channel, entry, state)
       }
 
     private def updateEntry(entry: SessionEntry, state: SessionRuntimeState): SessionEntry =
       entry match {
         case _: Active => Active(state)
-        case Replacing(_, prior, phase, replyTo, aid) => Replacing(state, prior, phase, replyTo, aid)
+        case Replacing(_, prior, phase, replyTo, aid, ks) => Replacing(state, prior, phase, replyTo, aid, ks)
         case other => other
       }
 

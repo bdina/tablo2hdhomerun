@@ -142,6 +142,7 @@ class SessionManagerSpec
   private final case class GatedOpenBackend(
     openResults: AtomicReference[Vector[Promise[PlayerSession]]] =
       new AtomicReference(Vector.empty[Promise[PlayerSession]])
+  , closeCount: AtomicInteger = new AtomicInteger(0)
   , tuners: Int = 2
   ) extends SessionBackend {
     def open(channel: ChannelKey): Future[PlayerSession] = {
@@ -149,7 +150,10 @@ class SessionManagerSpec
       openResults.getAndUpdate(_ :+ promise)
       promise.future
     }
-    def close(sessionId: SessionId): Future[Unit] = Future.successful(())
+    def close(sessionId: SessionId): Future[Unit] = {
+      val _ = closeCount.incrementAndGet()
+      Future.successful(())
+    }
     def totalTuners: Int = tuners
     def refreshTuners(): Future[Int] = Future.successful(tuners)
   }
@@ -714,6 +718,99 @@ class SessionManagerSpec
       backend.openResults.get()(1).failure(TestFailure("open boom"))
       val failed = failProbe.expectMessageType[ReplaceFailed]
       failed.cause shouldBe a[SessionManager.Error.ReplaceOpenFailed]
+      control.cancel()
+    }
+
+    "not open after replace close timeout until late close completes" in {
+      val closeGate = Promise[Unit]()
+      val backend = HungCloseBackend(closeGate)
+      val runtime = CapturingRuntimeFactory()
+      val manager = spawn(SessionManager(backend, runtime, shortSettings))
+      val probe = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      val attached = probe.expectMessageType[Attached]
+      val control = attached.source.runWith(TestSink[ByteString]())
+      val _ = control.request(1)
+      val replaceProbe = createTestProbe[ReplaceResult]()
+      runtime.replaceFnRef.get().apply("tok-1", replaceProbe.ref)
+      replaceProbe.expectMessageType[ReplaceFailed].cause shouldBe a[SessionManager.Error.ReplaceTimedOut]
+      replaceProbe.expectNoMessage(100.millis)
+      backend.openCount.get() shouldBe 1
+      closeGate.success(())
+      eventually {
+        val retryProbe = createTestProbe[ReplaceResult]()
+        runtime.replaceFnRef.get().apply("tok-1", retryProbe.ref)
+        retryProbe.receiveMessage(shortSettings.replaceTimeout) match {
+          case Replaced(session) =>
+            session.sessionId shouldBe "tok-2"
+            backend.openCount.get() shouldBe 2
+          case ReplaceFailed(SessionManager.Error.ReplaceAlreadyInProgress) =>
+            throw new Exception("waiting for late close")
+          case other => fail(s"unexpected replace result: $other")
+        }
+      }
+      control.cancel()
+    }
+
+    "skip close on ReadyToRetryOpen replace" in {
+      val backend = GatedOpenBackend()
+      val runtime = CapturingRuntimeFactory()
+      val manager = spawn(SessionManager(backend, runtime, shortSettings))
+      val probe = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      eventually {
+        backend.openResults.get().size shouldBe 1
+      }
+      backend.openResults.get().head.success(player("tok-1"))
+      val attached = probe.expectMessageType[Attached]
+      val control = attached.source.runWith(TestSink[ByteString]())
+      val _ = control.request(1)
+      val failProbe = createTestProbe[ReplaceResult]()
+      runtime.replaceFnRef.get().apply("tok-1", failProbe.ref)
+      eventually {
+        backend.openResults.get().size shouldBe 2
+      }
+      backend.openResults.get()(1).failure(TestFailure("transient"))
+      failProbe.expectMessageType[ReplaceFailed]
+      backend.closeCount.get() shouldBe 1
+      val retryProbe = createTestProbe[ReplaceResult]()
+      runtime.replaceFnRef.get().apply("tok-1", retryProbe.ref)
+      eventually {
+        backend.openResults.get().size shouldBe 3
+      }
+      backend.closeCount.get() shouldBe 1
+      backend.openResults.get()(2).success(player("tok-2"))
+      retryProbe.expectMessageType[Replaced].session.sessionId shouldBe "tok-2"
+      backend.closeCount.get() shouldBe 1
+      control.cancel()
+    }
+
+    "close stale late replace open success as orphan" in {
+      val openGate = Promise[PlayerSession]()
+      val openCalls = new AtomicInteger(0)
+      val backend = StubBackend(
+        _ => {
+          val n = openCalls.incrementAndGet()
+          if (n == 1) Future.successful(player("tok-1"))
+          else openGate.future
+        }
+      , initialTuners = 2
+      )
+      val runtime = CapturingRuntimeFactory()
+      val manager = spawn(SessionManager(backend, runtime, shortSettings.copy(replaceTimeout = 100.millis)))
+      val probe = createTestProbe[AcquireResult]()
+      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      val attached = probe.expectMessageType[Attached]
+      val control = attached.source.runWith(TestSink[ByteString]())
+      val _ = control.request(1)
+      val replaceProbe = createTestProbe[ReplaceResult]()
+      runtime.replaceFnRef.get().apply("tok-1", replaceProbe.ref)
+      replaceProbe.expectMessageType[ReplaceFailed].cause shouldBe a[SessionManager.Error.ReplaceTimedOut]
+      replaceProbe.expectNoMessage(50.millis)
+      openGate.success(player("tok-late"))
+      eventually {
+        backend.closedIds.get() should contain("tok-late")
+      }
       control.cancel()
     }
 
