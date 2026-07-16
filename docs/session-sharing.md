@@ -85,8 +85,14 @@ case object NoAvailableTuners extends AcquireResult
 case class AcquireFailed(cause: Throwable) extends AcquireResult
 ```
 
-The manager wraps each returned source so materialization sends `AttachmentStarted(attachmentId)` and termination sends
-`AttachmentEnded(attachmentId)`. Both messages are idempotent. Routes do not manually release sessions.
+The manager wraps each returned source so materialization and termination report through a single
+`AttachmentSignal(attachmentId, event)` (`AttachmentStarted`, `AttachmentEnded`, or
+`AttachmentMaterializeTimedOut`). Signals are idempotent. Routes do not manually release sessions.
+
+Open, close, and replace async steps run as Pekko Stream flows (`ProtocolFlows`) with
+`completionTimeout`; the actor receives terminal results (`OpenFinished`, `CloseFinished`,
+`ReplaceFinished`) rather than intermediate `pipeToSelf` phase messages. Capacity, channel index,
+and session-id index remain actor-owned.
 
 ### State
 
@@ -131,8 +137,8 @@ stateDiagram-v2
 2. For an `Opening` channel, append the request to its waiters without issuing another Tablo watch.
 3. For a `Closing` channel, queue the request and reopen after close completes when capacity allows.
 4. For a missing channel at capacity (including zero tuners), return `NoAvailableTuners` without calling Tablo.
-5. For a missing channel below capacity, synchronously insert `Opening`, then start the asynchronous Tablo watch with
-   `pipeToSelf`.
+5. For a missing channel below capacity, synchronously insert `Opening`, then start the asynchronous Tablo watch via
+   the stream-backed open flow.
 6. On open success, create one runtime, index its session ID, transition to `Active`, and reply to all waiters.
 7. On open failure, remove the reservation and fail all waiters. Map Tablo HTTP 503 to `NoAvailableTuners`.
 
@@ -142,14 +148,14 @@ backend's last known total).
 ### Attachment lifecycle
 
 - Start a materialization deadline when an attachment is granted.
-- `AttachmentStarted` cancels that deadline.
-- `AttachmentEnded`, including failure, removes the attachment.
+- `AttachmentSignal(..., AttachmentStarted)` cancels that deadline.
+- `AttachmentSignal(..., AttachmentEnded(...))`, including failure, removes the attachment.
 - Remove a grant that does not materialize before the deadline and shut down its kill switch.
 - When no pending or materialized attachments remain, transition to `Closing`, stop the stream, cancel keepalive, and
-  close the Tablo session.
+  close the Tablo session via the stream-backed close flow.
 - Keep `Closing` reserved until close completes or its bounded timeout expires, then remove it.
 - Log close failures and let a later Tablo HTTP 503 remain authoritative.
-- Treat duplicate, late, and out-of-order lifecycle messages as harmless.
+- Treat duplicate, late, and out-of-order lifecycle signals as harmless.
 
 ### Session replacement
 
@@ -159,7 +165,8 @@ backend's last known total).
   timeout); do not open a replacement while close is still outstanding.
 - Issue the replacement watch only after the close step finishes.
 - Replace progresses through phases: `ClosingPrior` → `OpeningNext` → `Active`, with `WaitingForLateClose` after a
-  close-step timeout and `ReadyToRetryOpen` after an open-step failure/timeout.
+  close-step timeout and `ReadyToRetryOpen` after an open-step failure/timeout. Close and open steps each run as a
+  stream flow with `replaceTimeout`; the actor handles one terminal `ReplaceFinished` (or `ReplaceLateClose`) per step.
 - Each close or open step is bounded by `replaceTimeout`. `SharedChannelStream` waits
   `replaceTimeout * 2 + replaceTimeout / 5` so a full close-then-open cycle can finish with headroom before the
   stream-side timeout abandons the reply.

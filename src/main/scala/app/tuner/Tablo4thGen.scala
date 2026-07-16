@@ -36,6 +36,53 @@ object Tablo4thGen {
 
   val LIGHTHOUSE_BASE_URL = "https://lighthousetv.ewscloud.com/api/v2"
   val USER_AGENT = "Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)"
+  val GuideChannelsScanRetries = 3
+  val GuideChannelsRetryDelay = 750.millis
+
+  def lighthouseGuideChannelsUri(lighthouseToken: String): Uri = {
+    val uri = Uri(s"$LIGHTHOUSE_BASE_URL/account/$lighthouseToken/guide/channels")
+    if (uri.path.endsWithSlash) uri else uri.copy(path = uri.path ++ Uri.Path./)
+  }
+
+  def lighthouseGuideChannelsHeaders(authContext: Auth.AuthContext): Seq[pekko.http.scaladsl.model.HttpHeader] = {
+    import pekko.http.scaladsl.model.headers._
+    Seq(
+      Authorization(OAuth2BearerToken(authContext.accessToken))
+    , RawHeader("Lighthouse", authContext.lighthouseToken)
+    , RawHeader("User-Agent", USER_AGENT)
+    , RawHeader("Accept", "application/json")
+    )
+  }
+
+  def readSuccessBody(
+    response: HttpResponse
+  , label: String
+  )(implicit ec: scala.concurrent.ExecutionContext, mat: pekko.stream.Materializer): Future[String] = {
+    import pekko.http.scaladsl.unmarshalling.Unmarshal
+    Unmarshal(response.entity).to[String].flatMap { body =>
+      if (response.status.isSuccess)
+        Future.successful(body)
+      else
+        Future.failed(
+          new RuntimeException(s"$label status=${response.status.intValue()} body=${LogConfig.truncate(body)}")
+        )
+    }
+  }
+
+  def withRetries[T](
+    label: String
+  , attempt: Int
+  , maxAttempts: Int
+  , delay: FiniteDuration
+  )(run: => Future[T])(implicit
+    ec: scala.concurrent.ExecutionContext
+  , scheduler: pekko.actor.Scheduler
+  ): Future[T] =
+    run.recoverWith {
+      case ex if attempt < maxAttempts =>
+        log.warn("[{}] attempt {}/{} failed, retrying in {}", label, attempt, maxAttempts, delay, ex)
+        after(delay, scheduler)(withRetries(label, attempt + 1, maxAttempts, delay)(run))
+    }
 
   sealed trait Error extends Exception
   object Error {
@@ -276,6 +323,7 @@ object Tablo4thGen {
       object Command {
         case class Store(channels: Seq[JsValue]) extends Command
         case object Scan extends Command
+        case object ScanFailed extends Command
       }
 
       implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
@@ -312,33 +360,35 @@ object Tablo4thGen {
 
         def scan(): Future[Seq[JsValue]] = {
           import Lineup.JsonProtocol._
-          import pekko.http.scaladsl.unmarshalling.Unmarshal
+          import org.apache.pekko.actor.typed.scaladsl.adapter._
 
-          val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
-          log.debug("[lineup] http GET /guide/channels")
+          implicit val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
+          implicit val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
+          val channelsUri = lighthouseGuideChannelsUri(authContext.lighthouseToken)
 
-          import pekko.http.scaladsl.model.headers._
-          val request = HttpRequest(
-            method = HttpMethods.GET
-          , uri = channelsUri
-          , headers = Seq(
-              Authorization(OAuth2BearerToken(authContext.accessToken))
-            , RawHeader("Lighthouse", authContext.lighthouseToken)
+          def attempt(): Future[Seq[JsValue]] = {
+            log.debug("[lineup] http GET /guide/channels uri={}", channelsUri)
+            val request = HttpRequest(
+              method = HttpMethods.GET
+            , uri = channelsUri
+            , headers = lighthouseGuideChannelsHeaders(authContext)
             )
-          )
-
-          HttpCtx.singleRequest(request).flatMap { response =>
-            log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
-            Unmarshal(response.entity).to[String].map { body =>
-              val channels = body.parseJson.convertTo[Seq[ChannelLineup]]
-              log.info("[lineup] scan complete count={}", channels.size)
-              val jsChannels = channels.map(channelToJsValue)
-              context.self ! Command.Store(jsChannels)
-              jsChannels
+            HttpCtx.singleRequest(request).flatMap { response =>
+              log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
+              readSuccessBody(response, "lineup guide/channels").map { body =>
+                val channels = body.parseJson.convertTo[Seq[ChannelLineup]]
+                log.info("[lineup] scan complete count={}", channels.size)
+                val jsChannels = channels.map(channelToJsValue)
+                context.self ! Command.Store(jsChannels)
+                jsChannels
+              }
             }
-          }.recover {
+          }
+
+          withRetries("lineup", 1, GuideChannelsScanRetries, GuideChannelsRetryDelay)(attempt()).recover {
             case ex =>
               log.error("[lineup] scan failed", ex)
+              context.self ! Command.ScanFailed
               Seq.empty
           }
         }
@@ -349,6 +399,10 @@ object Tablo4thGen {
           case Command.Store(channels) =>
             log.info("[lineup] store count={}", channels.size)
             cache = (1.day.fromNow, channels)
+            scanInProgress = false
+            Behaviors.same
+
+          case Command.ScanFailed =>
             scanInProgress = false
             Behaviors.same
 
@@ -516,6 +570,7 @@ object Tablo4thGen {
     object Command {
       case class StoreGuide(guide: Seq[Tablo2HDHomeRun.Guide.ChannelGuide]) extends Command
       case object Scan extends Command
+      case object ScanFailed extends Command
     }
 
     implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
@@ -624,46 +679,46 @@ object Tablo4thGen {
 
       def scan(): Future[Seq[Tablo2HDHomeRun.Guide.ChannelGuide]] = {
         import Lineup.JsonProtocol._
-        import pekko.http.scaladsl.unmarshalling.Unmarshal
-        import pekko.http.scaladsl.model.headers._
+        import org.apache.pekko.actor.typed.scaladsl.adapter._
 
-        val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
-        log.debug("[guide] http GET /guide/channels")
+        implicit val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
+        implicit val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
+        val channelsUri = lighthouseGuideChannelsUri(authContext.lighthouseToken)
 
-        val request = HttpRequest(
-          method = HttpMethods.GET
-        , uri = channelsUri
-        , headers = Seq(
-            Authorization(OAuth2BearerToken(authContext.accessToken))
-          , RawHeader("Lighthouse", authContext.lighthouseToken)
+        def attempt(): Future[Seq[Tablo2HDHomeRun.Guide.ChannelGuide]] = {
+          log.debug("[guide] http GET /guide/channels uri={}", channelsUri)
+          val request = HttpRequest(
+            method = HttpMethods.GET
+          , uri = channelsUri
+          , headers = lighthouseGuideChannelsHeaders(authContext)
           )
-        )
-
-        HttpCtx.singleRequest(request).flatMap { response =>
-          log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
-          Unmarshal(response.entity).to[String].flatMap { body =>
-            val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
-            log.info("[guide] scan channels count={}", channels.size)
-
-            val guideFutures = channels.map { channel =>
-              val (major, minor, callSign) = channel.kind match {
-                case "ota" =>
-                  val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
-                  (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
-                case "ott" =>
-                  val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
-                  (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
-                case _ =>
-                  (0, 0, channel.name)
+          HttpCtx.singleRequest(request).flatMap { response =>
+            log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
+            readSuccessBody(response, "guide guide/channels").flatMap { body =>
+              val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
+              log.info("[guide] scan channels count={}", channels.size)
+              val guideFutures = channels.map { channel =>
+                val (major, minor, callSign) = channel.kind match {
+                  case "ota" =>
+                    val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
+                    (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
+                  case "ott" =>
+                    val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
+                    (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
+                  case _ =>
+                    (0, 0, channel.name)
+                }
+                fetchAiringsForChannel(channel.identifier, callSign, major, minor)
               }
-              fetchAiringsForChannel(channel.identifier, callSign, major, minor)
+              Future.sequence(guideFutures)
             }
-
-            Future.sequence(guideFutures)
           }
-        }.recover {
+        }
+
+        withRetries("guide", 1, GuideChannelsScanRetries, GuideChannelsRetryDelay)(attempt()).recover {
           case ex =>
             log.error("[guide] scan failed", ex)
+            context.self ! Command.ScanFailed
             Seq.empty
         }
       }
@@ -674,6 +729,10 @@ object Tablo4thGen {
         case Command.StoreGuide(guide) =>
           log.info("[guide] store count={}", guide.size)
           cache = (1.hour.fromNow, guide)
+          scanInProgress = false
+          Behaviors.same
+
+        case Command.ScanFailed =>
           scanInProgress = false
           Behaviors.same
 
