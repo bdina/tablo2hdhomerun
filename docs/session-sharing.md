@@ -91,7 +91,8 @@ The manager wraps each returned source so materialization and termination report
 
 Open, close, and replace async steps run as Pekko Stream flows (`ProtocolFlows`) with
 `completionTimeout`; the actor receives terminal results (`OpenFinished`, `CloseFinished`,
-`ReplaceFinished`) rather than intermediate `pipeToSelf` phase messages. Capacity, channel index,
+`ReplaceCloseFinished`, `ReplaceOpenFinished`, or `ReplaceLateClose` for a timed-out close step)
+rather than intermediate `pipeToSelf` phase messages. Capacity, channel index,
 and session-id index remain actor-owned.
 
 ### State
@@ -166,7 +167,9 @@ backend's last known total).
 - Issue the replacement watch only after the close step finishes.
 - Replace progresses through phases: `ClosingPrior` → `OpeningNext` → `Active`, with `WaitingForLateClose` after a
   close-step timeout and `ReadyToRetryOpen` after an open-step failure/timeout. Close and open steps each run as a
-  stream flow with `replaceTimeout`; the actor handles one terminal `ReplaceFinished` (or `ReplaceLateClose`) per step.
+  separate stream (`closeStep` / `openStep`) with `replaceTimeout`; the actor handles one terminal
+  `ReplaceCloseFinished` or `ReplaceOpenFinished` per step, and `ReplaceLateClose` when a close-step timeout fires
+  before Tablo DELETE completes.
 - Each close or open step is bounded by `replaceTimeout`. `SharedChannelStream` waits
   `replaceTimeout * 2 + replaceTimeout / 5` so a full close-then-open cycle can finish with headroom before the
   stream-side timeout abandons the reply.
