@@ -49,9 +49,6 @@ class ChannelRouteSpec extends AnyFlatSpecLike with Matchers with ScalatestRoute
   def createGen4Route(sm: ActorRef[SessionManager.Command]): Route =
     Tablo4thGen.Channel.route(sm, Settings(askTimeout = 100.millis))(typedSystem)
 
-  def createLegacyRoute(sm: ActorRef[SessionManager.Command]): Route =
-    TabloLegacy.Channel.route(sm, Settings(askTimeout = 100.millis))(typedSystem)
-
   "GET /channel/{id} 4th gen" should "return 200 and streaming content on success" in {
     val sm = createStubSessionManager(_ => Attached(UUID.randomUUID(), Source.single(ByteString("data"))))
     val route = createGen4Route(sm)
@@ -90,49 +87,6 @@ class ChannelRouteSpec extends AnyFlatSpecLike with Matchers with ScalatestRoute
     val route = createGen4Route(sm)
 
     Get("/channel/test-ch") ~> route ~> check {
-      val _ = status shouldBe StatusCodes.InternalServerError
-      val _ = responseAs[String] shouldBe "Unable to stream channel"
-    }
-  }
-
-  "GET /channel/{id} legacy" should "return 200 and streaming content on success" in {
-    val sm = createStubSessionManager(_ => Attached(UUID.randomUUID(), Source.single(ByteString("legacy"))))
-    val route = createLegacyRoute(sm)
-
-    Get("/channel/101") ~> route ~> check {
-      val _ = status shouldBe StatusCodes.OK
-      val _ = contentType.mediaType.mainType shouldBe "video"
-      val _ = contentType.mediaType.subType shouldBe "mp2t"
-      val chunks = responseAs[String]
-      val _ = chunks shouldBe "legacy"
-    }
-  }
-
-  it should "return 503 when no tuners are available" in {
-    val sm = createStubSessionManager(_ => NoAvailableTuners)
-    val route = createLegacyRoute(sm)
-
-    Get("/channel/101") ~> route ~> check {
-      val _ = status shouldBe StatusCodes.ServiceUnavailable
-      val _ = responseAs[String] shouldBe "No available tuners"
-    }
-  }
-
-  it should "return 500 when acquire fails" in {
-    val sm = createStubSessionManager(_ => AcquireFailed(new Exception("legacy failure")))
-    val route = createLegacyRoute(sm)
-
-    Get("/channel/101") ~> route ~> check {
-      val _ = status shouldBe StatusCodes.InternalServerError
-      val _ = responseAs[String] shouldBe "Unable to stream channel"
-    }
-  }
-
-  it should "return 500 on ask timeout" in {
-    val sm = createStubSessionManager(_ => NoAvailableTuners, delay = 250.millis)
-    val route = createLegacyRoute(sm)
-
-    Get("/channel/101") ~> route ~> check {
       val _ = status shouldBe StatusCodes.InternalServerError
       val _ = responseAs[String] shouldBe "Unable to stream channel"
     }

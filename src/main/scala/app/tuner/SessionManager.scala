@@ -329,7 +329,6 @@ object SessionManager {
     def isNoTuners(ex: Throwable): Boolean = ex match {
       case Error.NoAvailableTuners => true
       case Tablo4thGen.Error.NoAvailableTuners => true
-      case TabloLegacy.Channel.Error.NoAvailableTuners => true
       case other => Option(other.getMessage).exists(_.toLowerCase.contains("no available tuners"))
     }
 

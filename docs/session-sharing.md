@@ -5,7 +5,7 @@
 The proxy previously guarded concurrent playback by counting HTTP response streams (`activeStreams` in 4th gen) or by
 probing `/server/tuners` (legacy) before each watch. That did not match Tablo's resource model: each `POST .../watch`
 creates a player session that consumes a tuner. Two clients on the same channel got two Tablo sessions and consumed two
-tuners.
+tuners. This design addresses that for **4th gen** first; Legacy retains the older per-request path until migration.
 
 ## Goals
 
@@ -27,16 +27,19 @@ tuners.
 
 ## Architecture status
 
-Implemented. 4th gen and legacy channel routes acquire through a shared `SessionManager`. Legacy no longer pre-checks
-`in_use` tuners per request; capacity comes from `/server/tuners`.length (or 4th gen `/server/info` model.tuners).
+Implemented for **4th gen**. Legacy continues to use its per-request watch + `ResilientHlsSource` path (pre-checks
+`/server/tuners` `in_use` flags) until SessionManager is stabilized; Legacy migration onto `SessionManager` /
+`SharedChannelStream` is deferred.
+
+4th gen channel routes acquire through `SessionManager`. Capacity comes from `/server/info` `model.tuners`.
 
 ## Concepts
 
 | Term | Meaning |
 |------|---------|
-| `ChannelKey` | Stable channel ID (`String`; legacy builds it from `Long`) |
+| `ChannelKey` | Stable channel ID (`String`) |
 | `TunerLease` | One Tablo watch/player session with token and playlist metadata |
-| `SessionId` | Current Tablo player token; legacy uses its watch-response token |
+| `SessionId` | Current Tablo player token |
 | `AttachmentId` | Proxy-generated UUID for one HTTP response consumer |
 | Client attachment | One HTTP `GET /channel/{id}` consumer |
 | Capacity reservation | One `Opening`, `Active`, `Replacing`, or `Closing` channel entry |
@@ -225,9 +228,6 @@ sessions. A refresh of zero rejects further opens.
 Tablo watch HTTP 503 remains authoritative when recordings or clients outside the proxy consume tuners unknown to the
 session manager.
 
-For legacy, load capacity from `/server/tuners`.length at startup or refresh time (success responses only). Do not gate
-each watch request on the response's live `in_use` flags.
-
 ## Shared channel stream
 
 `SharedChannelStream` owns the shared playback lifecycle:
@@ -239,7 +239,8 @@ each watch request on the response's live `in_use` flags.
 - Fail and detach a subscriber that exceeds the timeout so it cannot stall healthy subscribers indefinitely.
 - Report upstream completion/failure and player-token changes to `SessionManager`.
 - Pause keepalive during replace; ignore stale keepalive/fetch updates after a session id change.
-- Legacy recovery (no keepalive ops) requests a close-first replacement watch on non-first HLS factory attempts.
+- When keepalive ops are absent, non-first HLS factory attempts request a close-first replacement watch (used by tests;
+  Legacy production still uses its own `ResilientHlsSource` recovery path).
 
 Late subscribers receive future live bytes only. The shared stream does not replay previous MPEG-TS data.
 
@@ -281,16 +282,15 @@ attached (including granted-but-not-yet-materialized attachments).
 
 ## Legacy support
 
-Legacy Tablo uses the same `SessionManager` with `ChannelKey` built from the legacy numeric channel id. The watch-response token is its `SessionId`. Legacy
-has no keepalive or DELETE behavior, so teardown only stops the shared stream. HLS recovery requests a close-first
-replacement watch through `SessionManager`. Legacy watch HTTP 503 maps to `NoAvailableTuners` (proxy HTTP 503).
+Deferred. Legacy still uses its pre-SessionManager channel route: probe `/server/tuners` for free slots, watch the
+channel, and recover via `ResilientHlsSource` retune. Once SessionManager is stabilized on 4th gen, Legacy should adopt
+the same acquire/share path (`ChannelKey` from numeric id, watch-response token as `SessionId`, no keepalive/DELETE).
 
 ## Key files
 
 - `src/main/scala/app/tuner/SessionManager.scala`
 - `src/main/scala/app/tuner/SharedChannelStream.scala`
 - `src/main/scala/app/tuner/Tablo4thGen.scala`
-- `src/main/scala/app/tuner/TabloLegacy.scala`
 - `src/main/scala/app/Tablo2HDHomeRun.scala`
 - `src/test/scala/app/tuner/SessionManagerSpec.scala`
 - `src/test/scala/app/tuner/SharedChannelStreamSpec.scala`

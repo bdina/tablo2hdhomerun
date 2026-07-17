@@ -26,6 +26,7 @@ import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
 import app.config.ConfigTypes.{HostAddress, HttpProtocol, Port}
+import app.stream.StreamBackend
 import app.sys.LogConfig
 
 object TabloLegacy {
@@ -784,12 +785,6 @@ object TabloLegacy {
     }
 
     object Channel {
-      sealed trait Error extends Exception
-      object Error {
-        case object NoAvailableTuners extends Exception("No available tuners") with Error
-        case class WatchFailed(status: Int, body: String) extends Exception(s"legacy watch failed: $status $body") with Error
-      }
-
       object Request {
         case class WatchRequest(
           bandwidth: Int = 1000
@@ -826,6 +821,7 @@ object TabloLegacy {
         , bif_url_hd: Option[Uri]
         , video_details: VideoDetails
         )
+        case object NoAvailableTunersError extends Exception("No available tuners")
         object JsonProtocol {
           import TabloLegacy.Response.JsonProtocol.uriFormat
           implicit val videoDetailsFormat: JsonFormat[VideoDetails] = jsonFormat2(VideoDetails.apply)
@@ -841,103 +837,104 @@ object TabloLegacy {
         }
       }
 
-      final case class SessionBackend()(implicit system: ActorSystem[?]) extends SessionManager.SessionBackend {
-        implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-        @volatile private var cachedTuners: Int = 4
-
-        def totalTuners: Int = cachedTuners
-
-        def refreshTuners(): Future[Int] =
-          HttpCtx.singleRequest(Request.Tuners.httpRequest).flatMap { response =>
-            if (response.status.isSuccess()) {
-              import Response.Tuners.JsonProtocol.tunersFormat
-              Unmarshal(response.entity).to[String].map { body =>
-                val tuners = body.parseJson.convertTo[Seq[Response.Tuners]]
-                cachedTuners = math.max(0, tuners.size)
-                cachedTuners
-              }
-            } else {
-              val _ = response.entity.discardBytes()
-              log.warn("[channel] legacy tuners refresh status={}", response.status.intValue())
-              Future.successful(cachedTuners)
-            }
-          }.recover {
-            case ex =>
-              log.warn("[channel] legacy tuners refresh failed", ex)
-              cachedTuners
-          }
-
-        def open(channel: SessionManager.ChannelKey): Future[SessionManager.PlayerSession] = {
-          val channelId = channel.value
-          val watchUri =
-            AppContext.discover
-              .proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
-              .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
-          HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
-            import Response.JsonProtocol._
-            log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
-            if (response.status == StatusCodes.ServiceUnavailable) {
-              val _ = response.entity.discardBytes()
-              Future.failed(Error.NoAvailableTuners)
-            } else if (response.status.isSuccess()) {
-              Unmarshal(response.entity).to[String].map { body =>
-                val data = body.parseJson.convertTo[Response.WatchResponse]
-                SessionManager.PlayerSession(
-                  sessionId = data.token
-                , playlistUrl = data.playlist_url.toString
-                , expires = scala.util.Try(java.time.Instant.parse(data.expires)).toOption
-                , keepalive = Some(data.keepalive)
-                )
-              }
-            } else {
-              Unmarshal(response.entity).to[String].flatMap { body =>
-                Future.failed(
-                  Error.WatchFailed(response.status.intValue(), LogConfig.truncate(body))
-                )
-              }
-            }
-          }
-        }
-
-        def close(sessionId: SessionManager.SessionId): Future[Unit] =
-          Future.successful(())
-      }
-
-      def route(
-        sessionManager: ActorRef[SessionManager.Command]
-      , settings: SessionManager.Settings = SessionManager.Settings()
-      )(implicit system: ActorSystem[?]) = {
-        import pekko.actor.typed.scaladsl.AskPattern._
-        implicit val timeout: pekko.util.Timeout = settings.askTimeout
+      val route =
         path("channel" / LongNumber) { channelId =>
           get {
-            val acquire =
-              sessionManager.ask[SessionManager.AcquireResult](
-                SessionManager.Acquire(SessionManager.ChannelKey(channelId), _)
-              )
-            onComplete(acquire) {
-              case Success(SessionManager.Attached(attachmentId, source)) =>
-                log.info("[channel] streaming channelId={} attachment={}", channelId, attachmentId.toString.take(8))
+            import Response.JsonProtocol._
+            import app.stream.ResilientHlsSource
+
+            val streamId = java.util.UUID.randomUUID.toString.take(8)
+
+            val watchUri =
+              AppContext.discover
+                .proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
+                .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
+
+            val tunersFuture: Future[Seq[Response.Tuners]] =
+              HttpCtx.singleRequest(Request.Tuners.httpRequest).flatMap { response =>
+                import Response.Tuners.JsonProtocol.tunersFormat
+                log.debug("[channel] http GET /server/tuners status={}", response.status.intValue())
+                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[Response.Tuners]])
+              }
+
+            def watchChannel(): Future[Response.WatchResponse] = {
+              HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
+                log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
+                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
+              }
+            }
+
+            def startWatchSession(checkTuners: Boolean): Future[Response.WatchResponse] = {
+              val availableFuture =
+                if (checkTuners) {
+                  tunersFuture.map { tuners =>
+                    val available = tuners.filterNot(_.in_use).size
+                    log.info("[channel] available tuners {}", available)
+                    if (available > 0) {
+                      true
+                    } else {
+                      log.info("[channel] no available tuners (0/{})", tuners.size)
+                      false
+                    }
+                  }
+                } else {
+                  Future.successful(true)
+                }
+              availableFuture.flatMap { available =>
+                if (available) {
+                  watchChannel()
+                } else {
+                  Future.failed(Response.NoAvailableTunersError)
+                }
+              }
+            }
+
+            def streamWithResilience(firstPlaylistUrl: String) =
+              Source.lazySource { () =>
+                var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
+                def streamFactory() = {
+                  nextPlaylistUrl match {
+                    case Some(url) =>
+                      nextPlaylistUrl = None
+                      StreamBackend().stream(url, streamId)
+                    case None =>
+                      Source.futureSource(
+                        startWatchSession(checkTuners = false).map { data =>
+                          log.info("[channel] recovered tune playlist={}", data.playlist_url)
+                          StreamBackend().stream(data.playlist_url.toString, streamId)
+                        }
+                      )
+                  }
+                }
+                ResilientHlsSource(
+                  streamFactory = () => streamFactory()
+                , streamName = s"legacy-channel-$channelId"
+                ).watchTermination() { (_, done) =>
+                  done.onComplete {
+                    case Success(_) =>
+                      log.info("[channel] stream end streamId={} channelId={}", streamId, channelId)
+                    case Failure(ex) =>
+                      log.warn("[channel] stream failed streamId={} channelId={}", streamId, channelId, ex)
+                  }
+                }
+              }
+
+            onComplete(startWatchSession(checkTuners = true)) {
+              case Success(data) =>
+                log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, data.playlist_url)
                 val videoMp2t = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
                 complete(
                   HttpEntity.Chunked.fromData(
                     ContentType(videoMp2t)
-                  , source
+                  , streamWithResilience(data.playlist_url.toString)
                   )
                 )
-              case Success(SessionManager.NoAvailableTuners) =>
-                log.warn("[channel] no available tuners channelId={}", channelId)
-                complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
-              case Success(SessionManager.AcquireFailed(ex)) =>
-                log.warn("[channel] acquire failed channelId={}", channelId, ex)
-                complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
               case Failure(ex) =>
-                log.warn("[channel] acquire ask failed channelId={}", channelId, ex)
+                log.warn("[channel] stream start failed streamId={} channelId={}", streamId, channelId, ex)
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
             }
           }
         }
-      }
     }
 
     object Favicon {

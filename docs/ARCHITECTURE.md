@@ -138,6 +138,8 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
 
 ### Live TV Streaming Workflow
 
+**4th gen** (SessionManager):
+
 ```
 1. Client requests GET /channel/{channelId}
 2. Proxy asks SessionManager to acquire the channel
@@ -147,14 +149,25 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
    a. Reserve one local tuner slot (Opening)
    b. POST /guide/channels/{id}/watch to Tablo
    c. Materialize one shared HLS/FFmpeg upstream into a BroadcastHub
-   d. 4th gen: keepalive once per session (not per client)
+   d. Keepalive once per session (not per client)
    e. Reply with an attachment source to each waiting client
 5. Else or Tablo returns 503: respond with HTTP 503 No available tuners
-6. On last client disconnect: stop upstream, DELETE player session (4th gen), free reservation
+6. On last client disconnect: stop upstream, DELETE player session, free reservation
 ```
 
 Same-channel clients share one Tablo player session. Distinct channels each consume one reservation.
 See [session-sharing.md](session-sharing.md) for the state machine and edge cases.
+
+**Legacy** (deferred SessionManager migration):
+
+```
+1. Client requests GET /channel/{channelId}
+2. Proxy checks tuner availability via GET /server/tuners
+3. If a tuner is available:
+   a. POST /guide/channels/{id}/watch to Tablo
+   b. Stream MPEG-TS via ResilientHlsSource (retune on stall)
+4. If no tuners: return HTTP 500
+```
 
 ### Program Guide Workflow
 
