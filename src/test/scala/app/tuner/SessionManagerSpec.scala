@@ -4,6 +4,7 @@ import org.apache.pekko
 import pekko.NotUsed
 import pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import pekko.actor.typed.ActorRef
+import pekko.stream.KillSwitches
 import pekko.stream.scaladsl.Source
 import pekko.stream.testkit.scaladsl.TestSink
 import pekko.util.ByteString
@@ -14,7 +15,9 @@ import org.scalatest.wordspec.AnyWordSpecLike
 import org.scalatestplus.junit.JUnitRunner
 
 import app.tuner.SessionManager._
+import app.tuner.SessionManager.Router._
 
+import java.util.UUID
 import java.util.concurrent.atomic.{AtomicInteger, AtomicReference}
 
 import scala.concurrent.{Future, Promise}
@@ -813,7 +816,197 @@ class SessionManagerSpec
       }
       control.cancel()
     }
+  }
 
+  private val routerChannel = Gen4Channel("51")
+  private val routerOther = Gen4Channel("71")
 
+  private def routerRuntime(id: String): SessionRuntime =
+    SessionRuntime(id, Source.never[ByteString].mapMaterializedValue(_ => NotUsed), () => (), () => ())
+
+  private def routerActiveState(sessionId: String, attachments: Map[UUID, AttachmentState] = Map.empty): ManagerState = {
+    val rs = SessionRuntimeState(routerRuntime(sessionId), attachments)
+    initialState(2).copy(
+      channels = Map(routerChannel -> Active(rs))
+    , sessionIndex = Map(sessionId -> routerChannel)
+    , startupGate = None
+    )
+  }
+
+  "SessionManager.Router.decide" should {
+    "reject acquire when at capacity" in {
+      val probe = testKit.createTestProbe[AcquireResult]()
+      val opening = initialState(1).copy(
+        channels = Map(routerChannel -> Opening(UUID.randomUUID(), Vector.empty))
+      , startupGate = None
+      )
+      val (next, effects) = decide(opening, AcquireRequested(routerOther, probe.ref), shortSettings)
+      next.channels.contains(routerOther) shouldBe false
+      effects should contain(ReplyAcquire(probe.ref, NoAvailableTuners))
+      effects.collect { case r: RefreshTuners => r } should not be empty
+    }
+
+    "queue concurrent acquires onto one Opening reservation" in {
+      val first = testKit.createTestProbe[AcquireResult]()
+      val second = testKit.createTestProbe[AcquireResult]()
+      val reservationId = UUID.randomUUID()
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Opening(reservationId, Vector(PendingAcquire(first.ref))))
+      , startupGate = None
+      )
+      val (next, effects) = decide(state, AcquireRequested(routerChannel, second.ref), shortSettings)
+      effects shouldBe empty
+      next.channels(routerChannel) match {
+        case Opening(id, waiters) =>
+          id shouldBe reservationId
+          waiters.map(_.replyTo) shouldBe Vector(first.ref, second.ref)
+        case other => fail(s"expected Opening, got $other")
+      }
+    }
+
+    "emit StartRuntime on matching open success" in {
+      val waiter = testKit.createTestProbe[AcquireResult]()
+      val reservationId = UUID.randomUUID()
+      val session = player("s1")
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Opening(reservationId, Vector(PendingAcquire(waiter.ref))))
+      , startupGate = None
+      )
+      val (next, effects) = decide(state, OpenCompleted(routerChannel, reservationId, Right(session)), shortSettings)
+      next.channels(routerChannel) shouldBe a[Opening]
+      effects shouldBe Vector(StartRuntime(routerChannel, session, Vector(PendingAcquire(waiter.ref))))
+    }
+
+    "close orphan on stale open success" in {
+      val current = UUID.randomUUID()
+      val stale = UUID.randomUUID()
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Opening(current, Vector.empty))
+      , startupGate = None
+      )
+      val (_, effects) = decide(state, OpenCompleted(routerChannel, stale, Right(player("orphan"))), shortSettings)
+      effects shouldBe Vector(CloseOrphan(routerChannel, "orphan"))
+    }
+
+    "grant attachment while replacing" in {
+      val probe = testKit.createTestProbe[AcquireResult]()
+      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Replacing(rs, "s1", ClosingPrior))
+      , sessionIndex = Map("s1" -> routerChannel)
+      , startupGate = None
+      )
+      val (next, effects) = decide(state, AcquireRequested(routerChannel, probe.ref), shortSettings)
+      next.channels(routerChannel) shouldBe a[Replacing]
+      effects.collect { case g: GrantAttachment => g.replyTo } shouldBe Vector(probe.ref)
+    }
+
+    "begin closing when last attachment ends" in {
+      val attachmentId = UUID.randomUUID()
+      val ks = KillSwitches.shared("att")
+      val state = routerActiveState("s1", Map(attachmentId -> Granted(ks)))
+      val (next, effects) = decide(state, AttachmentObserved(attachmentId, AttachmentEnded(None)), shortSettings)
+      next.channels(routerChannel) shouldBe a[Closing]
+      effects.collect { case StopRuntime(_) => true } should not be empty
+      effects.collect { case RunClose(_, "s1", _) => true } should not be empty
+    }
+
+    "progress replace close success to open step" in {
+      val reply = testKit.createTestProbe[ReplaceResult]()
+      val attemptId = UUID.randomUUID()
+      val ks = KillSwitches.shared("rep")
+      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Replacing(rs, "s1", ClosingPrior, Some(reply.ref), attemptId, Some(ks)))
+      , sessionIndex = Map("s1" -> routerChannel)
+      , startupGate = None
+      )
+      val (next, effects) = decide(
+        state
+      , ReplaceCloseCompleted(routerChannel, "s1", attemptId, reply.ref, CloseOk)
+      , shortSettings
+      )
+      next.channels(routerChannel) match {
+        case Replacing(_, "s1", OpeningNext, Some(ref), aid, Some(_)) =>
+          ref shouldBe reply.ref
+          aid shouldBe attemptId
+        case other => fail(s"expected OpeningNext replacing, got $other")
+      }
+      next.sessionIndex.contains("s1") shouldBe false
+      effects.collect { case r: RunReplaceOpen => r.attemptId } shouldBe Vector(attemptId)
+    }
+
+    "move to WaitingForLateClose on replace close timeout" in {
+      val reply = testKit.createTestProbe[ReplaceResult]()
+      val attemptId = UUID.randomUUID()
+      val ks = KillSwitches.shared("rep")
+      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Replacing(rs, "s1", ClosingPrior, Some(reply.ref), attemptId, Some(ks)))
+      , sessionIndex = Map("s1" -> routerChannel)
+      , startupGate = None
+      )
+      val (next, effects) = decide(
+        state
+      , ReplaceCloseCompleted(routerChannel, "s1", attemptId, reply.ref, CloseTimedOut)
+      , shortSettings
+      )
+      next.channels(routerChannel) match {
+        case Replacing(_, "s1", WaitingForLateClose, None, aid, None) =>
+          aid shouldBe attemptId
+        case other => fail(s"expected WaitingForLateClose, got $other")
+      }
+      effects should contain(ReplyReplace(reply.ref, ReplaceFailed(Error.ReplaceTimedOut("51"))))
+    }
+
+    "ready retry open after late replace close" in {
+      val attemptId = UUID.randomUUID()
+      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Replacing(rs, "s1", WaitingForLateClose, None, attemptId, None))
+      , sessionIndex = Map("s1" -> routerChannel)
+      , startupGate = None
+      )
+      val (next, effects) = decide(
+        state
+      , ReplaceLateCloseCompleted(routerChannel, "s1", Right(()))
+      , shortSettings
+      )
+      next.channels(routerChannel) match {
+        case Replacing(_, "s1", ReadyToRetryOpen, None, aid, None) =>
+          aid shouldBe attemptId
+        case other => fail(s"expected ReadyToRetryOpen, got $other")
+      }
+      effects shouldBe empty
+    }
+
+    "flush startup gate on TunersRefreshed" in {
+      val probe = testKit.createTestProbe[AcquireResult]()
+      val state = initialState(2).copy(
+        startupGate = Some(Vector(routerChannel -> probe.ref))
+      )
+      val (next, effects) = decide(state, TunersRefreshed(2), shortSettings)
+      next.startupGate shouldBe None
+      next.channels(routerChannel) shouldBe a[Opening]
+      effects.head shouldBe CancelStartupTimer
+      effects.collect { case r: RunOpen => r.channel } shouldBe Vector(routerChannel)
+    }
+
+    "activate via RuntimeStarted and grant waiters" in {
+      val waiter = testKit.createTestProbe[AcquireResult]()
+      val state = initialState(2).copy(
+        channels = Map(routerChannel -> Opening(UUID.randomUUID(), Vector(PendingAcquire(waiter.ref))))
+      , startupGate = None
+      )
+      val rt = routerRuntime("s1")
+      val (next, effects) = decide(
+        state
+      , RuntimeStarted(routerChannel, rt, Vector(PendingAcquire(waiter.ref)))
+      , shortSettings
+      )
+      next.channels(routerChannel) shouldBe a[Active]
+      next.sessionIndex("s1") shouldBe routerChannel
+      effects.collect { case g: GrantAttachment => g.replyTo } shouldBe Vector(waiter.ref)
+    }
   }
 }

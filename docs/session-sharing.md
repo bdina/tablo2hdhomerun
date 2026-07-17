@@ -89,11 +89,15 @@ The manager wraps each returned source so materialization and termination report
 `AttachmentSignal(attachmentId, event)` (`AttachmentStarted`, `AttachmentEnded`, or
 `AttachmentMaterializeTimedOut`). Signals are idempotent. Routes do not manually release sessions.
 
-Open, close, and replace async steps run as Pekko Stream flows (`ProtocolFlows`) with
-`completionTimeout`; the actor receives terminal results (`OpenFinished`, `CloseFinished`,
-`ReplaceCloseFinished`, `ReplaceOpenFinished`, or `ReplaceLateClose` for a timed-out close step)
-rather than intermediate `pipeToSelf` phase messages. Capacity, channel index,
-and session-id index remain actor-owned.
+Internally, `SessionManager` keeps a typed Actor only as the ask facade. That Actor offers
+`ManagerEvent`s into a Pekko `Source.queue` that owns capacity, the channel index, and the
+session-id index via a pure `SessionManager.Router.decide` step. Open, close, and replace async steps
+still run as Pekko Stream flows (`ProtocolFlows`) with `completionTimeout`; their terminal results
+(`OpenCompleted`, `CloseCompleted`, `ReplaceCloseCompleted`, `ReplaceOpenCompleted`, or
+`ReplaceLateCloseCompleted`) re-enter the same queue rather than the Actor mailbox. Attachment,
+upstream, and tuner-refresh signals follow the same path. `StartRuntime` completes synchronously
+inside the stream stage as `RuntimeStarted` so activation and waiter grants stay atomic with open
+success.
 
 ### State
 
@@ -167,9 +171,9 @@ backend's last known total).
 - Issue the replacement watch only after the close step finishes.
 - Replace progresses through phases: `ClosingPrior` → `OpeningNext` → `Active`, with `WaitingForLateClose` after a
   close-step timeout and `ReadyToRetryOpen` after an open-step failure/timeout. Close and open steps each run as a
-  separate stream (`closeStep` / `openStep`) with `replaceTimeout`; the actor handles one terminal
-  `ReplaceCloseFinished` or `ReplaceOpenFinished` per step, and `ReplaceLateClose` when a close-step timeout fires
-  before Tablo DELETE completes.
+  separate stream (`closeStep` / `openStep`) with `replaceTimeout`; the manager event stream handles one terminal
+  `ReplaceCloseCompleted` or `ReplaceOpenCompleted` per step, and `ReplaceLateCloseCompleted` when a close-step
+  timeout fires before Tablo DELETE completes.
 - Each close or open step is bounded by `replaceTimeout`. `SharedChannelStream` waits
   `replaceTimeout * 2 + replaceTimeout / 5` so a full close-then-open cycle can finish with headroom before the
   stream-side timeout abandons the reply.
