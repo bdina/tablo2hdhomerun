@@ -36,53 +36,6 @@ object Tablo4thGen {
 
   val LIGHTHOUSE_BASE_URL = "https://lighthousetv.ewscloud.com/api/v2"
   val USER_AGENT = "Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)"
-  val GuideChannelsScanRetries = 3
-  val GuideChannelsRetryDelay = 750.millis
-
-  def lighthouseGuideChannelsUri(lighthouseToken: String): Uri = {
-    val uri = Uri(s"$LIGHTHOUSE_BASE_URL/account/$lighthouseToken/guide/channels")
-    if (uri.path.endsWithSlash) uri else uri.copy(path = uri.path ++ Uri.Path./)
-  }
-
-  def lighthouseGuideChannelsHeaders(authContext: Auth.AuthContext): Seq[pekko.http.scaladsl.model.HttpHeader] = {
-    import pekko.http.scaladsl.model.headers._
-    Seq(
-      Authorization(OAuth2BearerToken(authContext.accessToken))
-    , RawHeader("Lighthouse", authContext.lighthouseToken)
-    , RawHeader("User-Agent", USER_AGENT)
-    , RawHeader("Accept", "application/json")
-    )
-  }
-
-  def readSuccessBody(
-    response: HttpResponse
-  , label: String
-  )(implicit ec: scala.concurrent.ExecutionContext, mat: pekko.stream.Materializer): Future[String] = {
-    import pekko.http.scaladsl.unmarshalling.Unmarshal
-    Unmarshal(response.entity).to[String].flatMap { body =>
-      if (response.status.isSuccess)
-        Future.successful(body)
-      else
-        Future.failed(
-          new RuntimeException(s"$label status=${response.status.intValue()} body=${LogConfig.truncate(body)}")
-        )
-    }
-  }
-
-  def withRetries[T](
-    label: String
-  , attempt: Int
-  , maxAttempts: Int
-  , delay: FiniteDuration
-  )(run: => Future[T])(implicit
-    ec: scala.concurrent.ExecutionContext
-  , scheduler: pekko.actor.Scheduler
-  ): Future[T] =
-    run.recoverWith {
-      case ex if attempt < maxAttempts =>
-        log.warn("[{}] attempt {}/{} failed, retrying in {}", label, attempt, maxAttempts, delay, ex)
-        after(delay, scheduler)(withRetries(label, attempt + 1, maxAttempts, delay)(run))
-    }
 
   sealed trait Error extends Exception
   object Error {
@@ -94,11 +47,6 @@ object Tablo4thGen {
     case object NoDevicesFound extends Exception("No devices found in account") with Error
     case class SelectFailed(message: String) extends Exception(s"Select failed: $message") with Error
     case object NoAvailableTuners extends Exception("No available tuners") with Error
-    case class InvalidWatchResponse(message: String) extends Exception(message) with Error
-    case class WatchFailed(status: Int, body: String) extends Exception(s"watch failed: $status $body") with Error
-    case class SessionDeleteFailed(status: Int, body: String) extends Exception(s"session DELETE failed: $status $body") with Error
-    case class SessionRequestFailed(method: String, status: Int) extends Exception(s"session $method failed: $status") with Error
-    case object MissingSessionToken extends Exception("watch response omitted session token") with Error
   }
 
   object Auth {
@@ -322,7 +270,6 @@ object Tablo4thGen {
       object Command {
         case class Store(channels: Seq[JsValue]) extends Command
         case object Scan extends Command
-        case object ScanFailed extends Command
       }
 
       implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
@@ -359,35 +306,33 @@ object Tablo4thGen {
 
         def scan(): Future[Seq[JsValue]] = {
           import Lineup.JsonProtocol._
-          import org.apache.pekko.actor.typed.scaladsl.adapter._
+          import pekko.http.scaladsl.unmarshalling.Unmarshal
 
-          implicit val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
-          implicit val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
-          val channelsUri = lighthouseGuideChannelsUri(authContext.lighthouseToken)
+          val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
+          log.debug("[lineup] http GET /guide/channels")
 
-          def attempt(): Future[Seq[JsValue]] = {
-            log.debug("[lineup] http GET /guide/channels uri={}", channelsUri)
-            val request = HttpRequest(
-              method = HttpMethods.GET
-            , uri = channelsUri
-            , headers = lighthouseGuideChannelsHeaders(authContext)
+          import pekko.http.scaladsl.model.headers._
+          val request = HttpRequest(
+            method = HttpMethods.GET
+          , uri = channelsUri
+          , headers = Seq(
+              Authorization(OAuth2BearerToken(authContext.accessToken))
+            , RawHeader("Lighthouse", authContext.lighthouseToken)
             )
-            HttpCtx.singleRequest(request).flatMap { response =>
-              log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
-              readSuccessBody(response, "lineup guide/channels").map { body =>
-                val channels = body.parseJson.convertTo[Seq[ChannelLineup]]
-                log.info("[lineup] scan complete count={}", channels.size)
-                val jsChannels = channels.map(channelToJsValue)
-                context.self ! Command.Store(jsChannels)
-                jsChannels
-              }
-            }
-          }
+          )
 
-          withRetries("lineup", 1, GuideChannelsScanRetries, GuideChannelsRetryDelay)(attempt()).recover {
+          HttpCtx.singleRequest(request).flatMap { response =>
+            log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
+            Unmarshal(response.entity).to[String].map { body =>
+              val channels = body.parseJson.convertTo[Seq[ChannelLineup]]
+              log.info("[lineup] scan complete count={}", channels.size)
+              val jsChannels = channels.map(channelToJsValue)
+              context.self ! Command.Store(jsChannels)
+              jsChannels
+            }
+          }.recover {
             case ex =>
               log.error("[lineup] scan failed", ex)
-              context.self ! Command.ScanFailed
               Seq.empty
           }
         }
@@ -398,10 +343,6 @@ object Tablo4thGen {
           case Command.Store(channels) =>
             log.info("[lineup] store count={}", channels.size)
             cache = (1.day.fromNow, channels)
-            scanInProgress = false
-            Behaviors.same
-
-          case Command.ScanFailed =>
             scanInProgress = false
             Behaviors.same
 
@@ -569,7 +510,6 @@ object Tablo4thGen {
     object Command {
       case class StoreGuide(guide: Seq[Tablo2HDHomeRun.Guide.ChannelGuide]) extends Command
       case object Scan extends Command
-      case object ScanFailed extends Command
     }
 
     implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
@@ -678,46 +618,46 @@ object Tablo4thGen {
 
       def scan(): Future[Seq[Tablo2HDHomeRun.Guide.ChannelGuide]] = {
         import Lineup.JsonProtocol._
-        import org.apache.pekko.actor.typed.scaladsl.adapter._
+        import pekko.http.scaladsl.unmarshalling.Unmarshal
+        import pekko.http.scaladsl.model.headers._
 
-        implicit val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
-        implicit val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
-        val channelsUri = lighthouseGuideChannelsUri(authContext.lighthouseToken)
+        val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
+        log.debug("[guide] http GET /guide/channels")
 
-        def attempt(): Future[Seq[Tablo2HDHomeRun.Guide.ChannelGuide]] = {
-          log.debug("[guide] http GET /guide/channels uri={}", channelsUri)
-          val request = HttpRequest(
-            method = HttpMethods.GET
-          , uri = channelsUri
-          , headers = lighthouseGuideChannelsHeaders(authContext)
+        val request = HttpRequest(
+          method = HttpMethods.GET
+        , uri = channelsUri
+        , headers = Seq(
+            Authorization(OAuth2BearerToken(authContext.accessToken))
+          , RawHeader("Lighthouse", authContext.lighthouseToken)
           )
-          HttpCtx.singleRequest(request).flatMap { response =>
-            log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
-            readSuccessBody(response, "guide guide/channels").flatMap { body =>
-              val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
-              log.info("[guide] scan channels count={}", channels.size)
-              val guideFutures = channels.map { channel =>
-                val (major, minor, callSign) = channel.kind match {
-                  case "ota" =>
-                    val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
-                    (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
-                  case "ott" =>
-                    val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
-                    (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
-                  case _ =>
-                    (0, 0, channel.name)
-                }
-                fetchAiringsForChannel(channel.identifier, callSign, major, minor)
-              }
-              Future.sequence(guideFutures)
-            }
-          }
-        }
+        )
 
-        withRetries("guide", 1, GuideChannelsScanRetries, GuideChannelsRetryDelay)(attempt()).recover {
+        HttpCtx.singleRequest(request).flatMap { response =>
+          log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
+          Unmarshal(response.entity).to[String].flatMap { body =>
+            val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
+            log.info("[guide] scan channels count={}", channels.size)
+
+            val guideFutures = channels.map { channel =>
+              val (major, minor, callSign) = channel.kind match {
+                case "ota" =>
+                  val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
+                  (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
+                case "ott" =>
+                  val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
+                  (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
+                case _ =>
+                  (0, 0, channel.name)
+              }
+              fetchAiringsForChannel(channel.identifier, callSign, major, minor)
+            }
+
+            Future.sequence(guideFutures)
+          }
+        }.recover {
           case ex =>
             log.error("[guide] scan failed", ex)
-            context.self ! Command.ScanFailed
             Seq.empty
         }
       }
@@ -728,10 +668,6 @@ object Tablo4thGen {
         case Command.StoreGuide(guide) =>
           log.info("[guide] store count={}", guide.size)
           cache = (1.hour.fromNow, guide)
-          scanInProgress = false
-          Behaviors.same
-
-        case Command.ScanFailed =>
           scanInProgress = false
           Behaviors.same
 
@@ -941,11 +877,9 @@ object Tablo4thGen {
       import pekko.http.scaladsl.unmarshalling.Unmarshal
       import org.apache.pekko.actor.typed.scaladsl.adapter._
       implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-      private val HttpCtx = Http()
+      val HttpCtx = Http()
       private val scheduler = system.toClassic.scheduler
-      @volatile private var cachedTuners: Int = 4
-
-      def totalTuners: Int = cachedTuners
+      @volatile var totalTuners: Int = 4
 
       def refreshTuners(): Future[Int] = fetchServerInfo()
 
@@ -963,9 +897,9 @@ object Tablo4thGen {
                     , keepalive = session.keepalive
                     )
                   )
-                case None => Future.failed(Error.MissingSessionToken)
+                case None => Future.failed(new RuntimeException("session token missing"))
               }
-            case Left(message) => Future.failed(Error.InvalidWatchResponse(message))
+            case Left(message) => Future.failed(new RuntimeException(message))
           }
         }
 
@@ -990,41 +924,47 @@ object Tablo4thGen {
               , keepalive = session.keepalive
               )
             )
-          case None => Future.failed(Error.MissingSessionToken)
+          case None => Future.failed(new RuntimeException("session token missing"))
         }
 
-      private def fetchServerInfo(): Future[Int] = {
+      def fetchServerInfo(): Future[Int] = {
         import Channel.Response.JsonProtocol._
-        val serverInfoUri =
-          authContext.deviceUrl.withPath(Uri.Path("/server/info")).withQuery(Uri.Query("lh" -> "1"))
+
+        val serverInfoUri = authContext.deviceUrl.withPath(Uri.Path("/server/info")).withQuery(Uri.Query("lh" -> "1"))
         val headers = Hmac.signedHeaders("GET", "/server/info", None, authContext)
-        val request = HttpRequest(method = HttpMethods.GET, uri = serverInfoUri, headers = headers.toList)
+
+        log.debug("[channel] http GET /server/info")
+        val request = HttpRequest(
+          method = HttpMethods.GET
+        , uri = serverInfoUri
+        , headers = headers.toList
+        )
+
         HttpCtx.singleRequest(request).flatMap { response =>
+          log.debug("[channel] server/info status={}", response.status.intValue())
           if (response.status.isSuccess()) {
             Unmarshal(response.entity).to[String].map { body =>
               val serverInfo = body.parseJson.convertTo[Response.ServerInfo]
               val tuners = serverInfo.model.flatMap(_.tuners).getOrElse(4)
-              cachedTuners = tuners
+              totalTuners = tuners
               tuners
             }
           } else {
             val _ = response.entity.discardBytes()
-            Future.successful(cachedTuners)
+            Future.successful(totalTuners)
           }
         }.recover {
           case ex =>
             log.warn("[channel] server info failed", ex)
-            cachedTuners
+            totalTuners
         }
       }
 
-      private def watchChannel(channelId: String, attempt: Int = 0): Future[Response.Watch4thGenResponse] = {
+      def watchChannel(channelId: String, attempt: Int = 0): Future[Response.Watch4thGenResponse] = {
         import Channel.Request.Watch4thGenRequest.JsonProtocol.watch4thGenRequestFormat
         import Channel.Response.JsonProtocol.watch4thGenResponseFormat
-        val watchUri =
-          authContext.deviceUrl
-            .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
-            .withQuery(Uri.Query("lh" -> "1"))
+
+        val watchUri = authContext.deviceUrl.withPath(Uri.Path(s"/guide/channels/$channelId/watch")).withQuery(Uri.Query("lh" -> "1"))
         val deviceId = java.util.UUID.randomUUID.toString
         val watchBody = Request.Watch4thGenRequest.forDevice(deviceId).toJson.compactPrint
         val headers =
@@ -1035,29 +975,31 @@ object Tablo4thGen {
         , headers = headers.toList
         , entity = HttpEntity(ContentTypes.`application/json`, watchBody)
         )
-        log.info("[channel] guide/channels/{}/watch (POST) - {}", channelId, watchUri)
+        log.info("[4thgen-channel] guide/channels/{}/watch (POST) - {}", channelId, watchUri)
         HttpCtx.singleRequest(request).flatMap { response =>
           log.debug("[channel] watch status={} attempt={}", response.status.intValue(), attempt)
           response.status match {
             case StatusCodes.ServiceUnavailable if attempt < WatchSession.watchRetryMax =>
               val _ = response.entity.discardBytes()
+              log.debug("[channel] watch 503 retry attempt={}", attempt + 1)
               after(WatchSession.watchRetryDelaySec.seconds, scheduler)(watchChannel(channelId, attempt + 1))
             case StatusCodes.ServiceUnavailable =>
               val _ = response.entity.discardBytes()
               Future.failed(Error.NoAvailableTuners)
             case status if !status.isSuccess() =>
               Unmarshal(response.entity).to[String].flatMap { body =>
-                Future.failed(Error.WatchFailed(status.intValue(), LogConfig.truncate(body)))
+                Future.failed(new RuntimeException(s"watch failed: ${status.intValue()} ${LogConfig.truncate(body)}"))
               }
             case _ =>
               Unmarshal(response.entity).to[String].map { body =>
+                log.debug("[channel] watch body={}", LogConfig.truncate(body))
                 body.parseJson.convertTo[Response.Watch4thGenResponse]
               }
           }
         }
       }
 
-      private def endSession(token: String): Future[Unit] = {
+      def endSession(token: String): Future[Unit] = {
         val path = WatchSession.sessionPath(token)
         val uri = authContext.deviceUrl.withPath(Uri.Path(path)).withQuery(Uri.Query("lh" -> "1"))
         val headers = Hmac.signedHeaders("DELETE", path, None, authContext)
@@ -1069,23 +1011,18 @@ object Tablo4thGen {
             Future.successful(())
           } else {
             Unmarshal(response.entity).to[String].flatMap { body =>
-              Future.failed(
-                Error.SessionDeleteFailed(response.status.intValue(), LogConfig.truncate(body))
-              )
+              Future.failed(new RuntimeException(s"session DELETE failed: ${response.status.intValue()} ${LogConfig.truncate(body)}"))
             }
           }
         }
       }
 
-      private def parseSessionResponse(
-        body: String
-      , fallbackToken: Option[String]
-      ): Either[String, WatchSession.Session] = {
+      def parseSessionResponse(body: String, fallbackToken: Option[String]): Either[String, WatchSession.Session] = {
         import Channel.Response.JsonProtocol.watch4thGenResponseFormat
         WatchSession.fromResponse(body.parseJson.convertTo[Response.Watch4thGenResponse], fallbackToken)
       }
 
-      private def requestSession(
+      def requestSession(
         path: String
       , method: HttpMethod
       , fallbackToken: Option[String]
@@ -1098,37 +1035,36 @@ object Tablo4thGen {
             Unmarshal(response.entity).to[String].flatMap { body =>
               parseSessionResponse(body, fallbackToken) match {
                 case Right(session) => Future.successful(session)
-                case Left(message) => Future.failed(Error.InvalidWatchResponse(message))
+                case Left(message) => Future.failed(new RuntimeException(message))
               }
             }
           } else {
             val _ = response.entity.discardBytes()
-            Future.failed(Error.SessionRequestFailed(method.value, response.status.intValue()))
+            Future.failed(new RuntimeException(s"session ${method.value} failed: ${response.status.intValue()}"))
           }
         }
       }
     }
 
-    def route(
-      sessionManager: ActorRef[SessionManager.Command]
-    , settings: SessionManager.Settings = SessionManager.Settings()
-    )(implicit system: ActorSystem[?]) = {
+    def route(sessionManager: ActorRef[SessionManager.Command], settings: SessionManager.Settings = SessionManager.Settings())(implicit system: ActorSystem[?]) = {
       import pekko.actor.typed.scaladsl.AskPattern._
       implicit val timeout: pekko.util.Timeout = settings.askTimeout
+
       path("channel" / Segment) { channelId =>
         get {
           val acquire =
             sessionManager.ask[SessionManager.AcquireResult](
               SessionManager.Acquire(SessionManager.ChannelKey(channelId), _)
             )
+
           onComplete(acquire) {
             case Success(SessionManager.Attached(attachmentId, source)) =>
               log.info("[channel] streaming channelId={} attachment={}", channelId, attachmentId.toString.take(8))
-              val videoMp2t = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
+              val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
               complete(
                 HttpEntity.Chunked.fromData(
-                  pekko.http.scaladsl.model.ContentType(videoMp2t)
-                , source
+                  pekko.http.scaladsl.model.ContentType(`video/mp2t`),
+                  source
                 )
               )
             case Success(SessionManager.NoAvailableTuners) =>
@@ -1146,11 +1082,7 @@ object Tablo4thGen {
     }
   }
 
-  def routes(
-    lineupActor: ActorRef[Lineup.LineupActor.Request]
-  , authContext: Auth.AuthContext
-  , sessionManager: ActorRef[SessionManager.Command]
-  )(implicit system: ActorSystem[?]) = {
+  def routes(lineupActor: ActorRef[Lineup.LineupActor.Request], authContext: Auth.AuthContext, sessionManager: ActorRef[SessionManager.Command])(implicit system: ActorSystem[?]) = {
     Tablo2HDHomeRun.Response.Discover.route ~
     Lineup.route(lineupActor) ~
     Guide.route(authContext) ~
