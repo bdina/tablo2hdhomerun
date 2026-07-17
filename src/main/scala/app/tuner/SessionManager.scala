@@ -226,7 +226,7 @@ object SessionManager {
     final case class Granted(killSwitch: SharedKillSwitch) extends AttachmentState
     case object Materialized extends AttachmentState
 
-    final case class SessionRuntimeState(
+    final case class TunerLeaseState(
       runtime: SessionRuntime
     , attachments: Map[UUID, AttachmentState]
     , queued: Vector[PendingAcquire] = Vector.empty
@@ -238,21 +238,21 @@ object SessionManager {
     case object ReadyToRetryOpen extends ReplacePhase
     case object WaitingForLateClose extends ReplacePhase
 
-    sealed trait SessionEntry
-    final case class Opening(reservationId: UUID, waiters: Vector[PendingAcquire]) extends SessionEntry
-    final case class Active(state: SessionRuntimeState) extends SessionEntry
+    sealed trait TunerLease
+    final case class Opening(reservationId: UUID, waiters: Vector[PendingAcquire]) extends TunerLease
+    final case class Active(state: TunerLeaseState) extends TunerLease
     final case class Replacing(
-      state: SessionRuntimeState
+      state: TunerLeaseState
     , priorSessionId: SessionId
     , phase: ReplacePhase
     , replyTo: Option[ActorRef[ReplaceResult]] = None
     , attemptId: UUID = new UUID(0, 0)
     , killSwitch: Option[SharedKillSwitch] = None
-    ) extends SessionEntry
-    final case class Closing(sessionId: SessionId, waiters: Vector[PendingAcquire] = Vector.empty) extends SessionEntry
+    ) extends TunerLease
+    final case class Closing(sessionId: SessionId, waiters: Vector[PendingAcquire] = Vector.empty) extends TunerLease
 
     final case class ManagerState(
-      channels: Map[ChannelKey, SessionEntry]
+      channels: Map[ChannelKey, TunerLease]
     , sessionIndex: Map[SessionId, ChannelKey]
     , cachedTuners: Int
     , startupGate: Option[Vector[(ChannelKey, ActorRef[AcquireResult])]]
@@ -365,13 +365,13 @@ object SessionManager {
         case _ => false
       }
 
-    private def findAttachment(state: ManagerState, attachmentId: UUID): Option[(ChannelKey, SessionEntry, SessionRuntimeState)] =
+    private def findAttachment(state: ManagerState, attachmentId: UUID): Option[(ChannelKey, TunerLease, TunerLeaseState)] =
       state.channels.collectFirst {
         case (channel, entry @ Active(rs)) if rs.attachments.contains(attachmentId) => (channel, entry, rs)
         case (channel, entry @ Replacing(rs, _, _, _, _, _)) if rs.attachments.contains(attachmentId) => (channel, entry, rs)
       }
 
-    private def updateEntry(entry: SessionEntry, rs: SessionRuntimeState): SessionEntry = entry match {
+    private def updateLease(lease: TunerLease, rs: TunerLeaseState): TunerLease = lease match {
       case _: Active => Active(rs)
       case Replacing(_, prior, phase, replyTo, aid, ks) => Replacing(rs, prior, phase, replyTo, aid, ks)
       case other => other
@@ -388,12 +388,12 @@ object SessionManager {
 
     private def grantAttachment(
       channel: ChannelKey
-    , rs: SessionRuntimeState
+    , rs: TunerLeaseState
     , replyTo: ActorRef[AcquireResult]
     , shared: Boolean
     , reserved: Int
     , settings: Settings
-    ): (SessionRuntimeState, Vector[Effect]) = {
+    ): (TunerLeaseState, Vector[Effect]) = {
       val attachmentId = UUID.randomUUID()
       val killSwitch = KillSwitches.shared(s"attachment-${shortId(attachmentId)}")
       val next = rs.copy(attachments = rs.attachments.updated(attachmentId, Granted(killSwitch)))
@@ -409,12 +409,12 @@ object SessionManager {
 
     private def grantAll(
       channel: ChannelKey
-    , rs: SessionRuntimeState
+    , rs: TunerLeaseState
     , waiters: Vector[PendingAcquire]
     , shared: Boolean
     , reserved: Int
     , settings: Settings
-    ): (SessionRuntimeState, Vector[Effect]) =
+    ): (TunerLeaseState, Vector[Effect]) =
       waiters.foldLeft((rs, Vector.empty[Effect])) { case ((accRs, accEffects), waiter) =>
         val (nextRs, effects) = grantAttachment(channel, accRs, waiter.replyTo, shared, reserved, settings)
         (nextRs, accEffects ++ effects)
@@ -560,7 +560,7 @@ object SessionManager {
     , settings: Settings
     ): (ManagerState, Vector[Effect]) = {
       val indexed = state.copy(sessionIndex = state.sessionIndex.updated(runtime.sessionId, channel))
-      val initial = SessionRuntimeState(runtime, Map.empty)
+      val initial = TunerLeaseState(runtime, Map.empty)
       val (rs, effects) = grantAll(channel, initial, waiters, waiters.size > 1, indexed.channels.size, settings)
       val next = indexed.copy(channels = indexed.channels.updated(channel, Active(rs)))
       log.info(
@@ -588,7 +588,7 @@ object SessionManager {
           rs.attachments.get(attachmentId) match {
             case Some(_: Granted) =>
               val next = rs.copy(attachments = rs.attachments.updated(attachmentId, Materialized))
-              val nextState = state.copy(channels = state.channels.updated(channel, updateEntry(entry, next)))
+              val nextState = state.copy(channels = state.channels.updated(channel, updateLease(entry, next)))
               log.info(
                 "[session] client connect channel={} sessionId={} attachment={} clients={} shared={}"
               , channelLabel(channel), rs.runtime.sessionId, shortId(attachmentId), next.attachments.size, next.attachments.size > 1
@@ -632,7 +632,7 @@ object SessionManager {
             val (closedState, closeEffects) = beginClosing(state, channel, next.runtime, settings)
             (closedState, cancelEffect ++ closeEffects)
           } else {
-            val nextState = state.copy(channels = state.channels.updated(channel, updateEntry(entry, next)))
+            val nextState = state.copy(channels = state.channels.updated(channel, updateLease(entry, next)))
             (nextState, cancelEffect)
           }
         case None =>
@@ -658,7 +658,7 @@ object SessionManager {
                 val (closedState, closeEffects) = beginClosing(state, channel, next.runtime, settings)
                 (closedState, AbortReplace(Some(killSwitch)) +: closeEffects)
               } else {
-                val nextState = state.copy(channels = state.channels.updated(channel, updateEntry(entry, next)))
+                val nextState = state.copy(channels = state.channels.updated(channel, updateLease(entry, next)))
                 (nextState, Vector(AbortReplace(Some(killSwitch))))
               }
             case _ =>
@@ -822,7 +822,7 @@ object SessionManager {
     private def startReplaceAttempt(
       state: ManagerState
     , channel: ChannelKey
-    , rs: SessionRuntimeState
+    , rs: TunerLeaseState
     , priorSessionId: SessionId
     , replyTo: ActorRef[ReplaceResult]
     , mode: ReplaceMode
@@ -870,7 +870,7 @@ object SessionManager {
     , attemptId: UUID
     , replyTo: Option[ActorRef[ReplaceResult]]
     , phase: ReplacePhase
-    , rs: SessionRuntimeState
+    , rs: TunerLeaseState
     , aid: UUID
     , ks: Option[SharedKillSwitch]
     ): (ManagerState, Vector[Effect]) =

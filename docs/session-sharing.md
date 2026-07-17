@@ -38,11 +38,12 @@ Implemented for **4th gen**. Legacy continues to use its per-request watch + `Re
 | Term | Meaning |
 |------|---------|
 | `ChannelKey` | Stable channel ID (`String`) |
-| `TunerLease` | One Tablo watch/player session with token and playlist metadata |
+| `TunerLease` | Channel reservation in `Opening`, `Active`, `Replacing`, or `Closing` |
+| `TunerLeaseState` | Runtime + attachments for an `Active` or `Replacing` lease |
 | `SessionId` | Current Tablo player token |
 | `AttachmentId` | Proxy-generated UUID for one HTTP response consumer |
 | Client attachment | One HTTP `GET /channel/{id}` consumer |
-| Capacity reservation | One `Opening`, `Active`, `Replacing`, or `Closing` channel entry |
+| Capacity reservation | One `TunerLease` |
 | Capacity | `capacity reservations <= totalTuners` (zero tuners rejects all new opens) |
 | Same channel | Reuse the lease and attach to its `BroadcastHub` |
 | Different channel | Create a lease if capacity is available |
@@ -107,20 +108,20 @@ success.
 ### State
 
 ```scala
-Map[ChannelKey, SessionEntry]
+Map[ChannelKey, TunerLease]
 Map[SessionId, ChannelKey]
 
-sealed trait SessionEntry
-case class Opening(reservationId: UUID, waiters: Vector[PendingAcquire]) extends SessionEntry
-case class Active(state: SessionRuntimeState) extends SessionEntry
+sealed trait TunerLease
+case class Opening(reservationId: UUID, waiters: Vector[PendingAcquire]) extends TunerLease
+case class Active(state: TunerLeaseState) extends TunerLease
 case class Replacing(
-  state: SessionRuntimeState
+  state: TunerLeaseState
 , priorSessionId: SessionId
 , phase: ReplacePhase
 , replyTo: Option[ActorRef[ReplaceResult]]
 , attemptId: UUID
-) extends SessionEntry
-case class Closing(sessionId: String, waiters: Vector[PendingAcquire]) extends SessionEntry
+) extends TunerLease
+case class Closing(sessionId: String, waiters: Vector[PendingAcquire]) extends TunerLease
 ```
 
 `Opening`, `Active`, `Replacing`, and `Closing` each consume exactly one local tuner reservation. The session-ID index

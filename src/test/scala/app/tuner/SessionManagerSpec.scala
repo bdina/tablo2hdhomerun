@@ -825,7 +825,7 @@ class SessionManagerSpec
     SessionRuntime(id, Source.never[ByteString].mapMaterializedValue(_ => NotUsed), () => (), () => ())
 
   private def routerActiveState(sessionId: String, attachments: Map[UUID, AttachmentState] = Map.empty): ManagerState = {
-    val rs = SessionRuntimeState(routerRuntime(sessionId), attachments)
+    val rs = TunerLeaseState(routerRuntime(sessionId), attachments)
     initialState(2).copy(
       channels = Map(routerChannel -> Active(rs))
     , sessionIndex = Map(sessionId -> routerChannel)
@@ -890,7 +890,7 @@ class SessionManagerSpec
 
     "grant attachment while replacing" in {
       val probe = testKit.createTestProbe[AcquireResult]()
-      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val rs = TunerLeaseState(routerRuntime("s1"), Map.empty)
       val state = initialState(2).copy(
         channels = Map(routerChannel -> Replacing(rs, "s1", ClosingPrior))
       , sessionIndex = Map("s1" -> routerChannel)
@@ -915,7 +915,7 @@ class SessionManagerSpec
       val reply = testKit.createTestProbe[ReplaceResult]()
       val attemptId = UUID.randomUUID()
       val ks = KillSwitches.shared("rep")
-      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val rs = TunerLeaseState(routerRuntime("s1"), Map.empty)
       val state = initialState(2).copy(
         channels = Map(routerChannel -> Replacing(rs, "s1", ClosingPrior, Some(reply.ref), attemptId, Some(ks)))
       , sessionIndex = Map("s1" -> routerChannel)
@@ -940,7 +940,7 @@ class SessionManagerSpec
       val reply = testKit.createTestProbe[ReplaceResult]()
       val attemptId = UUID.randomUUID()
       val ks = KillSwitches.shared("rep")
-      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val rs = TunerLeaseState(routerRuntime("s1"), Map.empty)
       val state = initialState(2).copy(
         channels = Map(routerChannel -> Replacing(rs, "s1", ClosingPrior, Some(reply.ref), attemptId, Some(ks)))
       , sessionIndex = Map("s1" -> routerChannel)
@@ -961,7 +961,7 @@ class SessionManagerSpec
 
     "ready retry open after late replace close" in {
       val attemptId = UUID.randomUUID()
-      val rs = SessionRuntimeState(routerRuntime("s1"), Map.empty)
+      val rs = TunerLeaseState(routerRuntime("s1"), Map.empty)
       val state = initialState(2).copy(
         channels = Map(routerChannel -> Replacing(rs, "s1", WaitingForLateClose, None, attemptId, None))
       , sessionIndex = Map("s1" -> routerChannel)
