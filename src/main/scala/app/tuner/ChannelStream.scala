@@ -30,7 +30,7 @@ import scala.concurrent.{ExecutionContext, Future, Promise}
 import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
-object SharedChannelStream {
+object ChannelStream {
   val log = LoggerFactory.getLogger(this.getClass)
 
   final case class KeepaliveOps(

@@ -134,9 +134,9 @@ object Tablo2HDHomeRun {
         val authContext = app.tuner.Tablo4thGen.Auth.initialize(tabloAuth)
         val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
         val sessionBackend = app.tuner.Tablo4thGen.Channel.SessionBackend(authContext)
-        val runtimeFactory = app.tuner.SharedChannelStream.runtimeFactory { _ =>
+        val runtimeFactory = app.tuner.ChannelStream.runtimeFactory { _ =>
           Some(
-            app.tuner.SharedChannelStream.KeepaliveOps(
+            app.tuner.ChannelStream.KeepaliveOps(
               sessionBackend.keepalive
             , sessionBackend.fetch
             )

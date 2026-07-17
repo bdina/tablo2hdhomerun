@@ -29,7 +29,7 @@ tuners. This design addresses that for **4th gen** first; Legacy retains the old
 
 Implemented for **4th gen**. Legacy continues to use its per-request watch + `ResilientHlsSource` path (pre-checks
 `/server/tuners` `in_use` flags) until SessionManager is stabilized; Legacy migration onto `SessionManager` /
-`SharedChannelStream` is deferred.
+`ChannelStream` is deferred.
 
 4th gen channel routes acquire through `SessionManager`. Capacity comes from `/server/info` `model.tuners`.
 
@@ -179,7 +179,7 @@ backend's last known total).
   separate stream (`closeStep` / `openStep`) with `replaceTimeout`; the manager event stream handles one terminal
   `ReplaceCloseCompleted` or `ReplaceOpenCompleted` per step, and `ReplaceLateCloseCompleted` when a close-step
   timeout fires before Tablo DELETE completes.
-- Each close or open step is bounded by `replaceTimeout`. `SharedChannelStream` waits
+- Each close or open step is bounded by `replaceTimeout`. `ChannelStream` waits
   `replaceTimeout * 2 + replaceTimeout / 5` so a full close-then-open cycle can finish with headroom before the
   stream-side timeout abandons the reply.
 - On replacement success, add the new token to the index and return to `Active`.
@@ -187,11 +187,11 @@ backend's last known total).
   `ResilientHlsSource` retry open without re-closing the already deleted prior session. A close-step timeout rejects
   retries with `ReplaceAlreadyInProgress` until the late DELETE completes. A failed DELETE returns to `Active` so the
   next replace retries close before opening.
-- On replace failure, `SharedChannelStream` resumes keepalive only when the prior session is still live (for example a
+- On replace failure, `ChannelStream` resumes keepalive only when the prior session is still live (for example a
   failed DELETE that returns to `Active`). Keepalive stays paused for `ReplaceTimedOut`, `ReplaceAlreadyInProgress`,
   and `ReplaceOpenFailed` so tokens are not rotated against a deleted or still-closing prior. A late close failure that
   restores `Active` calls `resumeKeepalive` on the runtime.
-- `SharedChannelStream` owns a single replace attempt at a time via an atomic generation + promise owner. Overlapping
+- `ChannelStream` owns a single replace attempt at a time via an atomic generation + promise owner. Overlapping
   replace starts are rejected with `ReplaceAlreadyInProgress` without orphaning the active promise. Abort on
   stop/terminate fails that promise, clears ownership, and stops the reply adapter. Replace sets `replaceInProgress`
   before attempt ownership. Keepalive snapshots the generation before checking that flag and revalidates flag plus
@@ -214,7 +214,7 @@ Injected `SessionManager.Settings` defaults:
 - Granted-source materialization timeout: 5 seconds.
 - Player-session close timeout: 5 seconds.
 - Per-subscriber backpressure timeout: 30 seconds.
-- Replace timeout: 10 seconds per close or open step (`SharedChannelStream` reply budget is `2.2 × replaceTimeout`).
+- Replace timeout: 10 seconds per close or open step (`ChannelStream` reply budget is `2.2 × replaceTimeout`).
 - Startup tuner refresh timeout: 10 seconds.
 
 Tests pass shorter settings so they complete deterministically without real-time waits.
@@ -230,7 +230,7 @@ session manager.
 
 ## Shared channel stream
 
-`SharedChannelStream` owns the shared playback lifecycle:
+`ChannelStream` owns the shared playback lifecycle:
 
 - Maintain one session `AtomicReference`, one keepalive loop, and one `ResilientHlsSource` per tuner lease.
 - Materialize into `BroadcastHub.sink[ByteString](startAfterNrOfConsumers = 1, bufferSize = 256)`.
@@ -289,11 +289,11 @@ the same acquire/share path (`ChannelKey` from numeric id, watch-response token 
 ## Key files
 
 - `src/main/scala/app/tuner/SessionManager.scala`
-- `src/main/scala/app/tuner/SharedChannelStream.scala`
+- `src/main/scala/app/tuner/ChannelStream.scala`
 - `src/main/scala/app/tuner/Tablo4thGen.scala`
 - `src/main/scala/app/Tablo2HDHomeRun.scala`
 - `src/test/scala/app/tuner/SessionManagerSpec.scala`
-- `src/test/scala/app/tuner/SharedChannelStreamSpec.scala`
+- `src/test/scala/app/tuner/ChannelStreamSpec.scala`
 - `Dockerfile.jvm`
 - `docs/ARCHITECTURE.md`
 - `docs/USAGE.md`

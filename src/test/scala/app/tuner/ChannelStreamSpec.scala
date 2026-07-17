@@ -18,7 +18,7 @@ import app.AppContext
 import app.config.AppConfig
 import app.stream.StreamBackend
 import app.tuner.SessionManager.{PlayerSession, ReplaceFailed, ReplaceResult}
-import app.tuner.SharedChannelStream.{
+import app.tuner.ChannelStream.{
   KeepaliveIdle
 , KeepaliveOps
 , ReplaceAttemptOwner
@@ -36,7 +36,7 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
 @RunWith(classOf[JUnitRunner])
-class SharedChannelStreamSpec
+class ChannelStreamSpec
   extends ScalaTestWithActorTestKit
   with AnyWordSpecLike
   with Matchers
@@ -188,13 +188,13 @@ class SharedChannelStreamSpec
     }
   }
 
-  "SharedChannelStream.startShared" should {
+  "ChannelStream.startShared" should {
 
     "report termination when stop() shuts down the shared upstream" in {
       implicit val mat = pekko.stream.Materializer(system)
       implicit val ec = system.executionContext
       val terminated = new AtomicBoolean(false)
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-complete"
       , firstSession = PlayerSession(
           "tok"
@@ -222,7 +222,7 @@ class SharedChannelStreamSpec
       implicit val mat = pekko.stream.Materializer(system)
       implicit val ec = system.executionContext
       val replaceCalls = new AtomicInteger(0)
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-replace-timeout"
       , firstSession = PlayerSession("tok", "http://invalid.example/x.m3u8", None, None)
       , keepaliveOps = None
@@ -256,7 +256,7 @@ class SharedChannelStreamSpec
         }
       , fetch = session => Future.successful(session)
       )
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-keepalive-resume"
       , firstSession = PlayerSession(
           "tok"
@@ -301,7 +301,7 @@ class SharedChannelStreamSpec
       implicit val ec = system.executionContext
       val replyRef = new AtomicReference[Option[ActorRef[ReplaceResult]]](None)
       val replaceIds = new AtomicReference(Vector.empty[String])
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-late-replace"
       , firstSession = PlayerSession(
           "tok"
@@ -352,7 +352,7 @@ class SharedChannelStreamSpec
         }
       , fetch = session => Future.successful(session)
       )
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-session-update"
       , firstSession = PlayerSession(
           "tok"
@@ -392,7 +392,7 @@ class SharedChannelStreamSpec
           fetchGate.future
         }
       )
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-fetch-before-retry"
       , firstSession = PlayerSession(
           "tok"
@@ -443,7 +443,7 @@ class SharedChannelStreamSpec
           fetchGate.future
         }
       )
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-fetch-fail-before-retry"
       , firstSession = PlayerSession(
           "tok"
@@ -507,7 +507,7 @@ class SharedChannelStreamSpec
         keepalive = _ => keepaliveGate.future
       , fetch = session => Future.successful(session)
       )
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-stale-keepalive"
       , firstSession = firstSession
       , keepaliveOps = Some(ops)
@@ -573,7 +573,7 @@ class SharedChannelStreamSpec
       implicit val ec = system.executionContext
       val replaceStarted = Promise[Unit]()
       val owner = ReplaceAttemptOwner()
-      val runtime = SharedChannelStream.startShared(
+      val runtime = ChannelStream.startShared(
         channelLabel = "test-stop-replace"
       , firstSession = PlayerSession(
           "tok"
