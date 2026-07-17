@@ -50,6 +50,10 @@ object Tablo4thGen {
     case object NoDevicesFound extends Exception("No devices found in account") with Error
     case class SelectFailed(message: String) extends Exception(s"Select failed: $message") with Error
     case object NoAvailableTuners extends Exception("No available tuners") with Error
+    case class SessionFailed(message: String) extends Exception(message) with Error
+    case class SessionDeleteFailed(message: String) extends Exception(message) with Error
+    case object SessionTokenMissing extends Exception("Session token missing") with Error
+    case class WatchFailed(message: String) extends Exception(message) with Error
   }
 
   object Auth {
@@ -955,7 +959,7 @@ object Tablo4thGen {
                   Future.failed(Error.NoAvailableTuners)
                 case status if !status.isSuccess() =>
                   Unmarshal(response.entity).to[String].flatMap { body =>
-                    Future.failed(new RuntimeException(s"watch failed: ${status.intValue()} ${LogConfig.truncate(body)}"))
+                    Future.failed(Tablo4thGen.Error.WatchFailed(s"watch failed: ${status.intValue()} ${LogConfig.truncate(body)}"))
                   }
                 case _ =>
                   Unmarshal(response.entity).to[String].map { body =>
@@ -991,7 +995,7 @@ object Tablo4thGen {
                 Future.successful(())
               } else {
                 Unmarshal(response.entity).to[String].flatMap { body =>
-                  Future.failed(new RuntimeException(s"session DELETE failed: ${response.status.intValue()} ${LogConfig.truncate(body)}"))
+                  Future.failed(Tablo4thGen.Error.SessionDeleteFailed(s"session DELETE failed: ${response.status.intValue()} ${LogConfig.truncate(body)}"))
                 }
               }
             }
@@ -1020,12 +1024,12 @@ object Tablo4thGen {
                 Unmarshal(response.entity).to[String].flatMap { body =>
                   parseSessionResponse(body, fallbackToken) match {
                     case Right(session) => Future.successful(session)
-                    case Left(message) => Future.failed(new RuntimeException(message))
+                    case Left(message) => Future.failed(Tablo4thGen.Error.SessionFailed(message))
                   }
                 }
               } else {
                 val _ = response.entity.discardBytes()
-                Future.failed(new RuntimeException(s"session ${method.value} failed: ${response.status.intValue()}"))
+                Future.failed(Tablo4thGen.Error.SessionFailed(s"session ${method.value} failed: ${response.status.intValue()}"))
               }
             }
           }
@@ -1035,7 +1039,8 @@ object Tablo4thGen {
               case Some(token) =>
                 log.debug("[channel] keepalive POST {} streamId={}", WatchSession.keepalivePath(token), streamId)
                 requestSession(WatchSession.keepalivePath(token), HttpMethods.POST, Some(token))
-              case None => Future.failed(new RuntimeException("session token missing"))
+              case None =>
+                Future.failed(Tablo4thGen.Error.SessionTokenMissing)
             }
 
           def fetchSession(session: WatchSession.Session): Future[WatchSession.Session] =
@@ -1043,7 +1048,8 @@ object Tablo4thGen {
               case Some(token) =>
                 log.debug("[channel] session GET {} streamId={}", WatchSession.sessionPath(token), streamId)
                 requestSession(WatchSession.sessionPath(token), HttpMethods.GET, Some(token))
-              case None => Future.failed(new RuntimeException("session token missing"))
+              case None =>
+                Future.failed(Tablo4thGen.Error.SessionTokenMissing)
             }
 
           import app.stream.ResilientHlsSource
@@ -1056,7 +1062,8 @@ object Tablo4thGen {
                 case Right(newSession) =>
                   endSessionIfNeeded(priorToken, newSession.token)
                   Future.successful(newSession)
-                case Left(message) => Future.failed(new RuntimeException(message))
+                case Left(message) =>
+                  Future.failed(Tablo4thGen.Error.WatchFailed(message))
               }
             }
 
@@ -1070,7 +1077,8 @@ object Tablo4thGen {
             , session.keepalive.map(_.toString).getOrElse("unknown")
             , LogConfig.truncate(session.playlistUrl)
             )
-            StreamBackend().stream(session.playlistUrl, streamId)
+            StreamBackend()
+              .stream(session.playlistUrl, streamId)
               .viaMat(KillSwitches.single)(Keep.right)
               .mapMaterializedValue { killSwitch =>
                 streamKillSwitch.set(Some(killSwitch))
@@ -1212,11 +1220,6 @@ object Tablo4thGen {
     }
   }
 
-  def routes(lineupActor: ActorRef[Lineup.LineupActor.Request], authContext: Auth.AuthContext)(implicit system: ActorSystem[?]) = {
-    Tablo2HDHomeRun.Response.Discover.route ~
-    Lineup.route(lineupActor) ~
-    Guide.route(authContext) ~
-    Channel.route(authContext) ~
-    Tablo2HDHomeRun.Favicon.route
-  }
+  def routes(lineupActor: ActorRef[Lineup.LineupActor.Request], authContext: Auth.AuthContext)(implicit system: ActorSystem[?]) =
+    Tablo2HDHomeRun.Response.Discover.route ~ Lineup.route(lineupActor) ~ Guide.route(authContext) ~ Channel.route(authContext) ~ Tablo2HDHomeRun.Favicon.route
 }
