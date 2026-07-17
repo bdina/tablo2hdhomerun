@@ -150,11 +150,7 @@ object Tablo2HDHomeRun {
         app.tuner.Tablo4thGen.routes(lineup, authContext, sessionManager)
       case TabloGen.Legacy =>
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
-        Response.Discover.route ~
-        Lineup.route(lineup) ~
-        Channel.route ~
-        Guide.route ~
-        Favicon.route
+        Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route ~ Guide.route ~ Favicon.route
     }
 
     startHttp(config, routes, daemon)
