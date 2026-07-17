@@ -23,9 +23,11 @@ import scala.util.{Failure, Success, Try}
 object SessionManager {
   val log = LoggerFactory.getLogger(this.getClass)
 
-  sealed trait ChannelKey
-  case class Gen4Channel(id: String) extends ChannelKey
-  case class LegacyChannel(id: Long) extends ChannelKey
+  final case class ChannelKey(value: String)
+
+  object ChannelKey {
+    def apply(value: Long): ChannelKey = ChannelKey(value.toString)
+  }
 
   type SessionId = String
 
@@ -322,10 +324,7 @@ object SessionManager {
     def initialState(cachedTuners: Int): ManagerState =
       ManagerState(Map.empty, Map.empty, cachedTuners, Some(Vector.empty))
 
-    def channelLabel(channel: ChannelKey): String = channel match {
-      case Gen4Channel(id) => id
-      case LegacyChannel(id) => id.toString
-    }
+    def channelLabel(channel: ChannelKey): String = channel.value
 
     def isNoTuners(ex: Throwable): Boolean = ex match {
       case Error.NoAvailableTuners => true

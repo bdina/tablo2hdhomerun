@@ -14,8 +14,6 @@ import app.stream.{ResilientHlsSource, StreamBackend}
 import app.sys.LogConfig
 import app.tuner.SessionManager.{
   ChannelKey
-, Gen4Channel
-, LegacyChannel
 , PlayerSession
 , ReplaceFailed
 , ReplaceResult
@@ -121,10 +119,7 @@ object SharedChannelStream {
     ): SessionRuntime = {
       implicit val mat: Materializer = Materializer(system)
       implicit val ec: ExecutionContext = system.executionContext
-      val label = channel match {
-        case Gen4Channel(id) => s"4thgen-channel-$id"
-        case LegacyChannel(id) => s"legacy-channel-$id"
-      }
+      val label = s"channel-${channel.value}"
       startShared(
         channelLabel = label
       , firstSession = session

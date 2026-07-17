@@ -216,8 +216,8 @@ class SessionManagerSpec
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe1 = createTestProbe[AcquireResult]()
       val probe2 = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch1"), probe1.ref)
-      manager ! Acquire(Gen4Channel("ch1"), probe2.ref)
+      manager ! Acquire(ChannelKey("ch1"), probe1.ref)
+      manager ! Acquire(ChannelKey("ch1"), probe2.ref)
       eventually {
         backend.openCount.get() shouldBe 1
       }
@@ -230,18 +230,18 @@ class SessionManagerSpec
 
     "reject an extra distinct channel when at capacity" in {
       val backend = StubBackend(
-        { case Gen4Channel(id) => Future.successful(player(s"tok-$id")) }
+        { case ChannelKey(id) => Future.successful(player(s"tok-$id")) }
       , initialTuners = 1
       )
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val first = createTestProbe[AcquireResult]()
       val second = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("a"), first.ref)
+      manager ! Acquire(ChannelKey("a"), first.ref)
       val attached = first.expectMessageType[Attached]
       val sub = attached.source.runWith(TestSink[ByteString]())
       val _ = sub.request(1)
-      manager ! Acquire(Gen4Channel("b"), second.ref)
+      manager ! Acquire(ChannelKey("b"), second.ref)
       second.expectMessage(NoAvailableTuners)
       backend.openCount.get() shouldBe 1
       sub.cancel()
@@ -254,8 +254,8 @@ class SessionManagerSpec
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val first = createTestProbe[AcquireResult]()
       val second = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("a"), first.ref)
-      manager ! Acquire(Gen4Channel("b"), second.ref)
+      manager ! Acquire(ChannelKey("a"), first.ref)
+      manager ! Acquire(ChannelKey("b"), second.ref)
       second.expectMessage(NoAvailableTuners)
       gate.success(player("tok-a"))
       val attached = first.expectMessageType[Attached]
@@ -270,7 +270,7 @@ class SessionManagerSpec
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch1"), probe.ref)
+      manager ! Acquire(ChannelKey("ch1"), probe.ref)
       probe.expectMessage(NoAvailableTuners)
     }
 
@@ -280,8 +280,8 @@ class SessionManagerSpec
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val p1 = createTestProbe[AcquireResult]()
       val p2 = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), p1.ref)
-      manager ! Acquire(Gen4Channel("ch"), p2.ref)
+      manager ! Acquire(ChannelKey("ch"), p1.ref)
+      manager ! Acquire(ChannelKey("ch"), p2.ref)
       val a1 = p1.expectMessageType[Attached]
       val a2 = p2.expectMessageType[Attached]
       val c1 = a1.source.runWith(TestSink[ByteString]())
@@ -303,7 +303,7 @@ class SessionManagerSpec
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -319,7 +319,7 @@ class SessionManagerSpec
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val _ = probe.expectMessageType[Attached]
       eventually(timeout(1.second), interval(50.millis)) {
         backend.closeCount.get() shouldBe 1
@@ -332,7 +332,7 @@ class SessionManagerSpec
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -349,7 +349,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -365,7 +365,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -384,15 +384,15 @@ class SessionManagerSpec
 
     "block new opens after capacity decreases without ending active sessions" in {
       val backend = StubBackend(
-        { case Gen4Channel(id) => Future.successful(player(s"tok-$id")) }
+        { case ChannelKey(id) => Future.successful(player(s"tok-$id")) }
       , initialTuners = 2
       )
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val a = createTestProbe[AcquireResult]()
       val b = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("a"), a.ref)
-      manager ! Acquire(Gen4Channel("b"), b.ref)
+      manager ! Acquire(ChannelKey("a"), a.ref)
+      manager ! Acquire(ChannelKey("b"), b.ref)
       val aa = a.expectMessageType[Attached]
       val bb = b.expectMessageType[Attached]
       val ca = aa.source.runWith(TestSink[ByteString]())
@@ -402,7 +402,7 @@ class SessionManagerSpec
       backend.tuners = 1
       manager ! TunersUpdated(1)
       val c = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("c"), c.ref)
+      manager ! Acquire(ChannelKey("c"), c.ref)
       c.expectMessage(NoAvailableTuners)
       backend.closeCount.get() shouldBe 0
       ca.cancel()
@@ -423,10 +423,10 @@ class SessionManagerSpec
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings.copy(openTimeout = 100.millis)))
       val first = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), first.ref)
+      manager ! Acquire(ChannelKey("ch"), first.ref)
       first.expectMessageType[AcquireFailed]
       val second = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), second.ref)
+      manager ! Acquire(ChannelKey("ch"), second.ref)
       eventually {
         openCalls.get() shouldBe 2
       }
@@ -446,7 +446,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       eventually {
         backend.openResults.get().size shouldBe 1
       }
@@ -476,7 +476,7 @@ class SessionManagerSpec
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val first = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), first.ref)
+      manager ! Acquire(ChannelKey("ch"), first.ref)
       val attached = first.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -485,7 +485,7 @@ class SessionManagerSpec
         backend.closeCount.get() shouldBe 1
       }
       val second = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), second.ref)
+      manager ! Acquire(ChannelKey("ch"), second.ref)
       val reattached = second.expectMessageType[Attached]
       eventually {
         backend.openCount.get() should be >= 2
@@ -501,7 +501,7 @@ class SessionManagerSpec
       val runtime = StubRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       probe.expectNoMessage(150.millis)
       refreshGate.success(1)
       val attached = probe.expectMessageType[Attached]
@@ -515,7 +515,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val first = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), first.ref)
+      manager ! Acquire(ChannelKey("ch"), first.ref)
       eventually {
         backend.openResults.get().size shouldBe 1
       }
@@ -529,7 +529,7 @@ class SessionManagerSpec
         backend.openResults.get().size shouldBe 2
       }
       val second = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), second.ref)
+      manager ! Acquire(ChannelKey("ch"), second.ref)
       val duringReplace = second.expectMessageType[Attached]
       val control2 = duringReplace.source.runWith(TestSink[ByteString]())
       val _ = control2.request(1)
@@ -545,7 +545,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -563,7 +563,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -596,7 +596,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -614,7 +614,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -645,7 +645,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -672,7 +672,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings.copy(replaceTimeout = 100.millis)))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -705,7 +705,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       eventually {
         backend.openResults.get().size shouldBe 1
       }
@@ -730,7 +730,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -760,7 +760,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       eventually {
         backend.openResults.get().size shouldBe 1
       }
@@ -802,7 +802,7 @@ class SessionManagerSpec
       val runtime = CapturingRuntimeFactory()
       val manager = spawn(SessionManager(backend, runtime, shortSettings.copy(replaceTimeout = 100.millis)))
       val probe = createTestProbe[AcquireResult]()
-      manager ! Acquire(Gen4Channel("ch"), probe.ref)
+      manager ! Acquire(ChannelKey("ch"), probe.ref)
       val attached = probe.expectMessageType[Attached]
       val control = attached.source.runWith(TestSink[ByteString]())
       val _ = control.request(1)
@@ -818,8 +818,8 @@ class SessionManagerSpec
     }
   }
 
-  private val routerChannel = Gen4Channel("51")
-  private val routerOther = Gen4Channel("71")
+  private val routerChannel = ChannelKey("51")
+  private val routerOther = ChannelKey("71")
 
   private def routerRuntime(id: String): SessionRuntime =
     SessionRuntime(id, Source.never[ByteString].mapMaterializedValue(_ => NotUsed), () => (), () => ())

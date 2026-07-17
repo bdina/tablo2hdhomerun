@@ -787,7 +787,6 @@ object TabloLegacy {
       sealed trait Error extends Exception
       object Error {
         case object NoAvailableTuners extends Exception("No available tuners") with Error
-        case class UnsupportedChannel(channel: String) extends Exception(s"unsupported channel $channel") with Error
         case class WatchFailed(status: Int, body: String) extends Exception(s"legacy watch failed: $status $body") with Error
       }
 
@@ -868,39 +867,37 @@ object TabloLegacy {
               cachedTuners
           }
 
-        def open(channel: SessionManager.ChannelKey): Future[SessionManager.PlayerSession] =
-          channel match {
-            case SessionManager.LegacyChannel(channelId) =>
-              val watchUri =
-                AppContext.discover
-                  .proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
-                  .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
-              HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
-                import Response.JsonProtocol._
-                log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
-                if (response.status == StatusCodes.ServiceUnavailable) {
-                  val _ = response.entity.discardBytes()
-                  Future.failed(Error.NoAvailableTuners)
-                } else if (response.status.isSuccess()) {
-                  Unmarshal(response.entity).to[String].map { body =>
-                    val data = body.parseJson.convertTo[Response.WatchResponse]
-                    SessionManager.PlayerSession(
-                      sessionId = data.token
-                    , playlistUrl = data.playlist_url.toString
-                    , expires = scala.util.Try(java.time.Instant.parse(data.expires)).toOption
-                    , keepalive = Some(data.keepalive)
-                    )
-                  }
-                } else {
-                  Unmarshal(response.entity).to[String].flatMap { body =>
-                    Future.failed(
-                      Error.WatchFailed(response.status.intValue(), LogConfig.truncate(body))
-                    )
-                  }
-                }
+        def open(channel: SessionManager.ChannelKey): Future[SessionManager.PlayerSession] = {
+          val channelId = channel.value
+          val watchUri =
+            AppContext.discover
+              .proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
+              .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
+          HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
+            import Response.JsonProtocol._
+            log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
+            if (response.status == StatusCodes.ServiceUnavailable) {
+              val _ = response.entity.discardBytes()
+              Future.failed(Error.NoAvailableTuners)
+            } else if (response.status.isSuccess()) {
+              Unmarshal(response.entity).to[String].map { body =>
+                val data = body.parseJson.convertTo[Response.WatchResponse]
+                SessionManager.PlayerSession(
+                  sessionId = data.token
+                , playlistUrl = data.playlist_url.toString
+                , expires = scala.util.Try(java.time.Instant.parse(data.expires)).toOption
+                , keepalive = Some(data.keepalive)
+                )
               }
-            case SessionManager.Gen4Channel(id) => Future.failed(Error.UnsupportedChannel(id))
+            } else {
+              Unmarshal(response.entity).to[String].flatMap { body =>
+                Future.failed(
+                  Error.WatchFailed(response.status.intValue(), LogConfig.truncate(body))
+                )
+              }
+            }
           }
+        }
 
         def close(sessionId: SessionManager.SessionId): Future[Unit] =
           Future.successful(())
@@ -916,7 +913,7 @@ object TabloLegacy {
           get {
             val acquire =
               sessionManager.ask[SessionManager.AcquireResult](
-                SessionManager.Acquire(SessionManager.LegacyChannel(channelId), _)
+                SessionManager.Acquire(SessionManager.ChannelKey(channelId), _)
               )
             onComplete(acquire) {
               case Success(SessionManager.Attached(attachmentId, source)) =>

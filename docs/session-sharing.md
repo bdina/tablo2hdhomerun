@@ -34,7 +34,7 @@ Implemented. 4th gen and legacy channel routes acquire through a shared `Session
 
 | Term | Meaning |
 |------|---------|
-| `ChannelKey` | Stable channel ID (`String` for 4th gen, `Long` for legacy) |
+| `ChannelKey` | Stable channel ID (`String`; legacy builds it from `Long`) |
 | `TunerLease` | One Tablo watch/player session with token and playlist metadata |
 | `SessionId` | Current Tablo player token; legacy uses its watch-response token |
 | `AttachmentId` | Proxy-generated UUID for one HTTP response consumer |
@@ -70,9 +70,11 @@ flowchart TB
 ### External API
 
 ```scala
-sealed trait ChannelKey
-case class Gen4Channel(id: String) extends ChannelKey
-case class LegacyChannel(id: Long) extends ChannelKey
+final case class ChannelKey(value: String)
+
+object ChannelKey {
+  def apply(value: Long): ChannelKey = ChannelKey(value.toString)
+}
 
 case class Acquire(channel: ChannelKey, replyTo: ActorRef[AcquireResult])
 
@@ -279,7 +281,7 @@ attached (including granted-but-not-yet-materialized attachments).
 
 ## Legacy support
 
-Legacy Tablo uses the same `SessionManager` with `LegacyChannel`. The watch-response token is its `SessionId`. Legacy
+Legacy Tablo uses the same `SessionManager` with `ChannelKey` built from the legacy numeric channel id. The watch-response token is its `SessionId`. Legacy
 has no keepalive or DELETE behavior, so teardown only stops the shared stream. HLS recovery requests a close-first
 replacement watch through `SessionManager`. Legacy watch HTTP 503 maps to `NoAvailableTuners` (proxy HTTP 503).
 

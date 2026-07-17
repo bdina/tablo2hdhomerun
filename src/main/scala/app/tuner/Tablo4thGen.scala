@@ -95,7 +95,6 @@ object Tablo4thGen {
     case class SelectFailed(message: String) extends Exception(s"Select failed: $message") with Error
     case object NoAvailableTuners extends Exception("No available tuners") with Error
     case class InvalidWatchResponse(message: String) extends Exception(message) with Error
-    case class UnsupportedChannel(channel: String) extends Exception(s"unsupported channel $channel") with Error
     case class WatchFailed(status: Int, body: String) extends Exception(s"watch failed: $status $body") with Error
     case class SessionDeleteFailed(status: Int, body: String) extends Exception(s"session DELETE failed: $status $body") with Error
     case class SessionRequestFailed(method: String, status: Int) extends Exception(s"session $method failed: $status") with Error
@@ -951,27 +950,23 @@ object Tablo4thGen {
       def refreshTuners(): Future[Int] = fetchServerInfo()
 
       def open(channel: SessionManager.ChannelKey): Future[SessionManager.PlayerSession] =
-        channel match {
-          case SessionManager.Gen4Channel(channelId) =>
-            watchChannel(channelId).flatMap { data =>
-              WatchSession.fromResponse(data) match {
-                case Right(session) =>
-                  session.token match {
-                    case Some(sessionId) =>
-                      Future.successful(
-                        SessionManager.PlayerSession(
-                          sessionId = sessionId
-                        , playlistUrl = session.playlistUrl
-                        , expires = session.expires
-                        , keepalive = session.keepalive
-                        )
-                      )
-                    case None => Future.failed(Error.MissingSessionToken)
-                  }
-                case Left(message) => Future.failed(Error.InvalidWatchResponse(message))
+        watchChannel(channel.value).flatMap { data =>
+          WatchSession.fromResponse(data) match {
+            case Right(session) =>
+              session.token match {
+                case Some(sessionId) =>
+                  Future.successful(
+                    SessionManager.PlayerSession(
+                      sessionId = sessionId
+                    , playlistUrl = session.playlistUrl
+                    , expires = session.expires
+                    , keepalive = session.keepalive
+                    )
+                  )
+                case None => Future.failed(Error.MissingSessionToken)
               }
-            }
-          case SessionManager.LegacyChannel(id) => Future.failed(Error.UnsupportedChannel(id.toString))
+            case Left(message) => Future.failed(Error.InvalidWatchResponse(message))
+          }
         }
 
       def close(sessionId: SessionManager.SessionId): Future[Unit] = endSession(sessionId)
@@ -1124,7 +1119,7 @@ object Tablo4thGen {
         get {
           val acquire =
             sessionManager.ask[SessionManager.AcquireResult](
-              SessionManager.Acquire(SessionManager.Gen4Channel(channelId), _)
+              SessionManager.Acquire(SessionManager.ChannelKey(channelId), _)
             )
           onComplete(acquire) {
             case Success(SessionManager.Attached(attachmentId, source)) =>
