@@ -112,6 +112,124 @@
       "allDeclaredFields": true
     },
     {
+      "type": "app.tuner.TabloLegacy$Guide$Program",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.tuner.TabloLegacy$Guide$ChannelGuide",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.tuner.TabloLegacy$Guide$Proxy$Response$TabloProgram",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.tuner.TabloLegacy$Guide$JsonProtocol$",
+      "fields": [
+        {
+          "name": "BigDecimalJsonFormat$lzy1"
+        },
+        {
+          "name": "BigIntJsonFormat$lzy1"
+        },
+        {
+          "name": "BooleanJsonFormat$lzy1"
+        },
+        {
+          "name": "ByteJsonFormat$lzy1"
+        },
+        {
+          "name": "CharJsonFormat$lzy1"
+        },
+        {
+          "name": "DoubleJsonFormat$lzy1"
+        },
+        {
+          "name": "FloatJsonFormat$lzy1"
+        },
+        {
+          "name": "IntJsonFormat$lzy1"
+        },
+        {
+          "name": "JsValueFormat$lzy1"
+        },
+        {
+          "name": "LongJsonFormat$lzy1"
+        },
+        {
+          "name": "RootJsArrayFormat$lzy1"
+        },
+        {
+          "name": "RootJsObjectFormat$lzy1"
+        },
+        {
+          "name": "ShortJsonFormat$lzy1"
+        },
+        {
+          "name": "StringJsonFormat$lzy1"
+        },
+        {
+          "name": "SymbolJsonFormat$lzy1"
+        },
+        {
+          "name": "UnitJsonFormat$lzy1"
+        }
+      ]
+    },
+    {
+      "type": "app.tuner.TabloLegacy$Guide$Proxy$Response$TabloProgram$JsonProtocol$",
+      "fields": [
+        {
+          "name": "BigDecimalJsonFormat$lzy1"
+        },
+        {
+          "name": "BigIntJsonFormat$lzy1"
+        },
+        {
+          "name": "BooleanJsonFormat$lzy1"
+        },
+        {
+          "name": "ByteJsonFormat$lzy1"
+        },
+        {
+          "name": "CharJsonFormat$lzy1"
+        },
+        {
+          "name": "DoubleJsonFormat$lzy1"
+        },
+        {
+          "name": "FloatJsonFormat$lzy1"
+        },
+        {
+          "name": "IntJsonFormat$lzy1"
+        },
+        {
+          "name": "JsValueFormat$lzy1"
+        },
+        {
+          "name": "LongJsonFormat$lzy1"
+        },
+        {
+          "name": "RootJsArrayFormat$lzy1"
+        },
+        {
+          "name": "RootJsObjectFormat$lzy1"
+        },
+        {
+          "name": "ShortJsonFormat$lzy1"
+        },
+        {
+          "name": "StringJsonFormat$lzy1"
+        },
+        {
+          "name": "SymbolJsonFormat$lzy1"
+        },
+        {
+          "name": "UnitJsonFormat$lzy1"
+        }
+      ]
+    },
+    {
       "type": "app.tuner.TabloLegacy$Response$Discover",
       "allDeclaredFields": true
     },
@@ -192,11 +310,19 @@
       "allDeclaredFields": true
     },
     {
+      "type": "app.tuner.Tablo4thGen$Channel$Request$Watch4thGenExtra",
+      "allDeclaredFields": true
+    },
+    {
       "type": "app.tuner.Tablo4thGen$Channel$Request$Watch4thGenRequest",
       "allDeclaredFields": true
     },
     {
       "type": "app.tuner.Tablo4thGen$Channel$Response$Watch4thGenResponse",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.tuner.Tablo4thGen$Channel$Request$Watch4thGenRequest$JsonProtocol$",
       "allDeclaredFields": true
     },
     {
