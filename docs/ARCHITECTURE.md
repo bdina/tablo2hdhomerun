@@ -21,20 +21,20 @@ Tablo2HDHomeRun is an HTTP proxy server that exposes a TabloTV DVR device as an 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                           Media Client Applications                          │
-│              (Plex, Jellyfin, Channels DVR, VLC, etc.)                       │
+│                           Media Client Applications                         │
+│              (Plex, Jellyfin, Channels DVR, VLC, etc.)                      │
 └─────────────────────────────────────────────────────────────────────────────┘
                                        │
                                        │ HTTP (HDHomeRun API)
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                         Tablo2HDHomeRun Proxy Server                         │
-│                              (Port 8080)                                     │
+│                         Tablo2HDHomeRun Proxy Server                        │
+│                              (Port 8080)                                    │
 │  ┌─────────────────┐  ┌──────────────────┐  ┌─────────────────────────────┐ │
 │  │   HTTP Routes   │  │   Actor System   │  │   Stream Processing         │ │
 │  │  ─────────────  │  │  ──────────────  │  │  ─────────────────────────  │ │
-│  │  /discover.json │  │  LineupActor     │  │  FFmpeg or HLS backend     │ │
-│  │  /lineup.json   │  │  GuideActor      │  │  (STREAM_BACKEND env)      │ │
+│  │  /discover.json │  │  LineupActor     │  │  FFmpeg or HLS backend      │ │
+│  │  /lineup.json   │  │  GuideActor      │  │  (STREAM_BACKEND env)       │ │
 │  │  /lineup_status │  │  FsMonitor       │  │  Chunked HTTP streaming     │ │
 │  │  /channel/{id}  │  │  FsNotify        │  │                             │ │
 │  │  /guide.xml     │  │  FFMpegDelegate  │  │                             │ │
@@ -44,10 +44,10 @@ Tablo2HDHomeRun is an HTTP proxy server that exposes a TabloTV DVR device as an 
                                        │ HTTP (Tablo API)
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
-│                            TabloTV DVR Device                                │
-│                              (Port 8885)                                     │
+│                            TabloTV DVR Device                               │
+│                              (Port 8885)                                    │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
-│  │  /guide/channels  │  /batch  │  /guide/channels/{id}/watch          │   │
+│  │  /guide/channels  │  /batch  │  /guide/channels/{id}/watch           │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
 └─────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -106,7 +106,7 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
 
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌────────────────────────┐
-│  Tablo Device    │────▶│  Stream Backend  │────▶│ ResilientHlsSource │
+│  Tablo Device    │────▶│  Stream Backend  │────▶│ ResilientHlsSource     │
 │  /watch endpoint │     │  (ffmpeg or hls) │     │ (Padding & Retry Flow) │
 └──────────────────┘     └──────────────────┘     └────────────────────────┘
                                                             │
