@@ -133,7 +133,22 @@ object Tablo2HDHomeRun {
         implicit val sys: ActorSystem[?] = context.system
         val authContext = app.tuner.Tablo4thGen.Auth.initialize(tabloAuth)
         val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
-        app.tuner.Tablo4thGen.routes(lineup, authContext)
+        val sessionManager = context.spawn(
+          app.tuner.Tablo4thGen.Channel.SessionManager(
+            startRunner = { (channelId, self) =>
+              app.tuner.Tablo4thGen.Channel.SessionRunner.start(
+                channelId = channelId
+              , authContext = authContext
+              , onCheckIn = (meta, hubSource, teardown) =>
+                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.CheckIn(channelId, meta, hubSource, teardown)
+              , onFailed = cause =>
+                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.AcquireFailed(channelId, cause)
+              )
+            }
+          )
+        , "session-manager-4thgen"
+        )
+        app.tuner.Tablo4thGen.routes(lineup, sessionManager, authContext)
       case TabloGen.Legacy =>
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
         Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route ~ Guide.route ~ Favicon.route
