@@ -36,6 +36,7 @@ object AppContext {
 
   def config: AppConfig = _config
   def discover: Discover = _discover
+  def updateDiscover(discover: Discover): Unit = { _discover = discover }
   implicit def system: ActorSystem[pekko.NotUsed] = _system
 
   private[app] def initialize(config: AppConfig, discover: Discover): Unit = {
@@ -69,8 +70,12 @@ object Tablo2HDHomeRun {
   def start(config: AppConfig, tabloAuth: TabloAuthEnv, daemon: Boolean): Unit = {
     val discover = buildDiscover(config)
     AppContext.initialize(config, discover)
+    val discoveryCloser = app.tuner.HDHomeRunDiscovery.start(config)
     val system = ActorSystem(apply(config, tabloAuth, daemon), "tablo2hdhomerun-system")
     AppContext.initialize(system)
+    system.whenTerminated.onComplete { _ =>
+      discoveryCloser.close()
+    }(system.executionContext)
   }
 
   private def buildDiscover(config: AppConfig): Discover =
@@ -79,6 +84,8 @@ object Tablo2HDHomeRun {
     , localIp = config.proxy.ip
     , protocol = config.tablo.protocol
     , port = config.proxy.port
+    , tunerCount = config.proxy.tunerCount
+    , deviceId = config.proxy.deviceId
     )
 
   private def appVersion: String =

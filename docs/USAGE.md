@@ -202,6 +202,10 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `TABLO_EMAIL` | (required for 4th gen) | Tablo account email for cloud authentication |
 | `TABLO_PASSWORD` | (required for 4th gen) | Tablo account password |
 | `TABLO_DEVICE_NAME` | (none) | Optional filter to select device by name |
+| `DEVICE_ID` | `12345678` | HDHomeRun device identifier (hex or 8-digit string) |
+| `TUNER_COUNT` | `2` | Number of virtual tuners reported in discover.json |
+| `ENABLE_UDP_DISCOVERY` | `true` | Enable UDP 65001 HDHomeRun broadcast auto-discovery responder |
+| `ENABLE_HLS_ENDPOINT` | `true` | Enable open-standard HLS playlist (`.m3u8` and `.m3u`) endpoints |
 
 ## Streaming a Channel
 
@@ -293,12 +297,18 @@ docker run -d \
 
 | Endpoint | Response Type | Description |
 |----------|---------------|-------------|
-| `GET /discover.json` | JSON | Device metadata |
-| `GET /lineup.json` | JSON | Channel array |
-| `GET /lineup_status.json` | JSON | Scan status |
-| `GET /channel/{id}` | `video/mp2t` | MPEG-TS stream |
+| `GET /discover.json` | JSON | HDHomeRun device metadata (`DeviceID`, `TunerCount`, `BaseURL`, etc.) |
+| `GET /lineup.json` | JSON | HDHomeRun channel lineup array with GuideName/GuideNumber |
+| `GET /lineup_status.json` | JSON | Channel scan status (`ScanInProgress`, `ScanPossible`, `Source`) |
+| `POST /lineup.post?scan=start` | Empty / 200 OK | Trigger channel lineup refresh / scan |
+| `POST /lineup.post?scan=abort` | Empty / 200 OK | Abort channel scan |
+| `GET /lineup.m3u` | `application/x-mpegURL` | Open standard M3U channel playlist with EXTINF tags |
+| `GET /channel/{id}` | `video/mp2t` | Continuous chunked MPEG-TS stream (for Plex, HDHR clients) |
+| `GET /channel/{id}.m3u8` | `application/x-mpegURL` | Native HLS playlist with rewritten proxied segment URIs |
+| `GET /channel/{id}/segment/{url}` | `video/mp2t` | Proxied HLS video segment with CORS and caching headers |
 | `GET /guide.xml` | `text/xml` | XMLTV program guide |
 | `GET /favicon.ico` | Empty | No-op (avoids 404s) |
+| `UDP 65001` | Binary | HDHomeRun protocol auto-discovery broadcast listener/responder |
 
 ## Troubleshooting
 
@@ -353,10 +363,62 @@ docker inspect tablo-proxy
 
 ### Plex Live TV
 
-1. Go to Settings > Live TV & DVR
-2. Click "Set Up Plex DVR"
-3. Enter `http://<proxy-ip>:8080` when prompted for tuner
-4. Complete the channel scan and guide setup
+1. Ensure `tablo2hdhomerun` is running. In a co-located Docker setup, use Docker Compose with `depends_on: tablo2hdhomerun: condition: service_healthy`.
+2. Go to Plex Settings > Live TV & DVR.
+3. Plex will auto-discover the tuner via UDP 65001 or you can enter `http://<proxy-ip>:8080` manually.
+4. With `DEVICE_ID=12345678`, existing Plex DVR pairings and channel mappings are preserved.
+5. If tuners become busy, the proxy returns `503 Service Unavailable`, allowing Plex to cleanly queue or reschedule recordings.
+
+#### Recommended Co-located `docker-compose.yml`
+
+```yaml
+services:
+  tablo2hdhomerun:
+    container_name: tablo2hdhomerun
+    image: tablo2hdhomerun:latest
+    restart: always
+    network_mode: host
+    environment:
+      - TABLO_IP=192.168.2.28
+      - TABLO_GEN=4thgen
+      - TABLO_EMAIL=user@example.com
+      - TABLO_PASSWORD=secret
+      - PROXY_IP=192.168.2.24
+      - STREAM_BACKEND=hls
+      - DEVICE_ID=12345678
+      - TUNER_COUNT=2
+      - ENABLE_UDP_DISCOVERY=true
+      - ENABLE_HLS_ENDPOINT=true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/discover.json > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    mem_limit: 512m
+
+  plex:
+    container_name: plex
+    image: plexinc/pms-docker:plexpass
+    devices:
+      - /dev/dri:/dev/dri
+    restart: always
+    environment:
+      - TZ=America/New_York
+      - PLEX_CLAIM=your-claim-token
+    network_mode: host
+    volumes:
+      - /media/ext-hd/usb/media/plex/config:/config
+      - /media/ext-hd/usb/media/plex/dvr:/data/dvr
+      - /media/ext-hd/raid/media:/data/media
+      - /media/ext-hd/ssd/movies:/data/sdd/movies
+    tmpfs:
+      - /transcode:size=4G,mode=1777
+    mem_limit: 8g
+    depends_on:
+      tablo2hdhomerun:
+        condition: service_healthy
+```
 
 ### Jellyfin
 

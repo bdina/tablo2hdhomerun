@@ -92,4 +92,16 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
       status shouldBe StatusCodes.OK
     }
   }
+
+  "POST /lineup.post?scan=start" should "return 200 OK" in {
+    Post("/lineup.post?scan=start") ~> legacyRoutes ~> check {
+      status shouldBe StatusCodes.OK
+    }
+  }
+
+  "POST /lineup.post?scan=abort" should "return 200 OK" in {
+    Post("/lineup.post?scan=abort") ~> legacyRoutes ~> check {
+      status shouldBe StatusCodes.OK
+    }
+  }
 }

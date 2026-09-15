@@ -39,6 +39,10 @@ final case class TabloConfig(
 final case class ProxyConfig(
   ip: HostAddress
 , port: Port = Port.DefaultProxy
+, deviceId: String = "12345678"
+, tunerCount: Int = 2
+, enableUdpDiscovery: Boolean = true
+, enableHlsEndpoint: Boolean = true
 ) {
   def bindHost: String = ip.hostString
   def bindPort: Int = port.value
@@ -103,6 +107,11 @@ object AppConfig {
     )
     val proxy = ProxyConfig(
       ip = getHostAddress(get, "PROXY_IP", "127.0.0.1")
+    , port = Port(getInt(get, "PROXY_PORT", Port.DefaultProxy.value))
+    , deviceId = getOrElse(get, "DEVICE_ID", "12345678")
+    , tunerCount = getInt(get, "TUNER_COUNT", 2)
+    , enableUdpDiscovery = getBoolTrue(get, "ENABLE_UDP_DISCOVERY", true)
+    , enableHlsEndpoint = getBoolTrue(get, "ENABLE_HLS_ENDPOINT", true)
     )
     val resilient = ResilientHlsConfig(
       maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 60)

@@ -40,6 +40,8 @@ class TabloLegacyDiscoverSpec extends AnyFlatSpec with Matchers {
     val _ = parsed.LocalIP.getHostAddress shouldBe discover.LocalIP.getHostAddress
     val _ = parsed.BaseURL.toString shouldBe discover.BaseURL.toString
     val _ = parsed.LineupURL.toString shouldBe discover.LineupURL.toString
+    val _ = parsed.TunerCount shouldBe discover.TunerCount
+    val _ = parsed.ConditionalAccess shouldBe discover.ConditionalAccess
     parsed.DeviceID shouldBe discover.DeviceID
   }
 

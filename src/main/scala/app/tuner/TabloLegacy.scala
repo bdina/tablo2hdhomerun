@@ -71,6 +71,8 @@ object TabloLegacy {
       , LocalIP: InetAddress
       , BaseURL: Uri
       , LineupURL: Uri
+      , TunerCount: Int = 2
+      , ConditionalAccess: Int = 0
       , Manufacturer: String = "tablo2hdhomerun"
       , ModelNumber: String = "HDHR3-US"
       , FirmwareName: String = "hdhomerun3_atsc"
@@ -82,13 +84,30 @@ object TabloLegacy {
           BaseURL.withHost(host.hostString).withPort(port.value)
       }
       object Discover {
-        def apply(friendlyName: String, localIp: HostAddress, protocol: HttpProtocol, port: Port): Discover = {
+        def apply(friendlyName: String, localIp: HostAddress, protocol: HttpProtocol, port: Port): Discover =
+          apply(friendlyName, localIp, protocol, port, 2, "12345678")
+
+        def apply(
+          friendlyName: String
+        , localIp: HostAddress
+        , protocol: HttpProtocol
+        , port: Port
+        , tunerCount: Int
+        , deviceId: String
+        ): Discover = {
           val proxyUri = Uri(s"${protocol.value}://${localIp.hostString}:${port.value}")
-          Discover(FriendlyName=friendlyName, LocalIP=localIp.inet, BaseURL=proxyUri, LineupURL=proxyUri.withPath(Uri.Path("/lineup.json")))
+          Discover(
+            FriendlyName = friendlyName
+          , LocalIP = localIp.inet
+          , BaseURL = proxyUri
+          , LineupURL = proxyUri.withPath(Uri.Path("/lineup.json"))
+          , TunerCount = tunerCount
+          , DeviceID = deviceId
+          )
         }
         object JsonProtocol {
           import Response.JsonProtocol.{inetAddressFormat,uriFormat}
-          implicit val discoverFormat: JsonFormat[Discover] = jsonFormat10(Discover.apply)
+          implicit val discoverFormat: JsonFormat[Discover] = jsonFormat12(Discover.apply)
         }
 
         val route =
@@ -326,6 +345,20 @@ object TabloLegacy {
               case Failure(ex) =>
                 log.warn("[lineup] lineup_status failed", ex)
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to get lineup status"))
+            }
+          }
+        } ~
+        path("lineup.post") {
+          post {
+            parameter("scan".optional) { scanOpt =>
+              log.info("[lineup] lineup.post scan={}", scanOpt.getOrElse("none"))
+              scanOpt match {
+                case Some("abort") =>
+                  complete(StatusCodes.OK)
+                case _ =>
+                  lineupActor ! Lineup.LineupActor.Command.Scan
+                  complete(StatusCodes.OK)
+              }
             }
           }
         }

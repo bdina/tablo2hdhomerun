@@ -20,6 +20,10 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.tablo.deviceName shouldBe None
     val _ = config.proxy.bindHost shouldBe "127.0.0.1"
     val _ = config.proxy.port shouldBe Port.DefaultProxy
+    val _ = config.proxy.deviceId shouldBe "12345678"
+    val _ = config.proxy.tunerCount shouldBe 2
+    val _ = config.proxy.enableUdpDiscovery shouldBe true
+    val _ = config.proxy.enableHlsEndpoint shouldBe true
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
     val _ = config.stream.resilient.maxGapSec shouldBe 60
     val _ = config.stream.resilient.retryMinBackoffSec shouldBe 2
@@ -105,5 +109,22 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val env = Map("TABLO_GEN" -> "legacy", "UNUSED" -> "ignored")
     val loaded = AppConfig.loadFrom(env.get)
     loaded.config.tablo.gen shouldBe TabloGen.Legacy
+  }
+
+  it should "parse custom proxy configuration from env" in {
+    val config = AppConfig.load(Map(
+      "PROXY_IP" -> "192.168.1.50",
+      "PROXY_PORT" -> "9090",
+      "DEVICE_ID" -> "AABBCCDD",
+      "TUNER_COUNT" -> "4",
+      "ENABLE_UDP_DISCOVERY" -> "false",
+      "ENABLE_HLS_ENDPOINT" -> "false"
+    )).config
+    val _ = config.proxy.bindHost shouldBe "192.168.1.50"
+    val _ = config.proxy.port.value shouldBe 9090
+    val _ = config.proxy.deviceId shouldBe "AABBCCDD"
+    val _ = config.proxy.tunerCount shouldBe 4
+    val _ = config.proxy.enableUdpDiscovery shouldBe false
+    config.proxy.enableHlsEndpoint shouldBe false
   }
 }

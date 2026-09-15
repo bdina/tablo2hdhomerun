@@ -1,0 +1,46 @@
+services:
+  tablo2hdhomerun:
+    container_name: tablo2hdhomerun
+    image: tablo2hdhomerun:latest
+    restart: always
+    network_mode: host
+    environment:
+      - TABLO_IP=192.168.2.28
+      - TABLO_GEN=4thgen
+      - TABLO_EMAIL=${TABLO_EMAIL:-bryansdina@gmail.com}
+      - TABLO_PASSWORD=${TABLO_PASSWORD}
+      - PROXY_IP=192.168.2.24
+      - STREAM_BACKEND=hls
+      - DEVICE_ID=12345678
+      - TUNER_COUNT=2
+      - ENABLE_UDP_DISCOVERY=true
+      - ENABLE_HLS_ENDPOINT=true
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/discover.json > /dev/null 2>&1 || exit 1"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    mem_limit: 512m
+
+  plex:
+    container_name: plex
+    image: plexinc/pms-docker:plexpass
+    devices:
+      - /dev/dri:/dev/dri
+    restart: always
+    environment:
+      - TZ=America/New_York
+      - PLEX_CLAIM=${PLEX_CLAIM}
+    network_mode: host
+    volumes:
+      - /media/ext-hd/usb/media/plex/config:/config
+      - /media/ext-hd/usb/media/plex/dvr:/data/dvr
+      - /media/ext-hd/raid/media:/data/media
+      - /media/ext-hd/ssd/movies:/data/sdd/movies
+    tmpfs:
+      - /transcode:size=4G,mode=1777
+    mem_limit: 8g
+    depends_on:
+      tablo2hdhomerun:
+        condition: service_healthy
