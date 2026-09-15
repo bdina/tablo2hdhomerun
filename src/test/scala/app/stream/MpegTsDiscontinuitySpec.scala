@@ -61,5 +61,14 @@ class MpegTsDiscontinuitySpec extends ScalaTestWithActorTestKit with AnyWordSpec
       val secondPacketOffset = 188
       (out(secondPacketOffset + 5) & 0x80) shouldBe 0
     }
+
+    "not mark packets across subsequent emission batches" in {
+      val flow = MpegTsDiscontinuity.markFirstPackets(1)
+      val batch1 = packetWithAdaptation(0)
+      val batch2 = packetWithAdaptation(1)
+      val out = Source(List(batch1, batch2)).via(flow).runWith(Sink.seq).futureValue
+      val _ = (out(0)(5) & 0x80) should not be 0
+      (out(1)(5) & 0x80) shouldBe 0
+    }
   }
 }

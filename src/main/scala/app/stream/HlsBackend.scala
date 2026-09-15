@@ -275,17 +275,18 @@ object HlsBackend extends StreamBackend {
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
           log.debug("[stream:hls] resolved media playlist={}", url)
-          Source.unfoldAsync(HlsPlaylistPoller.initial(url))(s => step(s)(mat)).flatMapConcat { segments =>
-            if (segments.isEmpty) Source.empty
-            else Source(segments)
-              .flatMapConcat { seg => fetchSegmentSource(seg.url, seg.byteRange) }
-              .map { chunk =>
-                val _ = bytesOut.addAndGet(chunk.size)
-                chunk
-              }
-              .via(MpegTsDiscontinuity.markFirstPackets(20))
-              .via(MpegTsHealth.monitor(healthSettings))
-          }
+          Source.unfoldAsync(HlsPlaylistPoller.initial(url))(s => step(s)(mat))
+            .flatMapConcat { segments =>
+              if (segments.isEmpty) Source.empty
+              else Source(segments)
+                .flatMapConcat { seg => fetchSegmentSource(seg.url, seg.byteRange) }
+                .map { chunk =>
+                  val _ = bytesOut.addAndGet(chunk.size)
+                  chunk
+                }
+            }
+            .via(MpegTsDiscontinuity.markFirstPackets(20))
+            .via(MpegTsHealth.monitor(healthSettings))
         }
       ).watchTermination() { (_, done) =>
         done.onComplete {
