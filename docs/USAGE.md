@@ -202,7 +202,7 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `TABLO_EMAIL` | (required for 4th gen) | Tablo account email for cloud authentication |
 | `TABLO_PASSWORD` | (required for 4th gen) | Tablo account password |
 | `TABLO_DEVICE_NAME` | (none) | Optional filter to select device by name |
-| `DEVICE_ID` | `12345678` | HDHomeRun device identifier (hex or 8-digit string) |
+| `DEVICE_ID` | `12345678` | HDHomeRun device identifier (see [DeviceID Guide](hdhomerun-device-id.md)) |
 | `TUNER_COUNT` | `2` | Number of virtual tuners reported in discover.json |
 | `ENABLE_UDP_DISCOVERY` | `true` | Enable UDP 65001 HDHomeRun broadcast auto-discovery responder |
 | `ENABLE_HLS_ENDPOINT` | `true` | Enable open-standard HLS playlist (`.m3u8` and `.m3u`) endpoints |
