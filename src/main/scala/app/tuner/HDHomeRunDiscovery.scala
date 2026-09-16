@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory
 
 import scala.util.Try
 
+import app.AppContext
 import app.config.AppConfig
 
 object HDHomeRunDiscovery {
@@ -187,9 +188,10 @@ object HDHomeRunDiscovery {
                       val matchesId = reqId == DeviceIdWildcard || reqId == ourIdLong
                       if (matchesType && matchesId) {
                         log.debug("[discovery] discover request from={}, sending reply", sender)
+                        val currentTuners = if (AppContext.discover != null) AppContext.discover.TunerCount else config.proxy.effectiveTunerCount
                         val reply = buildReply(
                           deviceIdHex = config.proxy.deviceId
-                        , tunerCount = config.proxy.tunerCount
+                        , tunerCount = currentTuners
                         , baseUrl = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}"
                         , lineupUrl = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}/lineup.json"
                         )

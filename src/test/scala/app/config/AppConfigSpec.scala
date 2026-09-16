@@ -21,7 +21,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.bindHost shouldBe "127.0.0.1"
     val _ = config.proxy.port shouldBe Port.DefaultProxy
     val _ = config.proxy.deviceId shouldBe "12345678"
-    val _ = config.proxy.tunerCount shouldBe 2
+    val _ = config.proxy.tunerCount shouldBe None
+    val _ = config.proxy.effectiveTunerCount shouldBe 2
     val _ = config.proxy.enableUdpDiscovery shouldBe true
     val _ = config.proxy.enableHlsEndpoint shouldBe true
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
@@ -123,7 +124,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.bindHost shouldBe "192.168.1.50"
     val _ = config.proxy.port.value shouldBe 9090
     val _ = config.proxy.deviceId shouldBe "AABBCCDD"
-    val _ = config.proxy.tunerCount shouldBe 4
+    val _ = config.proxy.tunerCount shouldBe Some(4)
+    val _ = config.proxy.effectiveTunerCount shouldBe 4
     val _ = config.proxy.enableUdpDiscovery shouldBe false
     config.proxy.enableHlsEndpoint shouldBe false
   }

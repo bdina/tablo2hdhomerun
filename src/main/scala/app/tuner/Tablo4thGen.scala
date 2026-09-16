@@ -858,12 +858,14 @@ object Tablo4thGen {
 
     object Response {
       case class ServerModel(name: Option[String], tuners: Option[Int])
-      case class ServerInfo(model: Option[ServerModel])
+      case class ServerInfo(model: Option[ServerModel], tuners: Option[Int] = None) {
+        def detectedTuners: Option[Int] = tuners.orElse(model.flatMap(_.tuners))
+      }
       case class Watch4thGenResponse(token: Option[String], expires: Option[String], keepalive: Option[Int], playlist_url: Option[String])
 
       object JsonProtocol extends DefaultJsonProtocol {
         implicit val serverModelFormat: JsonFormat[ServerModel] = jsonFormat2(ServerModel.apply)
-        implicit val serverInfoFormat: JsonFormat[ServerInfo] = jsonFormat1(ServerInfo.apply)
+        implicit val serverInfoFormat: JsonFormat[ServerInfo] = jsonFormat2(ServerInfo.apply)
         implicit val watch4thGenResponseFormat: JsonFormat[Watch4thGenResponse] = jsonFormat4(Watch4thGenResponse.apply)
       }
     }
@@ -1422,8 +1424,7 @@ object Tablo4thGen {
     }
 
     def route(
-      authContext: Auth.AuthContext
-    , sessionManager: ActorRef[SessionManager.Request]
+      sessionManager: ActorRef[SessionManager.Request]
     )(implicit system: ActorSystem[?]) = {
       import pekko.http.scaladsl.unmarshalling.Unmarshal
       implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -1431,55 +1432,16 @@ object Tablo4thGen {
       val HttpCtx = Http()
       @volatile var cachedTuners: Option[Int] = None
 
-      def fetchServerInfo(): Future[Int] = {
-        import Channel.Response.JsonProtocol._
-
-        val serverInfoUri = authContext.deviceUrl.withPath(Uri.Path("/server/info")).withQuery(Uri.Query("lh" -> "1"))
-        val headers = Hmac.signedHeaders("GET", "/server/info", None, authContext)
-
-        log.debug("[channel] http GET /server/info")
-        val request = HttpRequest(
-          method = HttpMethods.GET
-        , uri = serverInfoUri
-        , headers = headers.toList
-        )
-
-        HttpCtx.singleRequest(request).flatMap { response =>
-          log.debug("[channel] server/info status={}", response.status.intValue())
-          if (response.status.isSuccess()) {
-            Unmarshal(response.entity).to[String].map { body =>
-              val serverInfo = body.parseJson.convertTo[Response.ServerInfo]
-              val tuners = serverInfo.model.flatMap(_.tuners).getOrElse(2)
-              cachedTuners = Some(tuners)
-              if (AppContext.discover != null && AppContext.discover.TunerCount != tuners) {
-                AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
-                log.info("[channel] discover tunerCount updated count={}", tuners)
-              }
-              tuners
-            }
-          } else {
-            val _ = response.entity.discardBytes()
-            val fallback = cachedTuners.getOrElse(if (AppContext.discover != null) AppContext.discover.TunerCount else 2)
-            cachedTuners = Some(fallback)
-            Future.successful(fallback)
-          }
-        }.recover {
-          case ex =>
-            log.warn("[channel] server info failed", ex)
-            val fallback = cachedTuners.getOrElse(if (AppContext.discover != null) AppContext.discover.TunerCount else 2)
-            cachedTuners = Some(fallback)
-            fallback
-        }
-      }
-
       def getOrFetchTotalTuners(): Future[Int] = cachedTuners match {
         case Some(tuners) => Future.successful(tuners)
-        case None if AppContext.discover != null && AppContext.discover.TunerCount > 0 =>
-          val tuners = AppContext.discover.TunerCount
+        case None =>
+          val tuners = if (AppContext.discover != null && AppContext.discover.TunerCount > 0) {
+            AppContext.discover.TunerCount
+          } else {
+            2
+          }
           cachedTuners = Some(tuners)
           Future.successful(tuners)
-        case _ =>
-          fetchServerInfo()
       }
 
       val streamingHeaders = Seq(
@@ -1640,6 +1602,46 @@ object Tablo4thGen {
     }
   }
 
+  def detectTunerCount(
+    authContext: Auth.AuthContext
+  , timeout: FiniteDuration = 5.seconds
+  )(implicit system: ActorSystem[?]): Int = {
+    import Channel.Response.JsonProtocol._
+    import pekko.http.scaladsl.unmarshalling.Unmarshal
+    implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+    val HttpCtx = Http()
+
+    val serverInfoUri = authContext.deviceUrl.withPath(Uri.Path("/server/info")).withQuery(Uri.Query("lh" -> "1"))
+    val headers = Hmac.signedHeaders("GET", "/server/info", None, authContext)
+
+    log.debug("[startup] querying /server/info for tuner count uri={}", serverInfoUri)
+    val request = HttpRequest(
+      method = HttpMethods.GET
+    , uri = serverInfoUri
+    , headers = headers.toList
+    )
+
+    val fut = HttpCtx.singleRequest(request).flatMap { response =>
+      log.debug("[startup] server/info status={}", response.status.intValue())
+      if (response.status.isSuccess()) {
+        Unmarshal(response.entity).to[String].map { body =>
+          val serverInfo = body.parseJson.convertTo[Channel.Response.ServerInfo]
+          val tuners = serverInfo.detectedTuners.getOrElse(2)
+          tuners
+        }
+      } else {
+        val _ = response.entity.discardBytes()
+        log.warn("[startup] server/info returned non-success status={}, defaulting to 2 tuners", response.status.intValue())
+        Future.successful(2)
+      }
+    }.recover { case ex =>
+      log.warn("[startup] failed to fetch server/info from Tablo, defaulting to 2 tuners: {}", ex.getMessage)
+      2
+    }
+
+    Try(scala.concurrent.Await.result(fut, timeout)).getOrElse(2)
+  }
+
   def routes(
     lineupActor: ActorRef[Lineup.LineupActor.Request]
   , sessionManager: ActorRef[Channel.SessionManager.Request]
@@ -1648,6 +1650,6 @@ object Tablo4thGen {
     Tablo2HDHomeRun.Response.Discover.route ~
       Lineup.route(lineupActor) ~
       Guide.route(authContext) ~
-      Channel.route(authContext, sessionManager) ~
+      Channel.route(sessionManager) ~
       Tablo2HDHomeRun.Favicon.route
 }

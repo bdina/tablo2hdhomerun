@@ -12,7 +12,7 @@ services:
       - PROXY_IP=192.168.2.24
       - STREAM_BACKEND=hls
       - DEVICE_ID=12345678
-      - TUNER_COUNT=2
+      # - TUNER_COUNT=4 # Optional override (auto-detected from Tablo hardware if omitted)
       - ENABLE_UDP_DISCOVERY=true
       - ENABLE_HLS_ENDPOINT=true
     healthcheck:

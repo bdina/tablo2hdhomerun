@@ -84,7 +84,7 @@ object Tablo2HDHomeRun {
     , localIp = config.proxy.ip
     , protocol = config.tablo.protocol
     , port = config.proxy.port
-    , tunerCount = config.proxy.tunerCount
+    , tunerCount = config.proxy.effectiveTunerCount
     , deviceId = config.proxy.deviceId
     )
 
@@ -139,6 +139,18 @@ object Tablo2HDHomeRun {
       case TabloGen.FourthGen =>
         implicit val sys: ActorSystem[?] = context.system
         val authContext = app.tuner.Tablo4thGen.Auth.initialize(tabloAuth)
+        val tuners = config.proxy.tunerCount match {
+          case Some(overrideCount) =>
+            log.info("[startup] using configured tunerCount override={}", overrideCount)
+            overrideCount
+          case None =>
+            val detected = app.tuner.Tablo4thGen.detectTunerCount(authContext)
+            log.info("[startup] detected 4th gen hardware tuner count={}", detected)
+            detected
+        }
+        if (AppContext.discover != null && AppContext.discover.TunerCount != tuners) {
+          AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
+        }
         val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
         val sessionManager = context.spawn(
           app.tuner.Tablo4thGen.Channel.SessionManager(
@@ -152,11 +164,25 @@ object Tablo2HDHomeRun {
                   self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.AcquireFailed(channelId, cause)
               )
             }
+          , totalTuners = tuners
           )
         , "session-manager-4thgen"
         )
         app.tuner.Tablo4thGen.routes(lineup, sessionManager, authContext)
       case TabloGen.Legacy =>
+        implicit val sys: ActorSystem[?] = context.system
+        val tuners = config.proxy.tunerCount match {
+          case Some(overrideCount) =>
+            log.info("[startup] using configured tunerCount override={}", overrideCount)
+            overrideCount
+          case None =>
+            val detected = app.tuner.TabloLegacy.detectTunerCount(config)
+            log.info("[startup] detected legacy hardware tuner count={}", detected)
+            detected
+        }
+        if (AppContext.discover != null && AppContext.discover.TunerCount != tuners) {
+          AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
+        }
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
         Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route ~ Guide.route ~ Favicon.route
     }

@@ -95,4 +95,29 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
     val _ = parsed.extra.deviceOS shouldBe "iOS"
     parsed.platform shouldBe "ios"
   }
+
+  "ServerInfo" should "parse model with 4 tuners" in {
+    val json = """{"model": {"name": "Tablo 4-Tuner", "tuners": 4}}""".parseJson
+    val info = json.convertTo[Tablo4thGen.Channel.Response.ServerInfo]
+    info.model.flatMap(_.tuners) shouldBe Some(4)
+    info.detectedTuners shouldBe Some(4)
+  }
+
+  it should "parse model with 2 tuners" in {
+    val json = """{"model": {"name": "Tablo 2-Tuner", "tuners": 2}}""".parseJson
+    val info = json.convertTo[Tablo4thGen.Channel.Response.ServerInfo]
+    info.detectedTuners shouldBe Some(2)
+  }
+
+  it should "support root-level tuners" in {
+    val json = """{"tuners": 4}""".parseJson
+    val info = json.convertTo[Tablo4thGen.Channel.Response.ServerInfo]
+    info.detectedTuners shouldBe Some(4)
+  }
+
+  it should "return None when tuners not present" in {
+    val json = """{"model": {"name": "Tablo Unknown"}}""".parseJson
+    val info = json.convertTo[Tablo4thGen.Channel.Response.ServerInfo]
+    info.detectedTuners shouldBe None
+  }
 }

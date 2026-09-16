@@ -40,12 +40,13 @@ final case class ProxyConfig(
   ip: HostAddress
 , port: Port = Port.DefaultProxy
 , deviceId: String = "12345678"
-, tunerCount: Int = 2
+, tunerCount: Option[Int] = None
 , enableUdpDiscovery: Boolean = true
 , enableHlsEndpoint: Boolean = true
 ) {
   def bindHost: String = ip.hostString
   def bindPort: Int = port.value
+  def effectiveTunerCount: Int = tunerCount.getOrElse(2)
 }
 
 final case class ResilientHlsConfig(
@@ -109,7 +110,7 @@ object AppConfig {
       ip = getHostAddress(get, "PROXY_IP", "127.0.0.1")
     , port = Port(getInt(get, "PROXY_PORT", Port.DefaultProxy.value))
     , deviceId = getOrElse(get, "DEVICE_ID", "12345678")
-    , tunerCount = getInt(get, "TUNER_COUNT", 2)
+    , tunerCount = get("TUNER_COUNT").flatMap(s => scala.util.Try(s.trim.toInt).toOption)
     , enableUdpDiscovery = getBoolTrue(get, "ENABLE_UDP_DISCOVERY", true)
     , enableHlsEndpoint = getBoolTrue(get, "ENABLE_HLS_ENDPOINT", true)
     )

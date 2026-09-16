@@ -976,4 +976,37 @@ object TabloLegacy {
           }
         }
     }
+
+  def detectTunerCount(
+    config: app.config.AppConfig
+  , timeout: FiniteDuration = 5.seconds
+  )(implicit system: ActorSystem[?]): Int = {
+    import Channel.Response.Tuners.JsonProtocol.tunersFormat
+    implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+    val HttpCtx = Http()
+
+    val uri = Uri(s"http://${config.tablo.ipHost}:${config.tablo.port.value}/server/tuners")
+    log.debug("[startup] querying legacy /server/tuners uri={}", uri)
+    val request = HttpRequest(method = HttpMethods.GET, uri = uri)
+
+    val fut = HttpCtx.singleRequest(request).flatMap { response =>
+      log.debug("[startup] legacy /server/tuners status={}", response.status.intValue())
+      if (response.status.isSuccess()) {
+        Unmarshal(response.entity).to[String].map { body =>
+          val tuners = body.parseJson.convertTo[Seq[Channel.Response.Tuners]]
+          val count = if (tuners.nonEmpty) tuners.size else 2
+          count
+        }
+      } else {
+        val _ = response.entity.discardBytes()
+        log.warn("[startup] legacy /server/tuners status={}, defaulting to 2 tuners", response.status.intValue())
+        Future.successful(2)
+      }
+    }.recover { case ex =>
+      log.warn("[startup] failed to fetch /server/tuners from legacy Tablo, defaulting to 2 tuners: {}", ex.getMessage)
+      2
+    }
+
+    Try(scala.concurrent.Await.result(fut, timeout)).getOrElse(2)
+  }
 }
