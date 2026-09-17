@@ -4,7 +4,8 @@
 # build (this is discarded by docker post-build)
 FROM ubuntu:24.04 AS build
 
-ARG JAVA_VERSION=25.0.2
+ARG GRAAL_VERSION=25.3.4.1
+ARG JAVA_VERSION=25i3-25.0.4.1
 ARG GRAALVM_WORKDIR=/graalvm/src/project
 
 ARG GRADLE_VERSION=9.3.1
@@ -15,7 +16,7 @@ RUN apt-get update -y \
  && apt-get upgrade -y \
  && apt-get install -y wget unzip build-essential zlib1g-dev \
  && apt-get autoremove --purge -y \
- && wget https://github.com/graalvm/graalvm-ce-builds/releases/download/jdk-${JAVA_VERSION}/graalvm-community-jdk-${JAVA_VERSION}_linux-x64_bin.tar.gz -P /tmp \
+ && wget https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-${GRAAL_VERSION}/graalvm-community-jdk-${JAVA_VERSION}_linux-x64_bin.tar.gz -P /tmp \
  && mkdir -p /opt/graalvm-community-jdk-${JAVA_VERSION} \
  && tar zxvf /tmp/graalvm-community-jdk-${JAVA_VERSION}_linux-x64_bin.tar.gz -C /opt/graalvm-community-jdk-${JAVA_VERSION} --strip-components 1 \
  && wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -P /tmp \
