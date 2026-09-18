@@ -16,7 +16,7 @@ repositories {
     }
     mavenCentral()
     maven {
-        url 'https://mvnrepository.com/artifact'
+        url = 'https://mvnrepository.com/artifact'
     }
 }
 
@@ -30,30 +30,30 @@ ext {
 }
 
 dependencies {
-    implementation group: 'org.scala-lang' , name: "scala${scala_maj}-library_${scala_maj}"  , version: scala_ver
-    implementation group: 'org.scala-lang' , name: "scala${scala_maj}-compiler_${scala_maj}" , version: scala_ver
+    implementation "org.scala-lang:scala${scala_maj}-library_${scala_maj}:${scala_ver}"
+    implementation "org.scala-lang:scala${scala_maj}-compiler_${scala_maj}:${scala_ver}"
 
-    implementation group: 'org.slf4j', name: 'slf4j-simple', version: '2.0.18'
+    implementation 'org.slf4j:slf4j-simple:2.0.18'
 
-    implementation group: 'org.apache.pekko', name: "pekko-actor-typed_${scala_maj}", version: pekko_core
-    implementation group: 'org.apache.pekko', name: "pekko-slf4j_${scala_maj}", version: pekko_core
-    implementation group: 'org.apache.pekko', name: "pekko-stream_${scala_maj}", version: pekko_core
-    implementation group: 'org.apache.pekko', name: "pekko-http_${scala_maj}", version: pekko_http
-    implementation group: 'org.apache.pekko', name: "pekko-http-spray-json_${scala_maj}", version: pekko_http
+    implementation "org.apache.pekko:pekko-actor-typed_${scala_maj}:${pekko_core}"
+    implementation "org.apache.pekko:pekko-slf4j_${scala_maj}:${pekko_core}"
+    implementation "org.apache.pekko:pekko-stream_${scala_maj}:${pekko_core}"
+    implementation "org.apache.pekko:pekko-http_${scala_maj}:${pekko_http}"
+    implementation "org.apache.pekko:pekko-http-spray-json_${scala_maj}:${pekko_http}"
 
-    implementation group: 'org.scala-lang.modules', name: "scala-xml_${scala_maj}", version: '2.4.0'
+    implementation "org.scala-lang.modules:scala-xml_${scala_maj}:2.4.0"
 
-    implementation group: 'org.parboiled', name: "parboiled_${scala_maj}", version: '2.5.1'
+    implementation "org.parboiled:parboiled_${scala_maj}:2.5.1"
 
-    testImplementation group: 'org.scalatest', name: "scalatest_${scala_maj}", version: scala_test
-    testImplementation group: 'org.scalactic', name: "scalactic_${scala_maj}", version: scala_test
+    testImplementation "org.scalatest:scalatest_${scala_maj}:${scala_test}"
+    testImplementation "org.scalactic:scalactic_${scala_maj}:${scala_test}"
 
-    testImplementation group: 'junit', name: 'junit', version: '4.13.2'
-    testImplementation group: 'org.scalatestplus', name: "junit-4-13_${scala_maj}", version: "${scala_test}.0"
+    testImplementation 'junit:junit:4.13.2'
+    testImplementation "org.scalatestplus:junit-4-13_${scala_maj}:${scala_test}.0"
 
-    testImplementation group: 'org.apache.pekko', name: "pekko-actor-testkit-typed_${scala_maj}", version: pekko_core
-    testImplementation group: 'org.apache.pekko', name: "pekko-stream-testkit_${scala_maj}", version: pekko_core
-    testImplementation group: 'org.apache.pekko', name: "pekko-http-testkit_${scala_maj}", version: pekko_http
+    testImplementation "org.apache.pekko:pekko-actor-testkit-typed_${scala_maj}:${pekko_core}"
+    testImplementation "org.apache.pekko:pekko-stream-testkit_${scala_maj}:${pekko_core}"
+    testImplementation "org.apache.pekko:pekko-http-testkit_${scala_maj}:${pekko_http}"
 }
 
 test {
@@ -61,7 +61,7 @@ test {
   testLogging {
     events "passed", "skipped", "failed"
     showStandardStreams = false
-    exceptionFormat "full"
+    exceptionFormat = 'full'
   }
   afterSuite { desc, result ->
     if (desc.parent == null) {
@@ -72,7 +72,7 @@ test {
   }
 }
 
-version gitVersion()
+version = gitVersion()
 
 application {
     mainClass.set('app.tablo2hdhomerunApp')
@@ -97,7 +97,7 @@ sourceSets {
 task repl(type:JavaExec) {
     mainClass = 'scala.tools.nsc.MainGenericRunner'
     classpath = sourceSets.main.runtimeClasspath
-    standardInput System.in
+    standardInput = System.in
     args '-usejavacp'
 }
 
@@ -139,6 +139,10 @@ sourceSets.main.resources.srcDirs += "${buildDir}/generated-resources"
 
 processResources.dependsOn mergeReferenceConf
 
+jar {
+    archiveClassifier = 'plain'
+}
+
 shadowJar {
     archiveClassifier = ''
     manifest {
@@ -150,9 +154,9 @@ shadowJar {
 nativeImage {
     dependsOn shadowJar
 
-    minHeap 128
-    maxHeap 128
-    maxNew 64
+    minHeap = 128
+    maxHeap = 128
+    maxNew = 64
 
     parameters = [
       NativeImageTask.Option.STATIC
@@ -164,8 +168,8 @@ nativeImage {
 scalaCli {
     dependsOn clean
 
-    minHeap 1
-    maxHeap 8
+    minHeap = 1
+    maxHeap = 8
 }
 
 def javaOutputVersion = {

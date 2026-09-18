@@ -99,7 +99,7 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
   "ServerInfo" should "parse model with 4 tuners" in {
     val json = """{"model": {"name": "Tablo 4-Tuner", "tuners": 4}}""".parseJson
     val info = json.convertTo[Tablo4thGen.Channel.Response.ServerInfo]
-    info.model.flatMap(_.tuners) shouldBe Some(4)
+    val _ = info.model.flatMap(_.tuners) shouldBe Some(4)
     info.detectedTuners shouldBe Some(4)
   }
 

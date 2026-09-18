@@ -51,7 +51,7 @@ class HDHomeRunDiscoverySpec extends AnyFlatSpec with Matchers {
   "HDHomeRunDiscovery.parseRequest" should "successfully parse a valid discover request" in {
     val pkt = buildTestDiscoverRequest()
     val parsed = HDHomeRunDiscovery.parseRequest(pkt, pkt.length)
-    parsed shouldBe defined
+    val _ = parsed shouldBe defined
     val req = parsed.get
     val _ = req.deviceType shouldBe Some(HDHomeRunDiscovery.DeviceTypeTuner)
     req.deviceId shouldBe Some(HDHomeRunDiscovery.DeviceIdWildcard)
@@ -86,7 +86,7 @@ class HDHomeRunDiscoverySpec extends AnyFlatSpec with Matchers {
     , lineupUrl = "http://192.168.2.24:8080/lineup.json"
     )
 
-    reply.length should be > 12
+    val _ = reply.length should be > 12
 
     val bb = ByteBuffer.wrap(reply)
     val packetType = bb.getShort() & 0xFFFF

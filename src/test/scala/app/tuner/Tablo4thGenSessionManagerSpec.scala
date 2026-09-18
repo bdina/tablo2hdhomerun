@@ -40,9 +40,10 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val runnerCalls = new AtomicInteger(0)
       val selfRef = new AtomicReference[ActorRef[Request]](null)
       val mgr = spawnManager { (channelId, self) =>
-        runnerCalls.incrementAndGet()
+        val _ = runnerCalls.incrementAndGet()
         selfRef.set(self)
-        channelId shouldBe "ch-1"
+        val _ = channelId shouldBe "ch-1"
+        ()
       }
       val probeA = testKit.createTestProbe[Response.Acquire]()
       val probeB = testKit.createTestProbe[Response.Acquire]()
@@ -50,14 +51,14 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       mgr ! Request.Acquire("ch-1", "client-a", probeA.ref)
       mgr ! Request.Acquire("ch-1", "client-b", probeB.ref)
 
-      eventually(timeout(3.seconds), interval(50.millis)) {
-        runnerCalls.get() shouldBe 1
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val _ = runnerCalls.get() shouldBe 1
         selfRef.get() should not be null
       }
 
       selfRef.get() ! Command.CheckIn("ch-1", meta(), hubSource, () => ())
-      probeA.expectMessageType[Response.Attached]
-      probeB.expectMessageType[Response.Attached]
+      val _ = probeA.expectMessageType[Response.Attached]
+      val _ = probeB.expectMessageType[Response.Attached]
     }
 
     "reject waiters on AcquireFailed and clear the entry" in {
@@ -66,13 +67,13 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val probe = testKit.createTestProbe[Response.Acquire]()
 
       mgr ! Request.Acquire("ch-fail", "client-a", probe.ref)
-      eventually(timeout(3.seconds), interval(50.millis)) {
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
         selfRef.get() should not be null
       }
 
       selfRef.get() ! Command.AcquireFailed("ch-fail", new RuntimeException("watch failed"))
       val rejected = probe.expectMessageType[Response.Rejected]
-      rejected.reason match {
+      val _ = rejected.reason match {
         case RejectReason.Failed(ex) =>
           ex.getMessage shouldBe "watch failed"
         case other => fail(s"unexpected $other")
@@ -81,11 +82,11 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val probe2 = testKit.createTestProbe[Response.Acquire]()
       val runnerCalls = new AtomicInteger(0)
       val mgr2 = spawnManager { (_, self) =>
-        runnerCalls.incrementAndGet()
+        val _ = runnerCalls.incrementAndGet()
         self ! Command.CheckIn("ch-fail", meta(), hubSource, () => ())
       }
       mgr2 ! Request.Acquire("ch-fail", "client-b", probe2.ref)
-      probe2.expectMessageType[Response.Attached]
+      val _ = probe2.expectMessageType[Response.Attached]
       runnerCalls.get() shouldBe 1
     }
 
@@ -97,18 +98,18 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val probeB = testKit.createTestProbe[Response.Acquire]()
 
       mgr ! Request.Acquire("ch-live", "client-a", probeA.ref)
-      eventually(timeout(3.seconds), interval(50.millis)) {
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
         selfRef.get() should not be null
       }
-      selfRef.get() ! Command.CheckIn("ch-live", meta(), hubSource, () => teardownCount.incrementAndGet())
-      probeA.expectMessageType[Response.Attached]
+      selfRef.get() ! Command.CheckIn("ch-live", meta(), hubSource, () => { val _ = teardownCount.incrementAndGet() })
+      val _ = probeA.expectMessageType[Response.Attached]
 
       mgr ! Request.Acquire("ch-live", "client-b", probeB.ref)
-      probeB.expectMessageType[Response.Attached]
+      val _ = probeB.expectMessageType[Response.Attached]
 
       mgr ! Request.Release("ch-live", "client-a")
       Thread.sleep(100)
-      teardownCount.get() shouldBe 0
+      val _ = teardownCount.get() shouldBe 0
 
       mgr ! Request.Release("ch-live", "client-b")
       Thread.sleep(100)
@@ -121,7 +122,7 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val teardownCount = new AtomicInteger(0)
       val mgr = spawnManager(
         startRunner = { (_, self) =>
-          runnerCalls.incrementAndGet()
+          val _ = runnerCalls.incrementAndGet()
           selfRef.set(self)
         }
       , idleGrace = 2.seconds
@@ -130,16 +131,16 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val probeB = testKit.createTestProbe[Response.Acquire]()
 
       mgr ! Request.Acquire("ch-grace", "client-a", probeA.ref)
-      eventually(timeout(3.seconds), interval(50.millis)) {
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
         selfRef.get() should not be null
       }
-      selfRef.get() ! Command.CheckIn("ch-grace", meta(), hubSource, () => teardownCount.incrementAndGet())
-      probeA.expectMessageType[Response.Attached]
+      selfRef.get() ! Command.CheckIn("ch-grace", meta(), hubSource, () => { val _ = teardownCount.incrementAndGet() })
+      val _ = probeA.expectMessageType[Response.Attached]
 
       mgr ! Request.Release("ch-grace", "client-a")
       mgr ! Request.Acquire("ch-grace", "client-b", probeB.ref)
-      probeB.expectMessageType[Response.Attached]
-      runnerCalls.get() shouldBe 1
+      val _ = probeB.expectMessageType[Response.Attached]
+      val _ = runnerCalls.get() shouldBe 1
       teardownCount.get() shouldBe 0
     }
 
@@ -153,28 +154,28 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val probe = testKit.createTestProbe[Response.Acquire]()
 
       mgr ! Request.Acquire("ch-expire", "client-a", probe.ref)
-      eventually(timeout(3.seconds), interval(50.millis)) {
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
         selfRef.get() should not be null
       }
-      selfRef.get() ! Command.CheckIn("ch-expire", meta(), hubSource, () => teardownCount.incrementAndGet())
-      probe.expectMessageType[Response.Attached]
+      selfRef.get() ! Command.CheckIn("ch-expire", meta(), hubSource, () => { val _ = teardownCount.incrementAndGet() })
+      val _ = probe.expectMessageType[Response.Attached]
 
       mgr ! Request.Release("ch-expire", "client-a")
-      eventually(timeout(3.seconds), interval(50.millis)) {
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
         teardownCount.get() shouldBe 1
       }
 
       val runnerCalls = new AtomicInteger(0)
       val mgr2 = spawnManager(
         startRunner = { (_, self) =>
-          runnerCalls.incrementAndGet()
+          val _ = runnerCalls.incrementAndGet()
           self ! Command.CheckIn("ch-expire", meta("tok-2"), hubSource, () => ())
         }
       , idleGrace = 150.millis
       )
       val probe2 = testKit.createTestProbe[Response.Acquire]()
       mgr2 ! Request.Acquire("ch-expire", "client-b", probe2.ref)
-      probe2.expectMessageType[Response.Attached]
+      val _ = probe2.expectMessageType[Response.Attached]
       runnerCalls.get() shouldBe 1
     }
 
@@ -190,23 +191,23 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val probeC = testKit.createTestProbe[Response.Acquire]()
 
       mgr ! Request.Acquire("ch-cap", "client-a", probeA.ref)
-      eventually(timeout(3.seconds), interval(50.millis)) {
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
         selfRef.get() should not be null
       }
       selfRef.get() ! Command.CheckIn("ch-cap", meta(), hubSource, () => ())
-      probeA.expectMessageType[Response.Attached]
+      val _ = probeA.expectMessageType[Response.Attached]
 
       mgr ! Request.Acquire("ch-other", "client-b", probeB.ref)
-      probeB.expectMessage(Response.Rejected(RejectReason.NoTuners))
+      val _ = probeB.expectMessage(Response.Rejected(RejectReason.NoTuners))
 
       mgr ! Request.Acquire("ch-cap", "client-c", probeC.ref)
-      probeC.expectMessageType[Response.Attached]
+      val _ = probeC.expectMessageType[Response.Attached]
     }
 
     "teardown on unexpected CheckIn when not Opening" in {
       val teardownCount = new AtomicInteger(0)
       val mgr = spawnManager(startRunner = (_, _) => ())
-      mgr ! Command.CheckIn("ch-unexpected", meta(), hubSource, () => teardownCount.incrementAndGet())
+      mgr ! Command.CheckIn("ch-unexpected", meta(), hubSource, () => { val _ = teardownCount.incrementAndGet() })
       eventually(timeout(3.seconds), interval(50.millis)) {
         teardownCount.get() shouldBe 1
       }

@@ -4,7 +4,7 @@ import org.apache.pekko
 import org.apache.pekko.actor.typed.scaladsl.Behaviors
 import org.apache.pekko.actor.typed.scaladsl.adapter._
 import org.apache.pekko.actor.typed.Behavior
-import org.apache.pekko.http.scaladsl.model.{ContentTypes, HttpEntity, StatusCodes, Uri}
+import org.apache.pekko.http.scaladsl.model.{StatusCodes, Uri}
 import org.apache.pekko.http.scaladsl.server.Route
 import org.apache.pekko.http.scaladsl.testkit.ScalatestRouteTest
 import org.junit.runner.RunWith
@@ -22,7 +22,7 @@ import org.apache.pekko.http.scaladsl.testkit.RouteTestTimeout
 
 trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRouteTest {
 
-  implicit def defaultTimeout(implicit system: org.apache.pekko.actor.ActorSystem): RouteTestTimeout =
+  implicit def defaultTimeout: RouteTestTimeout =
     RouteTestTimeout(5.seconds)
 
   def typedSystem: pekko.actor.typed.ActorSystem[pekko.NotUsed] =
@@ -55,12 +55,6 @@ trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with Scalat
         if (rejectNoTuners) {
           replyTo ! Tablo4thGen.Channel.SessionManager.Response.Rejected(Tablo4thGen.Channel.SessionManager.RejectReason.NoTuners)
         } else {
-          val meta = Tablo4thGen.Channel.SessionManager.TabloSessionMeta(
-            token = "test-token",
-            expires = None,
-            keepalive = None,
-            playlistUrl = s"http://127.0.0.1:8080/test-upstream/$channelId/playlist.m3u8"
-          )
           replyTo ! Tablo4thGen.Channel.SessionManager.Response.Attached(pekko.stream.scaladsl.Source.empty)
         }
         Behaviors.same
@@ -125,7 +119,7 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
 
   "GET /lineup.m3u" should "return 200 OK and standard M3U playlist" in {
     Get("/lineup.m3u") ~> routes() ~> check {
-      status shouldBe StatusCodes.OK
+      val _ = status shouldBe StatusCodes.OK
       val body = responseAs[String]
       val _ = body should include("#EXTM3U")
       val _ = body should include("#EXTINF:-1")
