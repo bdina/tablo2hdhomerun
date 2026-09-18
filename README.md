@@ -16,7 +16,7 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 
 ## Requirements
 
-- Java 11+ and Scala 3.8.1 (JVM mode)
+- Java 24+ and Scala 3.9.0 (JVM mode)
 - GraalVM CE (native image mode; Docker uses GraalVM CE 25)
 - FFmpeg (optional by default; required when `STREAM_BACKEND=ffmpeg`)
 - Network access to TabloTV device

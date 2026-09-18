@@ -8,13 +8,13 @@ Tablo2HDHomeRun is an HTTP proxy server that exposes a TabloTV DVR device as an 
 
 | Component | Technology |
 |-----------|------------|
-| Language | Scala 3.7.4 |
-| Runtime | JVM (Java 24) or GraalVM Native Image |
-| HTTP Framework | Apache Pekko HTTP 1.2.0 |
-| Actor System | Apache Pekko Actor Typed 1.3.0 |
+| Language | Scala 3.9.0 |
+| Runtime | JVM (Java 24+) or GraalVM Native Image |
+| HTTP Framework | Apache Pekko HTTP 1.4.0 |
+| Actor System | Apache Pekko Actor Typed 1.7.0 |
 | JSON | Spray JSON |
 | XML | scala-xml |
-| Build | Gradle 8.14.3 with Shadow plugin |
+| Build | Gradle 9.3.1 with Shadow plugin 9.6.1 |
 | Containerization | Docker (Ubuntu 24.04 base) |
 
 ## System Architecture

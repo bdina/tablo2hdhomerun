@@ -825,7 +825,8 @@
             "java.util.concurrent.ForkJoinPool$ForkJoinWorkerThreadFactory",
             "int",
             "java.lang.Thread$UncaughtExceptionHandler",
-            "boolean"
+            "boolean",
+            "int"
           ]
         }
       ]
