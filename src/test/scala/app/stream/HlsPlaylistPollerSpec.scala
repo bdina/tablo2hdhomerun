@@ -170,4 +170,37 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Fail(_) => fail("expected emit")
     }
   }
+
+  it should "not trigger isReset or repeat segments on minor sliding window fluctuations" in {
+    // Prior stream emitted up through sequence 607 (so lastSeq is 608)
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 608)
+
+    // Window has 3 segments: 605, 606, 607 (mediaSequence = 605, size = 3, newLastSeq = 608)
+    val p1 = playlist(605, Seq("seg605.ts", "seg606.ts", "seg607.ts"))
+    val (state1, segs1) = HlsPlaylistPoller.onPlaylist(state, p1, maxStallPolls = 5, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+    segs1 shouldBe empty
+    state1.lastSeq shouldBe 608
+
+    // Fluctuation: segment 605 drops before 608 is published (mediaSequence = 606, size = 2, so newLastSeq is 608 - but say size is 1 or newLastSeq is 607)
+    val p2 = playlist(605, Seq("seg605.ts", "seg606.ts"))
+    val (state2, segs2) = HlsPlaylistPoller.onPlaylist(state1, p2, maxStallPolls = 5, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+    // Must NOT trigger isReset and must NOT re-emit 605 or 606!
+    segs2 shouldBe empty
+    state2.lastSeq shouldBe 608
+
+    // Now new segment 608 is published: 606, 607, 608 (newLastSeq = 609)
+    val p3 = playlist(606, Seq("seg606.ts", "seg607.ts", "seg608.ts"))
+    val (_, segs3) = HlsPlaylistPoller.onPlaylist(state2, p3, maxStallPolls = 5, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+    // Only the new segment 608 must be emitted, picking up seamlessly from freeze frame
+    val _ = segs3.map(_.sequence) shouldBe Seq(608)
+  }
 }

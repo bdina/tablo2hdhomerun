@@ -63,6 +63,8 @@ object HlsPlaylistPoller {
       )
     }
 
+  val sequenceResetThreshold: Int = 10
+
   def onPlaylist(
     state: PollState
   , playlist: M3U8.Playlist
@@ -74,7 +76,10 @@ object HlsPlaylistPoller {
     } else {
       val allSegments = segmentInfos(state.baseUrl, playlist)
       val newLastSeq = playlist.mediaSequence + playlist.segments.size
-      val isReset = state.lastSeq > 0 && newLastSeq < state.lastSeq
+      val isReset =
+        state.lastSeq > 0 &&
+        allSegments.nonEmpty &&
+        allSegments.last.sequence < (state.lastSeq - math.max(sequenceResetThreshold, allSegments.size))
       val isFirstPoll = state.lastSeq == 0 || isReset
       val effectiveLastSeq = if (isReset) 0 else state.lastSeq
       val candidates = if (isFirstPoll)
@@ -90,9 +95,10 @@ object HlsPlaylistPoller {
         val nextTarget = if (playlist.targetDuration > 0) playlist.targetDuration else defaultPollSec
         val playlistKeys = allSegments.map(segmentKey).toSet
         val newEmittedKeys = (state.emittedKeys ++ segments.map(segmentKey)).intersect(playlistKeys)
+        val nextLastSeq = if (isReset) newLastSeq else math.max(state.lastSeq, newLastSeq)
         Emit(
           state.copy(
-            lastSeq = newLastSeq
+            lastSeq = nextLastSeq
           , lastTargetDuration = nextTarget
           , stallPolls = nextStall
           , fetchFailures = 0
@@ -100,7 +106,7 @@ object HlsPlaylistPoller {
           , emittedKeys = newEmittedKeys
           , lastAdvanced = advanced
           )
-          , segments
+        , segments
         )
       }
     }

@@ -1345,7 +1345,6 @@ object Tablo4thGen {
                           )
                           if (WatchSession.playlistChanged(previous, updated)) {
                             log.info("[channel] playlist url changed leaseId={}, restarting hls", leaseId)
-                            lastSeqRef.set(0)
                             streamKillSwitch.get().foreach(_.shutdown())
                           }
                           scheduleKeepalive()
@@ -1384,7 +1383,6 @@ object Tablo4thGen {
                     Source.futureSource(
                       retuneWatchSession(session.token).map { newSession =>
                         currentSession.set(newSession)
-                        lastSeqRef.set(0)
                         streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef)
                       }
                     )

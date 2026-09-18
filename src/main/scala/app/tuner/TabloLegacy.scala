@@ -922,16 +922,27 @@ object TabloLegacy {
             def streamWithResilience(firstPlaylistUrl: String) =
               Source.lazySource { () =>
                 var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
+                val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
                 def streamFactory() = {
                   nextPlaylistUrl match {
                     case Some(url) =>
                       nextPlaylistUrl = None
-                      StreamBackend().stream(url, streamId)
+                      StreamBackend().stream(
+                        url
+                      , streamId
+                      , initialSeq = lastSeqRef.get()
+                      , onSeqAdvanced = seq => lastSeqRef.set(seq)
+                      )
                     case None =>
                       Source.futureSource(
                         startWatchSession(checkTuners = false).map { data =>
                           log.info("[channel] recovered tune playlist={}", data.playlist_url)
-                          StreamBackend().stream(data.playlist_url.toString, streamId)
+                          StreamBackend().stream(
+                            data.playlist_url.toString
+                          , streamId
+                          , initialSeq = lastSeqRef.get()
+                          , onSeqAdvanced = seq => lastSeqRef.set(seq)
+                          )
                         }
                       )
                   }
