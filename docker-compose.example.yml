@@ -13,6 +13,7 @@ services:
       - STREAM_BACKEND=hls
       - DEVICE_ID=12345678
       # - TUNER_COUNT=4 # Optional override (auto-detected from Tablo hardware if omitted)
+      # - STREAM_HLS_STALL_POLLS=10 # Optional: playlist polls with no sequence advance before retune (default: 10)
       - ENABLE_UDP_DISCOVERY=true
       - ENABLE_HLS_ENDPOINT=true
     healthcheck:

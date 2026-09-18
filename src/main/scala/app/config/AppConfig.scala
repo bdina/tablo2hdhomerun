@@ -121,7 +121,7 @@ object AppConfig {
     , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
     )
     val hls = HlsStreamConfig(
-      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 3)
+      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 10)
     , heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
     , health = MpegTsHealth.Settings(
         windowSec = getInt(get, "STREAM_HLS_HEALTH_WINDOW_SEC", 10)

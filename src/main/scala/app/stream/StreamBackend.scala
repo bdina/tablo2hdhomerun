@@ -10,7 +10,12 @@ import app.AppContext
 import app.config.StreamBackendKind
 
 trait StreamBackend {
-  def stream(playlistUrl: String, label: String = "")(implicit system: ActorSystem[?]): Source[ByteString, ?]
+  def stream(
+    playlistUrl: String
+  , label: String = ""
+  , initialSeq: Int = 0
+  , onSeqAdvanced: Int => Unit = _ => ()
+  )(implicit system: ActorSystem[?]): Source[ByteString, ?]
   def name: String
 }
 

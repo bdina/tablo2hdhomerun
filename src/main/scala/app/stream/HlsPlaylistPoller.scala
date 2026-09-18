@@ -27,8 +27,8 @@ object HlsPlaylistPoller {
   final case class Emit(next: PollState, segments: Seq[SegmentInfo]) extends Outcome
   final case class Fail(error: Throwable) extends Outcome
 
-  def initial(baseUrl: String): PollState =
-    PollState(baseUrl, 0, 0, 0, 0, false)
+  def initial(baseUrl: String, lastSeq: Int = 0): PollState =
+    PollState(baseUrl, lastSeq, 0, 0, 0, false)
 
   val pollDelayMinSec: Int = 1
   val pollDelayMaxSec: Int = 10
@@ -72,15 +72,17 @@ object HlsPlaylistPoller {
     if (playlist.isEndList) {
       Fail(HlsBackend.HlsError.SessionEnded)
     } else {
-      val isFirstPoll = state.lastSeq == 0
       val allSegments = segmentInfos(state.baseUrl, playlist)
+      val newLastSeq = playlist.mediaSequence + playlist.segments.size
+      val isReset = state.lastSeq > 0 && newLastSeq < state.lastSeq
+      val isFirstPoll = state.lastSeq == 0 || isReset
+      val effectiveLastSeq = if (isReset) 0 else state.lastSeq
       val candidates = if (isFirstPoll)
         allSegments.takeRight(liveEdgeSegmentCount)
       else
-        allSegments.filter(_.sequence >= state.lastSeq)
+        allSegments.filter(_.sequence >= effectiveLastSeq)
       val segments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
-      val newLastSeq = playlist.mediaSequence + playlist.segments.size
-      val advanced = newLastSeq > state.lastSeq
+      val advanced = isFirstPoll || (newLastSeq > effectiveLastSeq)
       val nextStall = if (advanced) 0 else state.stallPolls + 1
       if (!advanced && nextStall >= maxStallPolls) {
         Fail(HlsBackend.HlsError.PlaylistStall)

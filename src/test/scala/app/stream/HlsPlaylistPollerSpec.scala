@@ -139,4 +139,35 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       state.emittedKeys.size should be <= windowSize
     }
   }
+
+  it should "preserve contiguous segments when initialized with prior lastSeq" in {
+    // Say prior stream emitted up through sequence 11 (so lastSeq was 12)
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 12)
+    state.lastSeq shouldBe 12
+
+    // Playlist now contains segments 10, 11, 12, 13, 14
+    val p = playlist(10, Seq("seg10.ts", "seg11.ts", "seg12.ts", "seg13.ts", "seg14.ts"))
+    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = segments.map(_.sequence) shouldBe Seq(12, 13, 14)
+        next.lastSeq shouldBe 15
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit")
+    }
+  }
+
+  it should "reset to live edge when playlist sequence jumps backward" in {
+    // Prior stream had reached sequence 5000
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 5000)
+
+    // New playlist restarted at sequence 0 with 5 segments: 0, 1, 2, 3, 4
+    val p = playlist(0, Seq("seg0.ts", "seg1.ts", "seg2.ts", "seg3.ts", "seg4.ts"))
+    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        // Falls back to liveEdgeSegmentCount (3 segments)
+        val _ = segments.map(_.sequence) shouldBe Seq(2, 3, 4)
+        val _ = next.lastSeq shouldBe 5
+        next.stallPolls shouldBe 0
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit")
+    }
+  }
 }

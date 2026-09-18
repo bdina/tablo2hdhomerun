@@ -55,13 +55,18 @@ object HlsBackend extends StreamBackend {
 
   private def healthSettings: MpegTsHealth.Settings = AppContext.config.stream.hls.health
 
-  override def stream(playlistUrl: String, label: String = "")(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
+  override def stream(
+    playlistUrl: String
+  , label: String = ""
+  , initialSeq: Int = 0
+  , onSeqAdvanced: Int => Unit = _ => ()
+  )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
     val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
     val http = Http(system.toClassic)
     val bytesOut = new java.util.concurrent.atomic.AtomicLong(0L)
-    val lastSeqOut = new java.util.concurrent.atomic.AtomicInteger(0)
+    val lastSeqOut = new java.util.concurrent.atomic.AtomicInteger(initialSeq)
     val hlsConfig = AppContext.config.stream.hls
     val heartbeatSec = hlsConfig.heartbeatSec
     var heartbeatTask: Option[org.apache.pekko.actor.Cancellable] = None
@@ -238,6 +243,7 @@ object HlsBackend extends StreamBackend {
                 Future.failed(err)
               case HlsPlaylistPoller.Emit(next, segments) =>
                 lastSeqOut.set(next.lastSeq)
+                onSeqAdvanced(next.lastSeq)
                 if (segments.nonEmpty && !state.loggedFirstSegment) {
                   val head = segments.head
                   val last = segments.last
@@ -275,7 +281,7 @@ object HlsBackend extends StreamBackend {
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
           log.debug("[stream:hls] resolved media playlist={}", url)
-          Source.unfoldAsync(HlsPlaylistPoller.initial(url))(s => step(s)(mat))
+          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq))(s => step(s)(mat))
             .flatMapConcat { segments =>
               if (segments.isEmpty) Source.empty
               else Source(segments)

@@ -1275,6 +1275,7 @@ object Tablo4thGen {
         def streamFromWatchSession(
           session: WatchSession.Session
         , streamKillSwitch: AtomicReference[Option[UniqueKillSwitch]]
+        , lastSeqRef: java.util.concurrent.atomic.AtomicInteger
         ): Source[ByteString, ?] = {
           log.info(
             "[4thgen-channel] stream session expires={} keepalive={} playlist={}"
@@ -1283,7 +1284,12 @@ object Tablo4thGen {
           , LogConfig.truncate(session.playlistUrl)
           )
           StreamBackend()
-            .stream(session.playlistUrl, leaseId)
+            .stream(
+              session.playlistUrl
+            , leaseId
+            , initialSeq = lastSeqRef.get()
+            , onSeqAdvanced = seq => lastSeqRef.set(seq)
+            )
             .viaMat(KillSwitches.single)(Keep.right)
             .mapMaterializedValue { killSwitch =>
               streamKillSwitch.set(Some(killSwitch))
@@ -1306,6 +1312,7 @@ object Tablo4thGen {
                   case Some(token) =>
                 val currentSession = new AtomicReference[WatchSession.Session](firstSession)
                 val streamKillSwitch = new AtomicReference[Option[UniqueKillSwitch]](None)
+                val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
                 @volatile var keepaliveTask: Option[pekko.actor.Cancellable] = None
                 val leaseStopped = new AtomicBoolean(false)
                 val tornDown = new AtomicBoolean(false)
@@ -1338,6 +1345,7 @@ object Tablo4thGen {
                           )
                           if (WatchSession.playlistChanged(previous, updated)) {
                             log.info("[channel] playlist url changed leaseId={}, restarting hls", leaseId)
+                            lastSeqRef.set(0)
                             streamKillSwitch.get().foreach(_.shutdown())
                           }
                           scheduleKeepalive()
@@ -1371,12 +1379,13 @@ object Tablo4thGen {
                 def streamFactory(): Source[ByteString, ?] = {
                   val session = currentSession.get()
                   if (!WatchSession.shouldRefreshSession(session))
-                    streamFromWatchSession(session, streamKillSwitch)
+                    streamFromWatchSession(session, streamKillSwitch, lastSeqRef)
                   else
                     Source.futureSource(
                       retuneWatchSession(session.token).map { newSession =>
                         currentSession.set(newSession)
-                        streamFromWatchSession(newSession, streamKillSwitch)
+                        lastSeqRef.set(0)
+                        streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef)
                       }
                     )
                 }

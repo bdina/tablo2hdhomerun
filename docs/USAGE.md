@@ -186,7 +186,7 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `STREAM_RETRY_MIN_BACKOFF_SEC` | `2` | Minimum delay between retune attempts |
 | `STREAM_RETRY_MAX_BACKOFF_SEC` | `30` | Maximum delay between retune attempts |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | End stream after this many seconds without real backend data |
-| `STREAM_HLS_STALL_POLLS` | `3` | Playlist polls with no media-sequence advance before retune |
+| `STREAM_HLS_STALL_POLLS` | `10` | Playlist polls with no media-sequence advance before retune |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
 | `STREAM_HLS_HEALTH_WINDOW_SEC` | `10` | MPEG-TS health metric sliding window |
 | `STREAM_HLS_CC_ERROR_MAX` | `30` | Continuity-counter errors per window before degraded |

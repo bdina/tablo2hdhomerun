@@ -30,7 +30,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.retryMinBackoffSec shouldBe 2
     val _ = config.stream.resilient.retryMaxBackoffSec shouldBe 30
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 60
-    val _ = config.stream.hls.stallPolls shouldBe 3
+    val _ = config.stream.hls.stallPolls shouldBe 10
     val _ = config.stream.hls.heartbeatSec shouldBe 60
     val _ = config.stream.hls.health.windowSec shouldBe 10
     val _ = config.stream.hls.health.ccMax shouldBe 30
