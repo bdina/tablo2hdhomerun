@@ -264,6 +264,48 @@ object Tablo4thGen {
       implicit val channelLineupFormat: JsonFormat[ChannelLineup] = jsonFormat5(ChannelLineup.apply)
     }
 
+    def isHd(kind: String, minor: Int, name: String, callSign: Option[String]): Boolean = {
+      val nameUpper = name.toUpperCase
+      val callUpper = callSign.map(_.toUpperCase).getOrElse("")
+      def hasHdMarker(s: String): Boolean =
+        s.contains("-HD") || s.contains(" HD") || s.contains("_HD") ||
+        s.endsWith("HD") || s.contains("-DT") || s.contains("HDTV")
+
+      kind match {
+        case "ota" =>
+          minor == 1 || hasHdMarker(nameUpper) || hasHdMarker(callUpper)
+        case "ott" =>
+          nameUpper.contains("HD") || callUpper.contains("HD") || hasHdMarker(nameUpper) || hasHdMarker(callUpper)
+        case _ =>
+          false
+      }
+    }
+
+    def channelToJsValue(channel: ChannelLineup, baseUrl: Uri): JsValue = {
+      val (major, minor, callSign, source, isHdChannel) = channel.kind match {
+        case "ota" =>
+          val ota = channel.ota.getOrElse(OtaChannelInfo(0, 0, None, None, None, None, None))
+          (ota.major, ota.minor, ota.callSign.getOrElse(channel.name), "antenna", isHd("ota", ota.minor, channel.name, ota.callSign))
+        case "ott" =>
+          val ott = channel.ott.getOrElse(OttChannelInfo(None, None, None, None, None, None, None))
+          val minor = ott.minor.getOrElse(0)
+          (ott.major.getOrElse(0), minor, ott.callSign.getOrElse(channel.name), "streaming", isHd("ott", minor, channel.name, ott.callSign))
+        case _ =>
+          (0, 0, channel.name, "unknown", false)
+      }
+      val num = s"$major.$minor"
+      val url = s"${baseUrl.withPath(Uri.Path(s"/channel/${channel.identifier}"))}"
+      val src = s"${baseUrl.withPath(Uri.Path(s"/guide/channels/${channel.identifier}/watch"))}"
+      JsObject(
+        "GuideNumber" -> JsString(num)
+      , "GuideName" -> JsString(callSign)
+      , "URL" -> JsString(url)
+      , "HD" -> JsNumber(if (isHdChannel) 1 else 0)
+      , "type" -> JsString(source)
+      , "srcURL" -> JsString(src)
+      )
+    }
+
     object LineupActor {
       sealed trait Request
       object Request {
@@ -292,35 +334,8 @@ object Tablo4thGen {
 
         val HttpCtx = Http()
 
-        def channelToJsValue(channel: ChannelLineup): JsValue = {
-          val (major, minor, callSign, source, isHd) = channel.kind match {
-            case "ota" =>
-              val ota = channel.ota.getOrElse(OtaChannelInfo(0, 0, None, None, None, None, None))
-              val nameUpper = channel.name.toUpperCase
-              val callUpper = ota.callSign.map(_.toUpperCase).getOrElse("")
-              val isHdChannel = nameUpper.contains("HD") || callUpper.contains("HD") || callUpper.contains("-DT")
-              (ota.major, ota.minor, ota.callSign.getOrElse(channel.name), "antenna", isHdChannel)
-            case "ott" =>
-              val ott = channel.ott.getOrElse(OttChannelInfo(None, None, None, None, None, None, None))
-              val nameUpper = channel.name.toUpperCase
-              val callUpper = ott.callSign.map(_.toUpperCase).getOrElse("")
-              val isHdChannel = nameUpper.contains("HD") || callUpper.contains("HD")
-              (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name), "streaming", isHdChannel)
-            case _ =>
-              (0, 0, channel.name, "unknown", false)
-          }
-          val num = s"$major.$minor"
-          val url = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/channel/${channel.identifier}"))}"
-          val src = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${channel.identifier}/watch"))}"
-          JsObject(
-            "GuideNumber" -> JsString(num)
-          , "GuideName" -> JsString(callSign)
-          , "URL" -> JsString(url)
-          , "HD" -> JsNumber(if (isHd) 1 else 0)
-          , "type" -> JsString(source)
-          , "srcURL" -> JsString(src)
-          )
-        }
+        def channelToJsValue(channel: ChannelLineup): JsValue =
+          Lineup.channelToJsValue(channel, AppContext.discover.BaseURL)
 
         def scan(): Future[Seq[JsValue]] = {
           import Lineup.JsonProtocol._

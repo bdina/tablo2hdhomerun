@@ -7,6 +7,8 @@ import org.scalatestplus.junit.JUnitRunner
 
 import spray.json._
 
+import org.apache.pekko.http.scaladsl.model.Uri
+
 import app.tuner.Tablo4thGen.Auth.JsonProtocol._
 import app.tuner.Tablo4thGen.Lineup.JsonProtocol._
 import app.tuner.Tablo4thGen.Channel.Response.JsonProtocol._
@@ -120,4 +122,59 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
     val info = json.convertTo[Tablo4thGen.Channel.Response.ServerInfo]
     info.detectedTuners shouldBe None
   }
+
+  "Lineup.isHd" should "identify primary OTA .1 channels as HD" in {
+    val _ = Tablo4thGen.Lineup.isHd("ota", 1, "WFXTDT1", Some("WFXTDT1")) shouldBe true
+    val _ = Tablo4thGen.Lineup.isHd("ota", 1, "WBZDT1", Some("WBZDT1")) shouldBe true
+    val _ = Tablo4thGen.Lineup.isHd("ota", 1, "WCVBDT1", Some("WCVBDT1")) shouldBe true
+    Tablo4thGen.Lineup.isHd("ota", 1, "WBTSCD1", Some("WBTSCD1")) shouldBe true
+  }
+
+  it should "identify explicit HD markers on OTA subchannels as HD" in {
+    val _ = Tablo4thGen.Lineup.isHd("ota", 2, "WUSA-HD", Some("WUSA-HD")) shouldBe true
+    val _ = Tablo4thGen.Lineup.isHd("ota", 2, "Channel 2", Some("WGBH HD")) shouldBe true
+    val _ = Tablo4thGen.Lineup.isHd("ota", 2, "Channel 2", Some("WCVB-DT")) shouldBe true
+    Tablo4thGen.Lineup.isHd("ota", 2, "Channel 2", Some("WGBH-HDTV")) shouldBe true
+  }
+
+  it should "identify standard OTA subchannels without HD markers as SD" in {
+    val _ = Tablo4thGen.Lineup.isHd("ota", 2, "Start TV", Some("WBZDT2")) shouldBe false
+    val _ = Tablo4thGen.Lineup.isHd("ota", 2, "MeTV", Some("WCVBDT2")) shouldBe false
+    val _ = Tablo4thGen.Lineup.isHd("ota", 2, "This TV", Some("WHDHDT2")) shouldBe false
+    Tablo4thGen.Lineup.isHd("ota", 3, "Grit", Some("WFXTDT3")) shouldBe false
+  }
+
+  it should "identify OTT channels with HD in name or callsign as HD" in {
+    val _ = Tablo4thGen.Lineup.isHd("ott", 0, "ION HD", None) shouldBe true
+    val _ = Tablo4thGen.Lineup.isHd("ott", 0, "WeatherNation", Some("WN-HD")) shouldBe true
+    Tablo4thGen.Lineup.isHd("ott", 0, "welcomehome", None) shouldBe false
+  }
+
+  it should "produce HD=1 in channelToJsValue for primary OTA channels" in {
+    val ota = Tablo4thGen.Lineup.OtaChannelInfo(
+      major = 25,
+      minor = 1,
+      callSign = Some("WFXTDT1"),
+      network = Some("FOX"),
+      streamUrl = None,
+      provider = None,
+      canRecord = Some(true)
+    )
+    val ch = Tablo4thGen.Lineup.ChannelLineup(
+      identifier = "S20362_025_01",
+      name = "WFXTDT1",
+      kind = "ota",
+      ota = Some(ota),
+      ott = None
+    )
+    val js = Tablo4thGen.Lineup.channelToJsValue(ch, Uri("http://127.0.0.1:8080"))
+    val obj = js.asJsObject.fields
+    val hdVal = obj("HD")
+    val guideNum = obj("GuideNumber")
+    val chanType = obj("type")
+    val _ = hdVal shouldBe spray.json.JsNumber(1)
+    val _ = guideNum shouldBe spray.json.JsString("25.1")
+    chanType shouldBe spray.json.JsString("antenna")
+  }
 }
+

@@ -87,11 +87,13 @@ paths:
                 - GuideNumber: "7.1"
                   GuideName: ABC
                   URL: http://192.168.1.50:8080/channel/12345
+                  HD: 1
                   type: antenna
                   srcURL: http://192.168.1.100:8885/guide/channels/12345/watch
                 - GuideNumber: "4.1"
                   GuideName: NBC
                   URL: http://192.168.1.50:8080/channel/12346
+                  HD: 1
                   type: antenna
                   srcURL: http://192.168.1.100:8885/guide/channels/12346/watch
         '500':
@@ -322,6 +324,11 @@ components:
           format: uri
           description: Streaming URL for this channel (via proxy)
           example: http://192.168.1.50:8080/channel/12345
+        HD:
+          type: integer
+          description: High definition flag (1 for HD, 0 for SD)
+          enum: [0, 1]
+          example: 1
         type:
           type: string
           description: Signal source type
