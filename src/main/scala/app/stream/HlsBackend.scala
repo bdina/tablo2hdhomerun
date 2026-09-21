@@ -127,11 +127,16 @@ object HlsBackend extends StreamBackend {
       }
       def failSource(error: HlsError): Source[ByteString, ?] = Source.failed(error)
       def attemptFetch(retriesLeft: Int): Source[ByteString, ?] = {
-        val request = byteRange match {
+        val request = HlsSegmentFetch.safeByteRange(byteRange) match {
           case Some((offset, length)) =>
             log.debug("[stream:hls] segment range fetch offset={} length={} url={}", offset, length, url)
             HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
-          case None => HttpRequest(uri = url)
+          case None =>
+            if (byteRange.isDefined) {
+              val (offset, length) = byteRange.get
+              log.warn("[stream:hls] ignoring invalid byte range offset={} length={} url={}", offset, length, url)
+            }
+            HttpRequest(uri = url)
         }
         Source.futureSource(
           http.singleRequest(request).map { response =>
@@ -247,7 +252,7 @@ object HlsBackend extends StreamBackend {
                 if (segments.nonEmpty && !state.loggedFirstSegment) {
                   val head = segments.head
                   val last = segments.last
-                  val rangeDesc = head.byteRange.map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
+                  val rangeDesc = HlsSegmentFetch.safeByteRange(head.byteRange).map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
                   log.info(
                     "[stream:hls] emit label={} count={} firstSeq={} lastSeq={} firstUrl={}{}"
                   , label

@@ -1,9 +1,12 @@
 package app.stream
 
-import org.apache.pekko.http.scaladsl.model.{HttpHeader, StatusCode, StatusCodes}
+import org.apache.pekko.http.scaladsl.model.{HttpHeader, HttpRequest, StatusCode, StatusCodes}
+import org.apache.pekko.http.scaladsl.model.headers.{ByteRange, Range}
 
 object HlsSegmentFetch {
   final case class RangeRequest(offset: Long, length: Long) {
+    require(offset >= 0, s"offset must be >= 0, got $offset")
+    require(length > 0, s"length must be > 0, got $length")
     def endInclusive: Long = offset + length - 1
   }
 
@@ -11,6 +14,22 @@ object HlsSegmentFetch {
   case object Accept extends SegmentFetchDecision
   final case class Fail(error: HlsBackend.HlsError) extends SegmentFetchDecision
   final case class Retry(reason: String) extends SegmentFetchDecision
+
+  def isSafeByteRange(offset: Long, length: Long): Boolean =
+    offset >= 0 && length > 0
+
+  def safeByteRange(byteRange: Option[(Long, Long)]): Option[(Long, Long)] =
+    byteRange.filter { case (offset, length) => isSafeByteRange(offset, length) }
+
+  def buildRangeHeader(byteRange: Option[(Long, Long)]): Option[Range] =
+    safeByteRange(byteRange).map { case (offset, length) =>
+      Range(ByteRange(offset, offset + length - 1))
+    }
+
+  def buildSegmentRequest(url: String, byteRange: Option[(Long, Long)]): HttpRequest = {
+    val base = HttpRequest(uri = url)
+    buildRangeHeader(byteRange).map(base.addHeader).getOrElse(base)
+  }
 
   private def isServerError(status: StatusCode): Boolean = {
     val code = status.intValue()
@@ -89,7 +108,7 @@ object HlsSegmentFetch {
   , byteRange: Option[(Long, Long)]
   , retriesLeft: Int
   ): SegmentFetchDecision =
-    byteRange match {
+    safeByteRange(byteRange) match {
       case Some((offset, length)) =>
         validateRangedResponse(status, headers, RangeRequest(offset, length), retriesLeft)
       case None => classifyStatus(status, retriesLeft)

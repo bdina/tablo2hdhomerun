@@ -57,4 +57,56 @@ class HlsSegmentFetchSpec extends AnyFlatSpec with Matchers {
     HlsSegmentFetch.decideSegmentResponse(StatusCodes.OK, Seq.empty, None, retriesLeft = 0) shouldBe
       HlsSegmentFetch.Accept
   }
+
+  it should "treat zero or negative length byte-ranges as un-ranged and accept 200 OK" in {
+    val _ = HlsSegmentFetch.decideSegmentResponse(StatusCodes.OK, Seq.empty, Some((1000L, 0L)), retriesLeft = 0) shouldBe
+      HlsSegmentFetch.Accept
+    val _ = HlsSegmentFetch.decideSegmentResponse(StatusCodes.OK, Seq.empty, Some((1000L, -10L)), retriesLeft = 0) shouldBe
+      HlsSegmentFetch.Accept
+    HlsSegmentFetch.decideSegmentResponse(StatusCodes.OK, Seq.empty, Some((-5L, 500L)), retriesLeft = 0) shouldBe
+      HlsSegmentFetch.Accept
+  }
+
+  "HlsSegmentFetch.safeByteRange" should "accept valid positive byte ranges" in {
+    val _ = HlsSegmentFetch.safeByteRange(Some((0L, 100L))) shouldBe Some((0L, 100L))
+    HlsSegmentFetch.safeByteRange(Some((1000L, 500L))) shouldBe Some((1000L, 500L))
+  }
+
+  it should "filter out zero, negative length, or negative offset ranges" in {
+    val _ = HlsSegmentFetch.safeByteRange(Some((1000L, 0L))) shouldBe None
+    val _ = HlsSegmentFetch.safeByteRange(Some((1000L, -1L))) shouldBe None
+    val _ = HlsSegmentFetch.safeByteRange(Some((-1L, 500L))) shouldBe None
+    HlsSegmentFetch.safeByteRange(None) shouldBe None
+  }
+
+  "HlsSegmentFetch.buildRangeHeader" should "create Pekko Range header for safe byte ranges" in {
+    val header = HlsSegmentFetch.buildRangeHeader(Some((1000L, 500L)))
+    header shouldBe defined
+    header.get.value() shouldBe "bytes=1000-1499"
+  }
+
+  it should "return None for invalid byte ranges" in {
+    val _ = HlsSegmentFetch.buildRangeHeader(Some((1000L, 0L))) shouldBe None
+    val _ = HlsSegmentFetch.buildRangeHeader(Some((1000L, -10L))) shouldBe None
+    val _ = HlsSegmentFetch.buildRangeHeader(Some((-1L, 100L))) shouldBe None
+    HlsSegmentFetch.buildRangeHeader(None) shouldBe None
+  }
+
+  "HlsSegmentFetch.buildSegmentRequest" should "include Range header when byteRange is valid" in {
+    val req = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", Some((1000L, 500L)))
+    req.getHeader("Range").isPresent shouldBe true
+    req.getHeader("Range").get().value() shouldBe "bytes=1000-1499"
+  }
+
+  it should "omit Range header when byteRange is zero, negative, or None" in {
+    val _ = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", Some((1000L, 0L))).getHeader("Range").isPresent shouldBe false
+    val _ = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", Some((1000L, -5L))).getHeader("Range").isPresent shouldBe false
+    HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", None).getHeader("Range").isPresent shouldBe false
+  }
+
+  "HlsSegmentFetch.RangeRequest" should "reject negative offset or non-positive length" in {
+    val _ = an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(-1L, 100L)
+    val _ = an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(0L, 0L)
+    an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(100L, -10L)
+  }
 }
