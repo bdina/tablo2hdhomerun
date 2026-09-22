@@ -143,7 +143,7 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
   it should "preserve contiguous segments when initialized with prior lastSeq" in {
     // Say prior stream emitted up through sequence 11 (so lastSeq was 12)
     val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 12)
-    state.lastSeq shouldBe 12
+    val _ = state.lastSeq shouldBe 12
 
     // Playlist now contains segments 10, 11, 12, 13, 14
     val p = playlist(10, Seq("seg10.ts", "seg11.ts", "seg12.ts", "seg13.ts", "seg14.ts"))
@@ -181,8 +181,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
       case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
     }
-    segs1 shouldBe empty
-    state1.lastSeq shouldBe 608
+    val _ = segs1 shouldBe empty
+    val _ = state1.lastSeq shouldBe 608
 
     // Fluctuation: segment 605 drops before 608 is published (mediaSequence = 606, size = 2, so newLastSeq is 608 - but say size is 1 or newLastSeq is 607)
     val p2 = playlist(605, Seq("seg605.ts", "seg606.ts"))
@@ -191,8 +191,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
     }
     // Must NOT trigger isReset and must NOT re-emit 605 or 606!
-    segs2 shouldBe empty
-    state2.lastSeq shouldBe 608
+    val _ = segs2 shouldBe empty
+    val _ = state2.lastSeq shouldBe 608
 
     // Now new segment 608 is published: 606, 607, 608 (newLastSeq = 609)
     val p3 = playlist(606, Seq("seg606.ts", "seg607.ts", "seg608.ts"))

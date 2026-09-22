@@ -43,6 +43,38 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = packet(4) shouldBe 0xFF.toByte
     }
 
+    "construct valid MPEG-TS discontinuity packets" in {
+      val packet = ResilientHlsSource.MPEGTS_DISCONTINUITY_PACKET
+      val _ = packet.length shouldBe 188
+      val _ = packet(0) shouldBe 0x47.toByte
+      val _ = (packet(5) & 0x80) should not be 0
+    }
+
+    "inject discontinuity packet when real data resumes after gap fill" in {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
+      val realData = ByteString("real-payload")
+      val factory = () =>
+        Source.future(org.apache.pekko.pattern.after(150.millis, classicSystemProvider.classicSystem.scheduler)(scala.concurrent.Future.successful(realData)))
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-gap-discontinuity"
+      , recoveryTimeout = 5.seconds
+      , minBackoff = 100.millis
+      , maxBackoff = 200.millis
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      val first = probe.requestNext(2.seconds)
+      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
+
+      val second = probe.requestNext(2.seconds)
+      val _ = second shouldBe (ResilientHlsSource.MPEGTS_DISCONTINUITY_PACKET ++ realData)
+      probe.cancel()
+    }
+
     "pass through a successful stream without modification" in {
       val testData = ByteString("real-data")
       val factory = () => {

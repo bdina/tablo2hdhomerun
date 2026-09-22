@@ -30,6 +30,8 @@ object ResilientHlsSource {
     ByteString(arr)
   }
 
+  val MPEGTS_DISCONTINUITY_PACKET: ByteString = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+
   private sealed trait Elem
   private final case class Real(data: ByteString) extends Elem
   private case object GapFill extends Elem
@@ -96,19 +98,23 @@ object ResilientHlsSource {
           override def onPush(): Unit = {
             val elem = grab(in)
             elem match {
-              case Real(_) =>
-                if (padding) {
-                  log.debug("[{}] gap-fill ended, real data resumed", streamName)
+              case Real(data) =>
+                val toPush = if (padding) {
+                  log.debug("[{}] gap-fill ended, real data resumed with discontinuity marker", streamName)
                   padding = false
+                  Real(MPEGTS_DISCONTINUITY_PACKET ++ data)
+                } else {
+                  elem
                 }
                 lastRealNanos = System.nanoTime()
+                push(out, toPush)
               case GapFill =>
                 if (!padding) {
                   log.debug("[{}] gap-fill started, emitting null packets", streamName)
                   padding = true
                 }
+                push(out, elem)
             }
-            push(out, elem)
           }
         })
 

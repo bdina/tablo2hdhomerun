@@ -81,27 +81,27 @@ class HlsSegmentFetchSpec extends AnyFlatSpec with Matchers {
 
   "HlsSegmentFetch.buildRangeHeader" should "create Pekko Range header for safe byte ranges" in {
     val header = HlsSegmentFetch.buildRangeHeader(Some((1000L, 500L)))
-    header shouldBe defined
-    header.get.value() shouldBe "bytes=1000-1499"
+    val _ = header shouldBe defined
+    val _ = header.get.value() shouldBe "bytes=1000-1499"
   }
 
   it should "return None for invalid byte ranges" in {
     val _ = HlsSegmentFetch.buildRangeHeader(Some((1000L, 0L))) shouldBe None
     val _ = HlsSegmentFetch.buildRangeHeader(Some((1000L, -10L))) shouldBe None
     val _ = HlsSegmentFetch.buildRangeHeader(Some((-1L, 100L))) shouldBe None
-    HlsSegmentFetch.buildRangeHeader(None) shouldBe None
+    val _ = HlsSegmentFetch.buildRangeHeader(None) shouldBe None
   }
 
   "HlsSegmentFetch.buildSegmentRequest" should "include Range header when byteRange is valid" in {
     val req = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", Some((1000L, 500L)))
-    req.getHeader("Range").isPresent shouldBe true
-    req.getHeader("Range").get().value() shouldBe "bytes=1000-1499"
+    val _ = req.getHeader("Range").isPresent shouldBe true
+    val _ = req.getHeader("Range").get().value() shouldBe "bytes=1000-1499"
   }
 
   it should "omit Range header when byteRange is zero, negative, or None" in {
     val _ = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", Some((1000L, 0L))).getHeader("Range").isPresent shouldBe false
     val _ = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", Some((1000L, -5L))).getHeader("Range").isPresent shouldBe false
-    HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", None).getHeader("Range").isPresent shouldBe false
+    val _ = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", None).getHeader("Range").isPresent shouldBe false
   }
 
   "HlsSegmentFetch.RangeRequest" should "reject negative offset or non-positive length" in {

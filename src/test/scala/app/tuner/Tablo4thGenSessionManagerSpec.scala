@@ -212,5 +212,34 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
         teardownCount.get() shouldBe 1
       }
     }
+
+    "prime attached clients with cached headers when available" in {
+      import app.stream.MpegTsSync
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager { (_, self) => selfRef.set(self) }
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      val patPacket = ByteString(Array.fill[Byte](188)(0x11.toByte))
+      val pmtPacket = ByteString(Array.fill[Byte](188)(0x22.toByte))
+      val headers = MpegTsSync.CachedHeaders(Some(patPacket), Some(pmtPacket))
+      val cachedHeadersRef = new AtomicReference(headers)
+
+      mgr ! Request.Acquire("ch-prime", "client-a", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+
+      val payload = ByteString("live-data")
+      val source = Source.single(payload)
+
+      selfRef.get() ! Command.CheckIn("ch-prime", meta(), source, () => (), cachedHeadersRef)
+      val attached = probe.expectMessageType[Response.Attached]
+      val outBytes = attached.source.runWith(org.apache.pekko.stream.scaladsl.Sink.fold(ByteString.empty)(_ ++ _)).futureValue
+
+      val _ = outBytes.take(188) shouldBe patPacket
+      val _ = outBytes.slice(188, 376) shouldBe pmtPacket
+      val _ = outBytes.slice(376, 564) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      outBytes.drop(564) shouldBe payload
+    }
   }
 }

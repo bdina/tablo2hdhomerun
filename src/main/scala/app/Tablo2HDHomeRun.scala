@@ -158,8 +158,8 @@ object Tablo2HDHomeRun {
               app.tuner.Tablo4thGen.Channel.SessionRunner.start(
                 channelId = channelId
               , authContext = authContext
-              , onCheckIn = (meta, hubSource, teardown) =>
-                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.CheckIn(channelId, meta, hubSource, teardown)
+              , onCheckIn = (meta, hubSource, teardown, cachedHeaders) =>
+                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.CheckIn(channelId, meta, hubSource, teardown, cachedHeaders)
               , onFailed = cause =>
                   self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.AcquireFailed(channelId, cause)
               )

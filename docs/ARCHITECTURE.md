@@ -102,7 +102,9 @@ The live channel stream can use one of two backends, selected by `STREAM_BACKEND
 - **hls** (default): Fetches M3U8 playlists and TS segments directly via HTTP; no external process. Optimized for HLS v4 byte-range playlists with adaptive polling, conditional playlist requests (`ETag` / `Last-Modified`), safe byte-range validation (filtering zero-length or negative sub-ranges to prevent range header errors), strict `206 Partial Content` validation for ranged segment fetches, and status-aware segment recovery. Wrapped by `ResilientHlsSource` for null-packet padding and retune backoff.
 - **ffmpeg**: Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH. Includes reconnect and error-detect flags to survive transient stream drops.
 
-The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a robust Pekko Streams `Flow`. If the stream backend fails or the connection to the Tablo drops, this wrapper automatically injects MPEG-TS null packets (PID 0x1FFF) to keep the HTTP chunked transfer alive, preventing downstream players like Plex from disconnecting. It also implements an `idleTimeout` and `RestartSource.withBackoff` to retry connection to the backend and enforce a maximum outage gap.
+The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a robust Pekko Streams `Flow`. If the stream backend fails or the connection to the Tablo drops, this wrapper automatically injects MPEG-TS null packets (PID 0x1FFF) to keep the HTTP chunked transfer alive, preventing downstream players like Plex from disconnecting. When real data resumes after a gap fill, `ResilientHlsSource` immediately emits a standard MPEG-TS discontinuity marker packet to inform downstream decoders that frame state and timestamps reset. It also implements an `idleTimeout` and `RestartSource.withBackoff` to retry connection to the backend and enforce a maximum outage gap.
+
+Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.cacheFlow`, which continuously captures the latest PAT (Program Association Table) on PID 0 and PMT (Program Map Table). When new or reconnecting clients attach to the hub, `MpegTsSync.primeClientSource` prepends the cached PAT, PMT, and a discontinuity packet, guaranteeing that decoders (like FFmpeg in Plex) always receive stream parameters and never encounter invalid frame dimension errors.
 
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌────────────────────────┐
@@ -111,10 +113,22 @@ The resulting stream is wrapped by the `ResilientHlsSource`, which acts as a rob
 └──────────────────┘     └──────────────────┘     └────────────────────────┘
                                                             │
                                                             ▼
-                                                  ┌──────────────────┐
-                                                  │  MPEG-TS Output  │
-                                                  │  (Chunked HTTP)  │
-                                                  └──────────────────┘
+                                                  ┌────────────────────────┐
+                                                  │ MpegTsSync.cacheFlow   │
+                                                  │ (PAT/PMT Caching)      │
+                                                  └────────────────────────┘
+                                                            │
+                                                            ▼
+                                                  ┌────────────────────────┐
+                                                  │ BroadcastHub Fan-out   │
+                                                  │ + Header Priming       │
+                                                  └────────────────────────┘
+                                                            │
+                                                            ▼
+                                                  ┌────────────────────────┐
+                                                  │  MPEG-TS Output        │
+                                                  │  (Chunked HTTP)        │
+                                                  └────────────────────────┘
 ```
 
 ## Data Flow Workflows

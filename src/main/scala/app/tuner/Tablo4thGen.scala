@@ -35,7 +35,7 @@ import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
 import app.config.TabloAuthEnv
-import app.stream.StreamBackend
+import app.stream.{MpegTsSync, StreamBackend}
 import app.sys.LogConfig
 
 object Tablo4thGen {
@@ -983,6 +983,8 @@ object Tablo4thGen {
         , meta: TabloSessionMeta
         , hubSource: Source[ByteString, NotUsed]
         , teardown: () => Unit
+        , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders] =
+            new AtomicReference(MpegTsSync.CachedHeaders())
         ) extends Command
 
         case class AcquireFailed(channelId: String, cause: Throwable) extends Command
@@ -1000,6 +1002,8 @@ object Tablo4thGen {
         , hubSource: Source[ByteString, NotUsed]
         , teardown: () => Unit
         , clientIds: Set[String]
+        , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders] =
+            new AtomicReference(MpegTsSync.CachedHeaders())
         ) extends SessionState
 
         case class IdleGrace(
@@ -1007,6 +1011,8 @@ object Tablo4thGen {
         , hubSource: Source[ByteString, NotUsed]
         , teardown: () => Unit
         , graceTimer: pekko.actor.Cancellable
+        , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders] =
+            new AtomicReference(MpegTsSync.CachedHeaders())
         ) extends SessionState
       }
 
@@ -1024,10 +1030,12 @@ object Tablo4thGen {
           channelId: String
         , clientId: String
         , hubSource: Source[ByteString, NotUsed]
+        , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders]
         , replyTo: ActorRef[Response.Acquire]
         ): Unit = {
           context.log.info("[session] attach channelId={} clientId={} occupied={}", channelId, clientId, occupied)
-          replyTo ! Response.Attached(hubSource)
+          val primed = MpegTsSync.primeClientSource(hubSource, cachedHeadersRef)
+          replyTo ! Response.Attached(primed)
         }
 
         def rejectWaiters(waiters: Vector[SessionState.Waiter], reason: RejectReason): Unit =
@@ -1036,7 +1044,7 @@ object Tablo4thGen {
         def enterIdleGrace(channelId: String, live: SessionState.Live): SessionState.IdleGrace = {
           val timer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId))
           context.log.info("[session] idle-grace channelId={} token={}", channelId, LogConfig.truncate(live.meta.token))
-          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer)
+          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef)
         }
 
         def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
@@ -1082,18 +1090,18 @@ object Tablo4thGen {
 
               case Some(live: SessionState.Live) =>
                 if (live.clientIds.contains(clientId)) {
-                  replyTo ! Response.Attached(live.hubSource)
+                  attachClient(channelId, clientId, live.hubSource, live.cachedHeadersRef, replyTo)
                 } else {
                   sessions += channelId -> live.copy(clientIds = live.clientIds + clientId)
-                  attachClient(channelId, clientId, live.hubSource, replyTo)
+                  attachClient(channelId, clientId, live.hubSource, live.cachedHeadersRef, replyTo)
                 }
                 Behaviors.same
 
               case Some(idle: SessionState.IdleGrace) =>
                 val _ = idle.graceTimer.cancel()
-                sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId))
+                sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
                 context.log.info("[session] grace-cancel channelId={} clientId={}", channelId, clientId)
-                attachClient(channelId, clientId, idle.hubSource, replyTo)
+                attachClient(channelId, clientId, idle.hubSource, idle.cachedHeadersRef, replyTo)
                 Behaviors.same
             }
 
@@ -1118,13 +1126,13 @@ object Tablo4thGen {
             }
             Behaviors.same
 
-          case Command.CheckIn(channelId, meta, hubSource, teardown) =>
+          case Command.CheckIn(channelId, meta, hubSource, teardown, cachedHeadersRef) =>
             sessions.get(channelId) match {
               case Some(SessionState.Opening(waiters)) =>
                 val clientIds = waiters.map(_.clientId).toSet
-                sessions += channelId -> SessionState.Live(meta, hubSource, teardown, clientIds)
+                sessions += channelId -> SessionState.Live(meta, hubSource, teardown, clientIds, cachedHeadersRef)
                 context.log.info("[session] check-in channelId={} token={} clients={}", channelId, LogConfig.truncate(meta.token), clientIds.size)
-                waiters.foreach(w => attachClient(channelId, w.clientId, hubSource, w.replyTo))
+                waiters.foreach(w => attachClient(channelId, w.clientId, hubSource, cachedHeadersRef, w.replyTo))
               case other =>
                 context.log.warn("[session] check-in unexpected state channelId={} state={}", channelId, other)
                 try teardown()
@@ -1160,7 +1168,7 @@ object Tablo4thGen {
       def start(
         channelId: String
       , authContext: Auth.AuthContext
-      , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit) => Unit
+      , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit, AtomicReference[MpegTsSync.CachedHeaders]) => Unit
       , onFailed: Throwable => Unit
       )(implicit system: ActorSystem[?]): Unit = {
         implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -1404,11 +1412,13 @@ object Tablo4thGen {
                 }
 
                 import app.stream.ResilientHlsSource
+                val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
                 val (outerKillSwitch, hubSource) =
                   ResilientHlsSource(
                     streamFactory = () => streamFactory()
                   , streamName = s"4thgen-channel-$channelId"
                   )
+                    .via(MpegTsSync.cacheFlow(cachedHeadersRef))
                     .viaMat(KillSwitches.single)(Keep.right)
                     .toMat(BroadcastHub.sink[ByteString](SessionManager.BroadcastHubBufferSize))(Keep.both)
                     .run()
@@ -1438,7 +1448,7 @@ object Tablo4thGen {
                   }
                 }
 
-                onCheckIn(meta, hubSource, teardown)
+                onCheckIn(meta, hubSource, teardown, cachedHeadersRef)
                 }
             }
         }(ec)

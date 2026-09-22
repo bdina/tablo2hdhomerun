@@ -35,7 +35,6 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 - Explicit `UpstreamDead` protocol message
 - Long warm pools beyond idle grace
 - Per-client resilience after the hub
-- Mid-stream PAT/PMT priming for late joiners
 
 ## Decisions (v1)
 
@@ -43,6 +42,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
 | Retune | Seamless: restart inner producer under `ResilientHlsSource`; hub stays up |
+| Stream priming | Dynamic PAT/PMT & discontinuity packet prepended on client attach via `MpegTsSync` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
 | Idle grace | 15s after last client leaves (channel surfing) |
@@ -58,13 +58,13 @@ GET /channel/{id}
        ▼
 SessionManager ──Acquire / Release──► Map[channelId → Session]
        ▲
-       │ CheckIn(hubSource, teardown)
+       │ CheckIn(hubSource, teardown, cachedHeaders)
        │
 Tablo4thGen.Channel.SessionRunner
   POST /watch
        │
        ▼
-  StreamBackend → ResilientHlsSource → KillSwitch → BroadcastHub.sink(256)
+  StreamBackend → ResilientHlsSource → MpegTsSync.cacheFlow → KillSwitch → BroadcastHub.sink(256)
                          ▲
                          │
               keepalive / playlist change / near-expiry retune
@@ -72,7 +72,9 @@ Tablo4thGen.Channel.SessionRunner
 
 Retune and keepalive run inside the single session runner for that channel. They restart the inner `streamFactory`
 without shutting the outer KillSwitch or the hub. Clients keep reading MPEG-TS (null packets during gaps via
-`ResilientHlsSource`). The KillSwitch is used only for final teardown (refcount 0 and idle grace expired).
+`ResilientHlsSource`, followed by a discontinuity marker upon resumption). When clients attach, `MpegTsSync`
+primes the stream with cached PAT, PMT, and discontinuity packets so late joiners never stall or fail format probing.
+The KillSwitch is used only for final teardown (refcount 0 and idle grace expired).
 
 ## State machine
 
