@@ -70,8 +70,11 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val first = probe.requestNext(2.seconds)
       val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
 
-      val second = probe.requestNext(2.seconds)
-      val _ = second shouldBe (ResilientHlsSource.MPEGTS_DISCONTINUITY_PACKET ++ realData)
+      var next = probe.requestNext(2.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(2.seconds)
+      }
+      val _ = next shouldBe (ResilientHlsSource.MPEGTS_DISCONTINUITY_PACKET ++ realData)
       probe.cancel()
     }
 

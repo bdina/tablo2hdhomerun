@@ -99,46 +99,68 @@ object MpegTsSync {
       setHandler(in, new InHandler {
         override def onPush(): Unit = {
           val incoming = grab(in)
-          val combined = carry ++ incoming
-          val arr = combined.toArray
-          val fullLen = (arr.length / PacketSize) * PacketSize
-          var pos = 0
-          var updated = cachedHeadersRef.get()
+          var combined = carry ++ incoming
 
-          while (pos < fullLen) {
-            if (arr(pos) == 0x47.toByte) {
-              val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
-              if (pid == PatPid) {
-                val patPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
-                extractPmtPid(arr, pos).foreach { pmtPid =>
-                  detectedPmtPid = Some(pmtPid)
-                }
-                updated = updated.copy(pat = Some(patPacket))
-              } else if (detectedPmtPid.contains(pid)) {
-                val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
-                updated = updated.copy(pmt = Some(pmtPacket))
-              }
-              pos += PacketSize
-            } else {
-              var found = -1
-              var scan = pos + 1
-              while (scan < fullLen && found < 0) {
-                if (arr(scan) == 0x47.toByte) found = scan
-                else scan += 1
-              }
-              if (found < 0) pos = fullLen
-              else pos = found
-            }
+          // Strip any leading non-sync bytes to ensure packet alignment
+          var start = 0
+          while (start < combined.length && combined(start) != 0x47.toByte) {
+            start += 1
+          }
+          if (start > 0) {
+            combined = combined.drop(start)
           }
 
-          cachedHeadersRef.set(updated)
-          carry = combined.drop(fullLen)
-          push(out, incoming)
+          val fullLen = (combined.length / PacketSize) * PacketSize
+          if (fullLen > 0) {
+            val toPush = combined.take(fullLen)
+            carry = combined.drop(fullLen)
+            val arr = toPush.toArray
+            var pos = 0
+            var updated = cachedHeadersRef.get()
+
+            while (pos < fullLen) {
+              if (arr(pos) == 0x47.toByte) {
+                val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
+                if (pid == PatPid) {
+                  val patPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
+                  extractPmtPid(arr, pos).foreach { pmtPid =>
+                    detectedPmtPid = Some(pmtPid)
+                  }
+                  updated = updated.copy(pat = Some(patPacket))
+                } else if (detectedPmtPid.contains(pid)) {
+                  val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
+                  updated = updated.copy(pmt = Some(pmtPacket))
+                }
+                pos += PacketSize
+              } else {
+                var found = -1
+                var scan = pos + 1
+                while (scan < fullLen && found < 0) {
+                  if (arr(scan) == 0x47.toByte) found = scan
+                  else scan += 1
+                }
+                if (found < 0) pos = fullLen
+                else pos = found
+              }
+            }
+
+            cachedHeadersRef.set(updated)
+            push(out, toPush)
+          } else {
+            carry = combined
+            pull(in)
+          }
         }
 
         override def onUpstreamFinish(): Unit = {
-          if (carry.nonEmpty) {
-            emit(out, carry)
+          var start = 0
+          while (start < carry.length && carry(start) != 0x47.toByte) {
+            start += 1
+          }
+          val synced = if (start > 0) carry.drop(start) else carry
+          val fullLen = (synced.length / PacketSize) * PacketSize
+          if (fullLen > 0) {
+            emit(out, synced.take(fullLen))
           }
           completeStage()
         }

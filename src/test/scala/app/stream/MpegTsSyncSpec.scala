@@ -147,5 +147,46 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       val _ = primed shouldBe media
     }
+
+    "emit only packet-aligned chunks starting with 0x47 when receiving arbitrary chunk sizes" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildPmtPacket(0x0100)
+      val media1 = buildMediaPacket(0x0101)
+      val media2 = buildMediaPacket(0x0101)
+      val allBytes = pat ++ pmt ++ media1 ++ media2
+
+      val chunk1 = allBytes.slice(0, 100)
+      val chunk2 = allBytes.slice(100, 300)
+      val chunk3 = allBytes.slice(300, 550)
+      val chunk4 = allBytes.slice(550, 752)
+
+      val emittedChunks = Source(List(chunk1, chunk2, chunk3, chunk4))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      emittedChunks.foreach { chunk =>
+        val _ = (chunk.length % 188) shouldBe 0
+        val _ = chunk(0) shouldBe 0x47.toByte
+      }
+      val totalBytes = emittedChunks.foldLeft(ByteString.empty)(_ ++ _)
+      val _ = totalBytes shouldBe allBytes
+    }
+
+    "strip leading non-sync bytes before emitting" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val pat = buildPatPacket(0x0100)
+      val junk = ByteString(Array[Byte](0x01, 0x02, 0x03, 0x04, 0x05))
+
+      val stream = Source(List(junk ++ pat))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = stream shouldBe pat
+      val _ = stream.length shouldBe 188
+      val _ = stream(0) shouldBe 0x47.toByte
+    }
   }
 }
