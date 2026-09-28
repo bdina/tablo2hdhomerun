@@ -942,7 +942,9 @@ object Tablo4thGen {
     }
 
     object SessionManager {
-      val IdleGrace: FiniteDuration = 15.seconds
+      def defaultIdleGrace: FiniteDuration =
+        Option(AppContext.config).map(_.proxy.idleGraceSec.seconds).getOrElse(45.seconds)
+      val IdleGrace: FiniteDuration = 45.seconds
       val BroadcastHubBufferSize: Int = 256
 
       sealed trait Request
@@ -1019,7 +1021,7 @@ object Tablo4thGen {
       def apply(
         startRunner: (String, ActorRef[Request]) => Unit
       , totalTuners: Int = 4
-      , idleGrace: FiniteDuration = IdleGrace
+      , idleGrace: FiniteDuration = defaultIdleGrace
       ): Behavior[Request] = Behaviors.setup { context =>
         var sessions = Map.empty[String, SessionState]
         var tuners = totalTuners
@@ -1043,7 +1045,12 @@ object Tablo4thGen {
 
         def enterIdleGrace(channelId: String, live: SessionState.Live): SessionState.IdleGrace = {
           val timer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId))
-          context.log.info("[session] idle-grace channelId={} token={}", channelId, LogConfig.truncate(live.meta.token))
+          context.log.info(
+            "[session] idle-grace channelId={} duration={}s token={}"
+          , channelId
+          , idleGrace.toSeconds
+          , LogConfig.truncate(live.meta.token)
+          )
           SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef)
         }
 

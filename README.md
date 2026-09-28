@@ -92,6 +92,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | `TABLO_DEVICE_NAME` | (none) | Optional filter for 4th Gen device by name |
 | `PROXY_IP` | `127.0.0.1` | IP address for proxy to bind |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
+| `SESSION_IDLE_GRACE_SEC` | `45` | Idle grace period (in seconds) to retain tuner session |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 
 ## API Endpoints

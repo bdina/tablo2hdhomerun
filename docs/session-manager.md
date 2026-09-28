@@ -45,7 +45,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Stream priming | Dynamic PAT/PMT & discontinuity packet prepended on client attach via `MpegTsSync` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
-| Idle grace | 15s after last client leaves (channel surfing) |
+| Idle grace | 45s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
 | BroadcastHub buffer | 256 elements |
 | Session runner | Functions/object inside `Tablo4thGen.Channel` (not a typed actor) |
 | Upstream failure | Hub completes → client `watchTermination` → `Release`; teardown is idempotent |
@@ -83,7 +83,7 @@ The KillSwitch is used only for final teardown (refcount 0 and idle grace expire
               │                      ▲                │
               │                      │                │ Acquire (cancel timer)
               └--AcquireFailed--> (absent)            │
-                                                      └--15s--> teardown → (absent)
+                                                      └--45s--> teardown → (absent)
 
 Live --hub completes--> clients Release → IdleGrace → teardown → (absent)
 ```
@@ -92,7 +92,7 @@ Live --hub completes--> clients Release → IdleGrace → teardown → (absent)
 |-------|----------|
 | **Opening** | One Tablo open in flight; further Acquires enqueue waiters |
 | **Live** | `hubSource` available; `clientCount ≥ 1`; keepalive running in runner |
-| **IdleGrace** | `clientCount == 0`; 15s timer armed; Acquire cancels timer and attaches (no new `/watch`) |
+| **IdleGrace** | `clientCount == 0`; 45s timer armed (configurable); Acquire cancels timer and attaches (no new `/watch`) |
 | **absent** | No map entry; next Acquire starts Opening |
 
 ## Scala ADT / Behavior sketch

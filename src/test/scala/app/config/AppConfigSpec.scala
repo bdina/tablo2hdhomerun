@@ -25,6 +25,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.effectiveTunerCount shouldBe 2
     val _ = config.proxy.enableUdpDiscovery shouldBe true
     val _ = config.proxy.enableHlsEndpoint shouldBe true
+    val _ = config.proxy.idleGraceSec shouldBe 45
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
     val _ = config.stream.resilient.maxGapSec shouldBe 60
     val _ = config.stream.resilient.retryMinBackoffSec shouldBe 2
@@ -49,9 +50,11 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
   it should "parse integer env vars and fall back on invalid values" in {
     val config = AppConfig.load(Map(
       "STREAM_MAX_GAP_SEC" -> "120",
-      "STREAM_RETRY_MIN_BACKOFF_SEC" -> "bad"
+      "STREAM_RETRY_MIN_BACKOFF_SEC" -> "bad",
+      "SESSION_IDLE_GRACE_SEC" -> "60"
     )).config
     val _ = config.stream.resilient.maxGapSec shouldBe 120
+    val _ = config.proxy.idleGraceSec shouldBe 60
     config.stream.resilient.retryMinBackoffSec shouldBe 2
   }
 

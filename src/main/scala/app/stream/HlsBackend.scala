@@ -11,6 +11,7 @@ import scaladsl.model.{HttpRequest, StatusCode, StatusCodes}
 import scaladsl.model.headers.{ByteRange, Range}
 import scaladsl.unmarshalling.Unmarshal
 
+import pekko.stream.OverflowStrategy
 import pekko.stream.scaladsl.Source
 import pekko.util.ByteString
 
@@ -247,8 +248,15 @@ object HlsBackend extends StreamBackend {
                 log.warn("[stream:hls] retune reason={}", err.getMessage)
                 Future.failed(err)
               case HlsPlaylistPoller.Emit(next, segments) =>
-                lastSeqOut.set(next.lastSeq)
-                onSeqAdvanced(next.lastSeq)
+                if (state.lastSeq > 0 && segments.nonEmpty && segments.head.sequence > state.lastSeq) {
+                  log.warn(
+                    "[stream:hls] sequence gap detected label={} expected={} received={} gap={}"
+                  , label
+                  , state.lastSeq
+                  , segments.head.sequence
+                  , segments.head.sequence - state.lastSeq
+                  )
+                }
                 if (segments.nonEmpty && !state.loggedFirstSegment) {
                   val head = segments.head
                   val last = segments.last
@@ -287,16 +295,23 @@ object HlsBackend extends StreamBackend {
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
           log.debug("[stream:hls] resolved media playlist={}", url)
           Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq))(s => step(s)(mat))
-            .flatMapConcat { segments =>
-              if (segments.isEmpty) Source.empty
-              else Source(segments)
-                .flatMapConcat { seg => fetchSegmentSource(seg.url, seg.byteRange) }
+            .mapConcat(identity)
+            .buffer(16, OverflowStrategy.backpressure)
+            .flatMapConcat { seg =>
+              fetchSegmentSource(seg.url, seg.byteRange)
                 .map { chunk =>
                   val _ = bytesOut.addAndGet(chunk.size)
                   chunk
                 }
+                .watchTermination() { (_, done) =>
+                  done.onComplete {
+                    case Success(_) =>
+                      lastSeqOut.set(seg.sequence + 1)
+                      onSeqAdvanced(seg.sequence + 1)
+                    case Failure(_) => ()
+                  }(ec)
+                }
             }
-            .via(MpegTsDiscontinuity.markFirstPackets(20))
             .via(MpegTsHealth.monitor(healthSettings))
         }
       ).watchTermination() { (_, done) =>

@@ -14,6 +14,7 @@ import java.nio.file.Paths
 
 import org.slf4j.LoggerFactory
 
+import scala.concurrent.duration._
 import scala.io.StdIn
 import scala.util.{Failure, Success, Try}
 
@@ -165,6 +166,7 @@ object Tablo2HDHomeRun {
               )
             }
           , totalTuners = tuners
+          , idleGrace = config.proxy.idleGraceSec.seconds
           )
         , "session-manager-4thgen"
         )

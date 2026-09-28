@@ -241,5 +241,10 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val _ = outBytes.slice(376, 564) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
       outBytes.drop(564) shouldBe payload
     }
+
+    "expose defaultIdleGrace as 45 seconds by default" in {
+      val _ = SessionManager.defaultIdleGrace shouldBe 45.seconds
+      SessionManager.IdleGrace shouldBe 45.seconds
+    }
   }
 }

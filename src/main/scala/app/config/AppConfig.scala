@@ -43,6 +43,7 @@ final case class ProxyConfig(
 , tunerCount: Option[Int] = None
 , enableUdpDiscovery: Boolean = true
 , enableHlsEndpoint: Boolean = true
+, idleGraceSec: Int = 45
 ) {
   def bindHost: String = ip.hostString
   def bindPort: Int = port.value
@@ -113,6 +114,7 @@ object AppConfig {
     , tunerCount = get("TUNER_COUNT").flatMap(s => scala.util.Try(s.trim.toInt).toOption)
     , enableUdpDiscovery = getBoolTrue(get, "ENABLE_UDP_DISCOVERY", true)
     , enableHlsEndpoint = getBoolTrue(get, "ENABLE_HLS_ENDPOINT", true)
+    , idleGraceSec = getInt(get, "SESSION_IDLE_GRACE_SEC", 45)
     )
     val resilient = ResilientHlsConfig(
       maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 60)
