@@ -46,6 +46,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
 | Idle grace | 45s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
+| Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` |
 | BroadcastHub buffer | 256 elements |
 | Session runner | Functions/object inside `Tablo4thGen.Channel` (not a typed actor) |
 | Upstream failure | Hub completes → client `watchTermination` → `Release`; teardown is idempotent |

@@ -26,6 +26,9 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.enableUdpDiscovery shouldBe true
     val _ = config.proxy.enableHlsEndpoint shouldBe true
     val _ = config.proxy.idleGraceSec shouldBe 45
+    val _ = config.proxy.enablePreRollKeepAlive shouldBe true
+    val _ = config.proxy.preRollIntervalMs shouldBe 100
+    val _ = config.proxy.preRollPackets shouldBe 7
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
     val _ = config.stream.resilient.maxGapSec shouldBe 60
     val _ = config.stream.resilient.retryMinBackoffSec shouldBe 2
@@ -51,20 +54,26 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val config = AppConfig.load(Map(
       "STREAM_MAX_GAP_SEC" -> "120",
       "STREAM_RETRY_MIN_BACKOFF_SEC" -> "bad",
-      "SESSION_IDLE_GRACE_SEC" -> "60"
+      "SESSION_IDLE_GRACE_SEC" -> "60",
+      "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
+      "STREAM_PRE_ROLL_PACKETS" -> "14"
     )).config
     val _ = config.stream.resilient.maxGapSec shouldBe 120
     val _ = config.proxy.idleGraceSec shouldBe 60
+    val _ = config.proxy.preRollIntervalMs shouldBe 50
+    val _ = config.proxy.preRollPackets shouldBe 14
     config.stream.resilient.retryMinBackoffSec shouldBe 2
   }
 
   it should "parse double and bool env vars" in {
     val config = AppConfig.load(Map(
       "STREAM_HLS_NULL_RATIO_MAX" -> "0.8",
-      "STREAM_HLS_HEALTH_ENFORCE" -> "true"
+      "STREAM_HLS_HEALTH_ENFORCE" -> "true",
+      "STREAM_PRE_ROLL_KEEP_ALIVE" -> "false"
     )).config
     val _ = config.stream.hls.health.nullRatioMax shouldBe 0.8
     val _ = config.stream.hls.health.enforce shouldBe true
+    val _ = config.proxy.enablePreRollKeepAlive shouldBe false
 
     val notTrue = AppConfig.load(Map("STREAM_HLS_HEALTH_ENFORCE" -> "yes")).config
     notTrue.stream.hls.health.enforce shouldBe false

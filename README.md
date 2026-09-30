@@ -8,7 +8,8 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 
 - HDHomeRun device emulation for TabloTV
 - 4th Generation Tablo support (Tablo account / Lighthouse auth)
-- Live TV streaming via MPEG-TS
+- Live TV streaming via MPEG-TS with cold-start keepalive to eliminate client timeouts
+- Resilient HLS session management with automatic tuner recovery and idle grace retention
 - XMLTV program guide generation
 - Channel lineup in HDHomeRun format
 - Docker support with native image builds
@@ -92,6 +93,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | `TABLO_DEVICE_NAME` | (none) | Optional filter for 4th Gen device by name |
 | `PROXY_IP` | `127.0.0.1` | IP address for proxy to bind |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
+| `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit MPEG-TS null packets during cold tune to prevent client timeouts |
 | `SESSION_IDLE_GRACE_SEC` | `45` | Idle grace period (in seconds) to retain tuner session |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 

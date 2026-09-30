@@ -84,7 +84,7 @@ trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with Scalat
       serverId = "serv-1"
     )
 
-  def routes(rejectNoTuners: Boolean = false): Route = {
+  def routesWithManager(sessionManager: org.apache.pekko.actor.typed.ActorRef[Tablo4thGen.Channel.SessionManager.Request]): Route = {
     val config = AppConfig.load(Map.empty).config
     val discover = TabloLegacy.Response.Discover(
       friendlyName = "Tablo 4th Gen Proxy",
@@ -97,8 +97,12 @@ trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with Scalat
     AppContext.initialize(config, discover)
     AppContext.initialize(typedSystem)
     val lineup = createStub4thGenLineupActor()
-    val sessionManager = createStubSessionManager(rejectNoTuners)
     Tablo4thGen.routes(lineup, sessionManager, stubAuthContext)(typedSystem)
+  }
+
+  def routes(rejectNoTuners: Boolean = false): Route = {
+    val sessionManager = createStubSessionManager(rejectNoTuners)
+    routesWithManager(sessionManager)
   }
 }
 
@@ -131,6 +135,33 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
   "GET /channel/no-tuners" should "return 503 Service Unavailable when tuners are exhausted" in {
     Get("/channel/test-chan") ~> routes(rejectNoTuners = true) ~> check {
       status shouldBe StatusCodes.ServiceUnavailable
+    }
+  }
+
+  "GET /channel/:id" should "return 200 OK with video/mp2t when warm" in {
+    Get("/channel/test-chan") ~> routes() ~> check {
+      val _ = status shouldBe StatusCodes.OK
+      contentType.mediaType.subType shouldBe "mp2t"
+    }
+  }
+
+  it should "return 200 OK with video/mp2t immediately via pre-roll keepalive when cold" in {
+    val delayedBehavior: Behavior[Tablo4thGen.Channel.SessionManager.Request] = Behaviors.receive { (_, msg) =>
+      msg match {
+        case Tablo4thGen.Channel.SessionManager.Request.Acquire(_, _, replyTo) =>
+          system.scheduler.scheduleOnce(500.millis, new Runnable {
+            override def run(): Unit =
+              replyTo ! Tablo4thGen.Channel.SessionManager.Response.Attached(org.apache.pekko.stream.scaladsl.Source.empty)
+          })(system.dispatcher)
+          Behaviors.same
+        case _ =>
+          Behaviors.same
+      }
+    }
+    val delayedManager = system.spawn(delayedBehavior, s"stub-delayed-mgr-${java.util.UUID.randomUUID()}")
+    Get("/channel/cold-chan") ~> routesWithManager(delayedManager) ~> check {
+      val _ = status shouldBe StatusCodes.OK
+      contentType.mediaType.subType shouldBe "mp2t"
     }
   }
 }

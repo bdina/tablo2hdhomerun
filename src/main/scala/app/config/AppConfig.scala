@@ -44,6 +44,9 @@ final case class ProxyConfig(
 , enableUdpDiscovery: Boolean = true
 , enableHlsEndpoint: Boolean = true
 , idleGraceSec: Int = 45
+, enablePreRollKeepAlive: Boolean = true
+, preRollIntervalMs: Int = 100
+, preRollPackets: Int = 7
 ) {
   def bindHost: String = ip.hostString
   def bindPort: Int = port.value
@@ -115,6 +118,9 @@ object AppConfig {
     , enableUdpDiscovery = getBoolTrue(get, "ENABLE_UDP_DISCOVERY", true)
     , enableHlsEndpoint = getBoolTrue(get, "ENABLE_HLS_ENDPOINT", true)
     , idleGraceSec = getInt(get, "SESSION_IDLE_GRACE_SEC", 45)
+    , enablePreRollKeepAlive = getBoolTrue(get, "STREAM_PRE_ROLL_KEEP_ALIVE", true)
+    , preRollIntervalMs = getInt(get, "STREAM_PRE_ROLL_INTERVAL_MS", 100)
+    , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)
     )
     val resilient = ResilientHlsConfig(
       maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 60)

@@ -1,5 +1,6 @@
 package app.stream
 
+import org.apache.pekko.NotUsed
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.stream.scaladsl.{Sink, Source}
 import org.apache.pekko.util.ByteString
@@ -9,6 +10,8 @@ import org.scalatest.wordspec.AnyWordSpecLike
 import org.scalatestplus.junit.JUnitRunner
 
 import java.util.concurrent.atomic.AtomicReference
+import scala.concurrent.{Future, Promise}
+import scala.concurrent.duration._
 
 @RunWith(classOf[JUnitRunner])
 class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with Matchers {
@@ -187,6 +190,102 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = stream shouldBe pat
       val _ = stream.length shouldBe 188
       val _ = stream(0) shouldBe 0x47.toByte
+    }
+
+    "construct a valid 188-byte MPEG-TS null packet" in {
+      val packet = MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = packet.length shouldBe 188
+      val _ = packet(0) shouldBe 0x47.toByte
+      val _ = packet(1) shouldBe 0x1F.toByte // PID high 5 bits (0x1F)
+      val _ = packet(2) shouldBe 0xFF.toByte // PID low 8 bits (0xFF) -> PID = 0x1FFF
+      val _ = packet(3) shouldBe 0x10.toByte // payload only (0x10), CC = 0
+      val _ = packet.drop(4).forall(_ == 0xFF.toByte) shouldBe true
+    }
+
+    "generate preRollNullChunk with correct packet count and size" in {
+      val chunk = MpegTsSync.preRollNullChunk(7)
+      val _ = chunk.length shouldBe (188 * 7)
+      (0 until 7).foreach { i =>
+        val _ = chunk(i * 188) shouldBe 0x47.toByte
+        val _ = chunk(i * 188 + 1) shouldBe 0x1F.toByte
+        val _ = chunk(i * 188 + 2) shouldBe 0xFF.toByte
+      }
+    }
+
+    "not throw ArrayIndexOutOfBoundsException when non-sync bytes occur near end of buffer" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val pat = buildPatPacket(0x0100)
+      // Build a chunk of 34,780 bytes (matching the exact crash size from production logs: 185 packets = 34,780 bytes)
+      val numPackets = 185
+      val fullLen = numPackets * 188
+      val buf = Array.fill[Byte](fullLen)(0xAA.toByte)
+      // Put valid PAT at the start
+      System.arraycopy(pat.toArray, 0, buf, 0, 188)
+      // Corrupt the packet boundary near the end and place a lone 0x47 at the very last byte (fullLen - 1)
+      buf(fullLen - 1) = 0x47.toByte
+
+      val emitted = Source.single(ByteString(buf))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = emitted.nonEmpty shouldBe true
+      cachedHeadersRef.get().pat shouldBe Some(pat)
+    }
+
+    "withPreRollKeepAlive should emit zero null packets when realSourceFuture is already completed" in {
+      val media = buildMediaPacket(0x0101)
+      val realSourceFut = Future.successful(Source.single(media))
+
+      val stream = MpegTsSync.withPreRollKeepAlive(realSourceFut, interval = 50.millis, chunkPackets = 1)
+        .runWith(Sink.seq)
+        .futureValue
+
+      // Should contain only the media packet, with 0 null packets
+      val _ = stream.length shouldBe 1
+      stream.head shouldBe media
+    }
+
+    "withPreRollKeepAlive should emit null packets while realSourceFuture is pending then switch to realSource" in {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val media = buildMediaPacket(0x0101)
+      val promise = Promise[Source[ByteString, NotUsed]]()
+
+      val compositeSource = MpegTsSync.withPreRollKeepAlive(promise.future, interval = 50.millis, chunkPackets = 1)
+      val streamFut = compositeSource.runWith(Sink.seq)
+
+      // Allow 2-3 ticks of null packets to emit, then complete the promise with real media
+      system.classicSystem.scheduler.scheduleOnce(140.millis, new Runnable {
+        override def run(): Unit = promise.success(Source.single(media))
+      })
+
+      val emitted = streamFut.futureValue
+      // Emitted chunks should have at least 1 null packet chunk, and the last chunk should be media
+      val _ = emitted.length should be >= 2
+      val _ = emitted.last shouldBe media
+      // All earlier chunks should be null packets
+      emitted.init.foreach { chunk =>
+        val _ = chunk.length shouldBe 188
+        val _ = chunk(0) shouldBe 0x47.toByte
+        val _ = chunk(1) shouldBe 0x1F.toByte
+        val _ = chunk(2) shouldBe 0xFF.toByte
+      }
+    }
+
+    "withPreRollKeepAlive should fail stream when realSourceFuture fails" in {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val expectedError = new RuntimeException("Tuner failed to lock")
+      val promise = Promise[Source[ByteString, NotUsed]]()
+
+      val compositeSource = MpegTsSync.withPreRollKeepAlive(promise.future, interval = 50.millis, chunkPackets = 1)
+      val streamFut = compositeSource.runWith(Sink.seq)
+
+      system.classicSystem.scheduler.scheduleOnce(80.millis, new Runnable {
+        override def run(): Unit = promise.failure(expectedError)
+      })
+
+      val failure = streamFut.failed.futureValue
+      failure.getMessage shouldBe "Tuner failed to lock"
     }
   }
 }

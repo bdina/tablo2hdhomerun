@@ -8,6 +8,10 @@ import org.apache.pekko.util.ByteString
 
 import java.util.concurrent.atomic.AtomicReference
 
+import scala.concurrent.Future
+import scala.concurrent.duration._
+import scala.util.{Failure, Success}
+
 object MpegTsSync {
   val PacketSize: Int = 188
   val NullPid: Int = 0x1FFF
@@ -24,6 +28,55 @@ object MpegTsSync {
     arr(4) = 183.toByte  // adaptation field length (188 - 5)
     arr(5) = 0x80.toByte // discontinuity_indicator = 1
     ByteString(arr)
+  }
+
+  // 188-byte standard MPEG-TS null/stuffing packet (ISO/IEC 13818-1) with sync byte 0x47,
+  // Null PID 0x1FFF, payload only (0x10), CC = 0, and 184 0xFF payload bytes.
+  val MPEGTS_NULL_PACKET: ByteString = {
+    val arr = Array.fill[Byte](PacketSize)(0xFF.toByte)
+    arr(0) = 0x47.toByte
+    arr(1) = 0x1F.toByte
+    arr(2) = 0xFF.toByte
+    arr(3) = 0x10.toByte // payload only, CC = 0
+    ByteString(arr)
+  }
+
+  def preRollNullChunk(packetCount: Int = 7): ByteString = {
+    val count = math.max(1, packetCount)
+    val single = MPEGTS_NULL_PACKET
+    val b = ByteString.newBuilder
+    var i = 0
+    while (i < count) {
+      b ++= single
+      i += 1
+    }
+    b.result()
+  }
+
+  def withPreRollKeepAlive(
+    realSourceFuture: Future[Source[ByteString, NotUsed]]
+  , interval: FiniteDuration = 100.millis
+  , chunkPackets: Int = 7
+  ): Source[ByteString, NotUsed] = {
+    realSourceFuture.value match {
+      case Some(Success(source)) => source
+      case Some(Failure(ex)) => Source.failed(ex)
+      case None =>
+        val chunk = preRollNullChunk(chunkPackets)
+        val preRollSource: Source[ByteString, NotUsed] =
+          Source.tick(0.millis, interval, chunk)
+            .takeWhile { _ =>
+              realSourceFuture.value match {
+                case None => true
+                case Some(Success(_)) => false
+                case Some(Failure(ex)) => throw ex
+              }
+            }
+            .mapMaterializedValue(_ => NotUsed)
+
+        val delayedRealSource = Source.futureSource(realSourceFuture)
+        preRollSource.concat(delayedRealSource)
+    }
   }
 
   final case class CachedHeaders(
@@ -118,7 +171,7 @@ object MpegTsSync {
             var pos = 0
             var updated = cachedHeadersRef.get()
 
-            while (pos < fullLen) {
+            while (pos + PacketSize <= fullLen) {
               if (arr(pos) == 0x47.toByte) {
                 val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
                 if (pid == PatPid) {
@@ -135,7 +188,7 @@ object MpegTsSync {
               } else {
                 var found = -1
                 var scan = pos + 1
-                while (scan < fullLen && found < 0) {
+                while (scan + PacketSize <= fullLen && found < 0) {
                   if (arr(scan) == 0x47.toByte) found = scan
                   else scan += 1
                 }

@@ -152,16 +152,24 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.cacheFlo
 
 ```
 1. Client requests GET /channel/{channelId}
-2. Proxy checks tuner availability via GET /server/tuners
-3. If tuner available:
-   a. POST /guide/channels/{id}/watch to Tablo
-   b. Receive watch response with HLS playlist URL, expiry, and keepalive metadata
-   c. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
-   d. 4th gen: periodically POST /player/sessions/{token}/keepalive while the client stream is active
-   e. 4th gen recovery retunes via `/watch` when the HLS session stalls, expires, or degrades
-   f. Stream output as chunked HTTP response
-   g. On client disconnect, DELETE /player/sessions/{token} to release the Tablo tuner and cancel keepalive
-4. If no tuners: return 500 error
+2. Proxy checks tuner availability via SessionManager / Lineup
+3. Tuner acquisition & pre-roll keepalive:
+   a. If session is already warm (active or idle grace), stream connects immediately (0 ms)
+   b. If cold start tuning (8-9s hardware lock), proxy immediately returns HTTP 200 chunked response
+      and emits periodic standard MPEG-TS null packets (PID 0x1FFF) every 100ms
+      to bridge the startup delay and prevent Plex/HDHomeRun client read timeouts
+   c. SessionManager acquires tuner from Tablo hardware (/guide/channels/{id}/watch)
+   d. Receive watch response with HLS playlist URL, expiry, and keepalive metadata
+   e. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
+   f. Pre-roll keepalive seamlessly switches over to real MPEG-TS data when ready
+4. 4th gen session maintenance:
+   a. Periodically POST /player/sessions/{token}/keepalive while the client stream is active
+   b. ResilientHlsSource retunes via `/watch` when the HLS session stalls, expires, or degrades
+   c. MpegTsSync normalizes packet boundaries and caches PAT/PMT headers
+5. Client teardown:
+   a. On client disconnect, tuner enters idle grace period (default 45s) for instant reconnect
+   b. If idle grace expires without reconnection, DELETE /player/sessions/{token} to release hardware tuner
+6. If no tuners: return 503 Service Unavailable
 ```
 
 ### Program Guide Workflow
@@ -202,6 +210,10 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.cacheFlo
 | `TABLO_PORT` | `8887` (4th gen) / `8885` (legacy) | Tablo device API port |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
+| `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit periodic null MPEG-TS packets during cold tune to prevent client timeouts |
+| `STREAM_PRE_ROLL_INTERVAL_MS`| `100` | Interval in ms between pre-roll keepalive chunks |
+| `STREAM_PRE_ROLL_PACKETS` | `7` | Number of 188-byte null packets per keepalive chunk (7 = 1316 bytes MTU) |
+| `SESSION_IDLE_GRACE_SEC` | `45` | Idle grace period (in seconds) to retain tuner session |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### Fixed Configuration

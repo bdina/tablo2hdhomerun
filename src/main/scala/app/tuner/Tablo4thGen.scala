@@ -1614,26 +1614,83 @@ object Tablo4thGen {
               )
             }
 
-            onComplete(acquireFut) {
-              case Success(SessionManager.Response.Attached(source)) =>
-                log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
-                val tracked = source.watchTermination() { (_, done) =>
-                  done.onComplete { _ =>
-                    sessionManager ! SessionManager.Request.Release(channelId, clientId)
+            val preRollEnabled = Option(AppContext.config).forall(_.proxy.enablePreRollKeepAlive)
+            if (!preRollEnabled) {
+              onComplete(acquireFut) {
+                case Success(SessionManager.Response.Attached(source)) =>
+                  log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
+                  val tracked = source.watchTermination() { (_, done) =>
+                    done.onComplete { _ =>
+                      sessionManager ! SessionManager.Request.Release(channelId, clientId)
+                    }(ec)
+                  }
+                  respondWithHeaders(streamingHeaders) {
+                    complete(HttpEntity.Chunked.fromData(contentType, tracked))
+                  }
+                case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners)) =>
+                  log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+                  complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
+                case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex))) =>
+                  log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+                case Failure(ex) =>
+                  log.warn("[channel] acquire ask failed channelId={} clientId={}", channelId, clientId, ex)
+                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+              }
+            } else {
+              import org.apache.pekko.actor.typed.scaladsl.adapter._
+              val fastWindow = 50.millis
+              val fastTimer = after(fastWindow, system.toClassic.scheduler)(Future.successful(None))(ec)
+              val acquireAttempt = acquireFut.map(resp => Some(resp))(ec)
+              val initialDecision = Future.firstCompletedOf(Seq(acquireAttempt, fastTimer))(ec)
+
+              onComplete(initialDecision) {
+                case Success(Some(SessionManager.Response.Attached(source))) =>
+                  log.info("[channel] fast-attached channelId={} clientId={}", channelId, clientId)
+                  val tracked = source.watchTermination() { (_, done) =>
+                    done.onComplete { _ =>
+                      sessionManager ! SessionManager.Request.Release(channelId, clientId)
+                    }(ec)
+                  }
+                  respondWithHeaders(streamingHeaders) {
+                    complete(HttpEntity.Chunked.fromData(contentType, tracked))
+                  }
+                case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners))) =>
+                  log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+                  complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
+                case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)))) =>
+                  log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+                case Success(None) =>
+                  log.info("[channel] pre-roll keepalive active channelId={} clientId={}", channelId, clientId)
+                  val realSourceFut: Future[Source[ByteString, NotUsed]] = acquireFut.flatMap {
+                    case SessionManager.Response.Attached(source) =>
+                      log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
+                      Future.successful(source)
+                    case SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners) =>
+                      log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+                      Future.failed(new RuntimeException("No available tuners"))
+                    case SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)) =>
+                      log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+                      Future.failed(ex)
                   }(ec)
-                }
-                respondWithHeaders(streamingHeaders) {
-                  complete(HttpEntity.Chunked.fromData(contentType, tracked))
-                }
-              case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners)) =>
-                log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
-                complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
-              case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex))) =>
-                log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
-                complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
-              case Failure(ex) =>
-                log.warn("[channel] acquire ask failed channelId={} clientId={}", channelId, clientId, ex)
-                complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+
+                  val interval = Option(AppContext.config).map(_.proxy.preRollIntervalMs.millis).getOrElse(100.millis)
+                  val packets = Option(AppContext.config).map(_.proxy.preRollPackets).getOrElse(7)
+
+                  val compositeSource = MpegTsSync.withPreRollKeepAlive(realSourceFut, interval, packets)
+                  val tracked = compositeSource.watchTermination() { (_, done) =>
+                    done.onComplete { _ =>
+                      sessionManager ! SessionManager.Request.Release(channelId, clientId)
+                    }(ec)
+                  }
+                  respondWithHeaders(streamingHeaders) {
+                    complete(HttpEntity.Chunked.fromData(contentType, tracked))
+                  }
+                case Failure(ex) =>
+                  log.warn("[channel] initialDecision failed channelId={} clientId={}", channelId, clientId, ex)
+                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+              }
             }
           }
         }

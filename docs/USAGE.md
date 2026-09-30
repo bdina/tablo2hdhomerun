@@ -207,6 +207,14 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `ENABLE_UDP_DISCOVERY` | `true` | Enable UDP 65001 HDHomeRun broadcast auto-discovery responder |
 | `ENABLE_HLS_ENDPOINT` | `true` | Enable open-standard HLS playlist (`.m3u8` and `.m3u`) endpoints |
 | `SESSION_IDLE_GRACE_SEC` | `45` | Idle grace period (in seconds) to keep tuner session active after client disconnects |
+| `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Stream MPEG-TS null packets (PID 0x1FFF) immediately on cold tunes to satisfy Plex grabber timeouts |
+| `STREAM_PRE_ROLL_INTERVAL_MS` | `100` | Pre-roll keepalive emission interval in milliseconds |
+| `STREAM_PRE_ROLL_PACKETS` | `7` | Number of 188-byte MPEG-TS null packets per pre-roll emission chunk (7 packets = 1316 bytes) |
+
+### Plex Live TV & DVR Recommendations
+
+1. **Cold Tuning & Pre-Roll Keep-Alive**: Tablo 4th Gen hardware takes 8.5 to 9.0 seconds to lock onto an OTA broadcast frequency and start internal transcoding. Plex Media Server's Live TV grabber times out if zero bytes are received within ~9 seconds. With `STREAM_PRE_ROLL_KEEP_ALIVE=true` (enabled by default), `tablo2hdhomerun` responds immediately with `HTTP 200 OK Chunked` and trickles ISO/IEC 13818-1 compliant MPEG-TS null packets (~100 kbps) to keep Plex's connection alive and active. As soon as the Tablo tuner finishes locking, the stream transitions seamlessly to live broadcast.
+2. **Channel Lineup Cleanup**: In Plex Web (**Settings $\rightarrow$ Live TV & DVR $\rightarrow$ Channels**), disable any un-tunable or weak subchannels (for example, subchannels that return HTTP 503 "No available tuners" due to weak antenna reception). This prevents Plex from automatically attempting to route tuning requests to inactive or unreceivable frequencies.
 
 ## Streaming a Channel
 
