@@ -14,6 +14,7 @@ import pekko.stream.{KillSwitches, UniqueKillSwitch}
 import pekko.util.ByteString
 import pekko.util.Timeout
 
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
 import java.time.{LocalDate, ZonedDateTime, ZoneOffset}
 import java.time.format.DateTimeFormatter
@@ -942,6 +943,20 @@ object Tablo4thGen {
     }
 
     object SessionManager {
+      val channelHeaderCache: ConcurrentMap[String, MpegTsSync.CachedHeaders] =
+        new ConcurrentHashMap[String, MpegTsSync.CachedHeaders]()
+
+      def getCachedHeaders(channelId: String): MpegTsSync.CachedHeaders =
+        Option(channelHeaderCache.get(channelId)).getOrElse(MpegTsSync.CachedHeaders())
+
+      def setCachedHeaders(channelId: String, headers: MpegTsSync.CachedHeaders): Unit =
+        if (!headers.isEmpty) {
+          val _ = channelHeaderCache.put(channelId, headers)
+        }
+
+      def clearCachedHeaders(): Unit =
+        channelHeaderCache.clear()
+
       def defaultIdleGrace: FiniteDuration =
         Option(AppContext.config).map(_.proxy.idleGraceSec.seconds).getOrElse(45.seconds)
       val IdleGrace: FiniteDuration = 45.seconds
@@ -1035,6 +1050,13 @@ object Tablo4thGen {
         , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders]
         , replyTo: ActorRef[Response.Acquire]
         ): Unit = {
+          val current = cachedHeadersRef.get()
+          if (current.isEmpty) {
+            val fallback = getCachedHeaders(channelId)
+            if (!fallback.isEmpty) {
+              val _ = cachedHeadersRef.compareAndSet(current, fallback)
+            }
+          }
           context.log.info("[session] attach channelId={} clientId={} occupied={}", channelId, clientId, occupied)
           val primed = MpegTsSync.primeClientSource(hubSource, cachedHeadersRef)
           replyTo ! Response.Attached(primed)
@@ -1044,6 +1066,10 @@ object Tablo4thGen {
           waiters.foreach(w => w.replyTo ! Response.Rejected(reason))
 
         def enterIdleGrace(channelId: String, live: SessionState.Live): SessionState.IdleGrace = {
+          val headers = live.cachedHeadersRef.get()
+          if (!headers.isEmpty) {
+            setCachedHeaders(channelId, headers)
+          }
           val timer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId))
           context.log.info(
             "[session] idle-grace channelId={} duration={}s token={}"
@@ -1134,6 +1160,10 @@ object Tablo4thGen {
             Behaviors.same
 
           case Command.CheckIn(channelId, meta, hubSource, teardown, cachedHeadersRef) =>
+            val headers = cachedHeadersRef.get()
+            if (!headers.isEmpty) {
+              setCachedHeaders(channelId, headers)
+            }
             sessions.get(channelId) match {
               case Some(SessionState.Opening(waiters)) =>
                 val clientIds = waiters.map(_.clientId).toSet
@@ -1161,6 +1191,10 @@ object Tablo4thGen {
           case Command.GraceExpired(channelId) =>
             sessions.get(channelId) match {
               case Some(idle: SessionState.IdleGrace) =>
+                val headers = idle.cachedHeadersRef.get()
+                if (!headers.isEmpty) {
+                  setCachedHeaders(channelId, headers)
+                }
                 context.log.info("[session] grace-expired channelId={}", channelId)
                 teardownAndRemove(channelId, idle.teardown)
               case _ =>
@@ -1419,13 +1453,24 @@ object Tablo4thGen {
                 }
 
                 import app.stream.ResilientHlsSource
-                val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+                val initialHeaders = SessionManager.getCachedHeaders(channelId)
+                val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](initialHeaders)
+                val headersReadyPromise = scala.concurrent.Promise[Unit]()
+                if (initialHeaders.pat.isDefined && initialHeaders.pmt.isDefined) {
+                  val _ = headersReadyPromise.trySuccess(())
+                }
+
                 val (outerKillSwitch, hubSource) =
                   ResilientHlsSource(
                     streamFactory = () => streamFactory()
                   , streamName = s"4thgen-channel-$channelId"
                   )
-                    .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+                    .via(MpegTsSync.cacheFlow(cachedHeadersRef, updated => {
+                      SessionManager.setCachedHeaders(channelId, updated)
+                      if (updated.pat.isDefined && updated.pmt.isDefined) {
+                        val _ = headersReadyPromise.trySuccess(())
+                      }
+                    }))
                     .viaMat(KillSwitches.single)(Keep.right)
                     .toMat(BroadcastHub.sink[ByteString](SessionManager.BroadcastHubBufferSize))(Keep.both)
                     .run()
@@ -1455,7 +1500,15 @@ object Tablo4thGen {
                   }
                 }
 
-                onCheckIn(meta, hubSource, teardown, cachedHeadersRef)
+                val _ = scheduler.scheduleOnce(1500.millis) {
+                  val _ = headersReadyPromise.trySuccess(())
+                }(ec)
+
+                headersReadyPromise.future.onComplete { _ =>
+                  if (!tornDown.get()) {
+                    onCheckIn(meta, hubSource, teardown, cachedHeadersRef)
+                  }
+                }(ec)
                 }
             }
         }(ec)

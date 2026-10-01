@@ -75,7 +75,9 @@ object MpegTsSync {
             .mapMaterializedValue(_ => NotUsed)
 
         val delayedRealSource = Source.futureSource(realSourceFuture)
-        preRollSource.concat(delayedRealSource)
+        preRollSource
+          .concat(Source.single(MPEGTS_DISCONTINUITY_PACKET))
+          .concat(delayedRealSource)
     }
   }
 
@@ -126,8 +128,11 @@ object MpegTsSync {
     } else None
   }
 
-  def cacheFlow(cachedHeadersRef: AtomicReference[CachedHeaders]): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new CacheStage(cachedHeadersRef))
+  def cacheFlow(
+    cachedHeadersRef: AtomicReference[CachedHeaders]
+  , onHeadersUpdated: CachedHeaders => Unit = _ => ()
+  ): Flow[ByteString, ByteString, NotUsed] =
+    Flow.fromGraph(new CacheStage(cachedHeadersRef, onHeadersUpdated))
 
   def primeClientSource(
     source: Source[ByteString, NotUsed]
@@ -139,8 +144,10 @@ object MpegTsSync {
       else Source.single(headers.syncPrefix).concat(source)
     }.mapMaterializedValue(_ => NotUsed)
 
-  private final class CacheStage(cachedHeadersRef: AtomicReference[CachedHeaders])
-      extends GraphStage[FlowShape[ByteString, ByteString]] {
+  private final class CacheStage(
+    cachedHeadersRef: AtomicReference[CachedHeaders]
+  , onHeadersUpdated: CachedHeaders => Unit
+  ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.out")
     override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
@@ -197,7 +204,11 @@ object MpegTsSync {
               }
             }
 
-            cachedHeadersRef.set(updated)
+            val prev = cachedHeadersRef.get()
+            if (updated != prev) {
+              cachedHeadersRef.set(updated)
+              onHeadersUpdated(updated)
+            }
             push(out, toPush)
           } else {
             carry = combined

@@ -246,5 +246,86 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val _ = SessionManager.defaultIdleGrace shouldBe 45.seconds
       SessionManager.IdleGrace shouldBe 45.seconds
     }
+
+    "persist channel headers in channelHeaderCache across session lifecycles" in {
+      import app.stream.MpegTsSync
+      SessionManager.clearCachedHeaders()
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val teardownCount = new AtomicInteger(0)
+      val mgr = spawnManager(
+        startRunner = { (_, self) => selfRef.set(self) }
+      , totalTuners = 2
+      , idleGrace = 100.millis
+      )
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      val patPacket = ByteString(Array.fill[Byte](188)(0x33.toByte))
+      val pmtPacket = ByteString(Array.fill[Byte](188)(0x44.toByte))
+      val headers = MpegTsSync.CachedHeaders(Some(patPacket), Some(pmtPacket))
+      val cachedHeadersRef = new AtomicReference(headers)
+
+      mgr ! Request.Acquire("ch-persist", "client-1", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+
+      val payload = ByteString("stream-data")
+      val source = Source.single(payload)
+
+      selfRef.get() ! Command.CheckIn("ch-persist", meta(), source, () => { val _ = teardownCount.incrementAndGet() }, cachedHeadersRef)
+      val _ = probe.expectMessageType[Response.Attached]
+
+      // Headers should now be in the persistent cache
+      val cached = SessionManager.getCachedHeaders("ch-persist")
+      val _ = cached.pat shouldBe Some(patPacket)
+      val _ = cached.pmt shouldBe Some(pmtPacket)
+
+      // Release client to trigger idle-grace and eventual teardown
+      mgr ! Request.Release("ch-persist", "client-1")
+      eventually(timeout(3.seconds), interval(50.millis)) {
+        teardownCount.get() shouldBe 1
+      }
+
+      // Headers should remain in the persistent cache even after session removal
+      val afterTeardown = SessionManager.getCachedHeaders("ch-persist")
+      val _ = afterTeardown.pat shouldBe Some(patPacket)
+      afterTeardown.pmt shouldBe Some(pmtPacket)
+    }
+
+    "populate cachedHeadersRef in attachClient from channelHeaderCache when ref is empty" in {
+      import app.stream.MpegTsSync
+      SessionManager.clearCachedHeaders()
+      val patPacket = ByteString(Array.fill[Byte](188)(0x55.toByte))
+      val pmtPacket = ByteString(Array.fill[Byte](188)(0x66.toByte))
+      val headers = MpegTsSync.CachedHeaders(Some(patPacket), Some(pmtPacket))
+      SessionManager.setCachedHeaders("ch-fallback", headers)
+
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager { (_, self) => selfRef.set(self) }
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-fallback", "client-fb", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+
+      val emptyRef = new AtomicReference(MpegTsSync.CachedHeaders())
+      val payload = ByteString("stream-fallback")
+      val source = Source.single(payload)
+
+      selfRef.get() ! Command.CheckIn("ch-fallback", meta(), source, () => (), emptyRef)
+      val attached = probe.expectMessageType[Response.Attached]
+      val outBytes = attached.source.runWith(org.apache.pekko.stream.scaladsl.Sink.fold(ByteString.empty)(_ ++ _)).futureValue
+
+      // Out bytes should have been primed with headers from channelHeaderCache
+      val _ = outBytes.take(188) shouldBe patPacket
+      val _ = outBytes.slice(188, 376) shouldBe pmtPacket
+      val _ = outBytes.slice(376, 564) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = outBytes.drop(564) shouldBe payload
+
+      // emptyRef should now have been updated with fallback headers
+      emptyRef.get().pat shouldBe Some(patPacket)
+      emptyRef.get().pmt shouldBe Some(pmtPacket)
+    }
   }
 }

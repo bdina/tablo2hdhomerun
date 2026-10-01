@@ -161,11 +161,13 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.cacheFlo
    c. SessionManager acquires tuner from Tablo hardware (/guide/channels/{id}/watch)
    d. Receive watch response with HLS playlist URL, expiry, and keepalive metadata
    e. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
-   f. Pre-roll keepalive seamlessly switches over to real MPEG-TS data when ready
+   f. Pre-roll keepalive seamlessly switches over to real MPEG-TS data when ready, inserting
+      an explicit MPEG-TS discontinuity packet and prepending primed PAT/PMT headers
 4. 4th gen session maintenance:
    a. Periodically POST /player/sessions/{token}/keepalive while the client stream is active
    b. ResilientHlsSource retunes via `/watch` when the HLS session stalls, expires, or degrades
-   c. MpegTsSync normalizes packet boundaries and caches PAT/PMT headers
+   c. MpegTsSync normalizes packet boundaries and caches PAT/PMT headers (persisted per channel
+      in SessionManager.channelHeaderCache across session lifecycles for fast subsequent tunes)
 5. Client teardown:
    a. On client disconnect, tuner enters idle grace period (default 45s) for instant reconnect
    b. If idle grace expires without reconnection, DELETE /player/sessions/{token} to release hardware tuner

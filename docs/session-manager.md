@@ -42,11 +42,11 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
 | Retune | Seamless: restart inner producer under `ResilientHlsSource`; hub stays up |
-| Stream priming | Dynamic PAT/PMT & discontinuity packet prepended on client attach via `MpegTsSync` |
+| Stream priming | Dynamic PAT/PMT & discontinuity packet prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
 | Idle grace | 45s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
-| Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` |
+| Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` with an explicit `MPEGTS_DISCONTINUITY_PACKET` transition marker |
 | BroadcastHub buffer | 256 elements |
 | Session runner | Functions/object inside `Tablo4thGen.Channel` (not a typed actor) |
 | Upstream failure | Hub completes → client `watchTermination` → `Release`; teardown is idempotent |
@@ -75,6 +75,10 @@ Retune and keepalive run inside the single session runner for that channel. They
 without shutting the outer KillSwitch or the hub. Clients keep reading MPEG-TS (null packets during gaps via
 `ResilientHlsSource`, followed by a discontinuity marker upon resumption). When clients attach, `MpegTsSync`
 primes the stream with cached PAT, PMT, and discontinuity packets so late joiners never stall or fail format probing.
+Known channel PAT/PMT tables are persisted in `SessionManager.channelHeaderCache` across session lifecycles so that
+subsequent tunes (even after idle grace expires) immediately have format tables ready. On brand new cold starts,
+`SessionRunner` coordinates check-in until the first segment's headers are parsed (or up to 1.5s fallback),
+guaranteeing clients receive stream metadata before format probing timeouts fire.
 The KillSwitch is used only for final teardown (refcount 0 and idle grace expired).
 
 ## State machine

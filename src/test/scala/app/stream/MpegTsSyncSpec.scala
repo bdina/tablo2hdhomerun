@@ -260,16 +260,58 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       })
 
       val emitted = streamFut.futureValue
-      // Emitted chunks should have at least 1 null packet chunk, and the last chunk should be media
-      val _ = emitted.length should be >= 2
+      // Emitted chunks should have at least 1 null packet chunk, a discontinuity packet, and the last chunk should be media
+      val _ = emitted.length should be >= 3
       val _ = emitted.last shouldBe media
+      val _ = emitted(emitted.length - 2) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
       // All earlier chunks should be null packets
-      emitted.init.foreach { chunk =>
+      emitted.dropRight(2).foreach { chunk =>
         val _ = chunk.length shouldBe 188
         val _ = chunk(0) shouldBe 0x47.toByte
         val _ = chunk(1) shouldBe 0x1F.toByte
         val _ = chunk(2) shouldBe 0xFF.toByte
       }
+    }
+
+    "withPreRollKeepAlive should insert MPEGTS_DISCONTINUITY_PACKET at transition between preRoll keep-alive and realSource" in {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val media = buildMediaPacket(0x0101)
+      val promise = Promise[Source[ByteString, NotUsed]]()
+
+      val compositeSource = MpegTsSync.withPreRollKeepAlive(promise.future, interval = 20.millis, chunkPackets = 1)
+      val streamFut = compositeSource.runWith(Sink.seq)
+
+      system.classicSystem.scheduler.scheduleOnce(50.millis, new Runnable {
+        override def run(): Unit = promise.success(Source.single(media))
+      })
+
+      val emitted = streamFut.futureValue
+      val _ = emitted.length should be >= 3
+      val _ = emitted.last shouldBe media
+      val discontinuity = emitted(emitted.length - 2)
+      val _ = discontinuity shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = (discontinuity(5) & 0x80) should not be 0
+    }
+
+    "cacheFlow should invoke onHeadersUpdated callback when headers are detected" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val callbackHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildPmtPacket(0x0100)
+      val media = buildMediaPacket(0x0101)
+
+      val stream = Source(List(pat, pmt, media))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, updated => callbackHeadersRef.set(updated)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = stream.length shouldBe 3
+      val cached = cachedHeadersRef.get()
+      val fromCallback = callbackHeadersRef.get()
+      val _ = cached.pat shouldBe Some(pat)
+      val _ = cached.pmt shouldBe Some(pmt)
+      val _ = fromCallback.pat shouldBe Some(pat)
+      fromCallback.pmt shouldBe Some(pmt)
     }
 
     "withPreRollKeepAlive should fail stream when realSourceFuture fails" in {
