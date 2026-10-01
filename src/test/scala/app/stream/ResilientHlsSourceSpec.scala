@@ -63,6 +63,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       , recoveryTimeout = 5.seconds
       , minBackoff = 100.millis
       , maxBackoff = 200.millis
+      , gapThreshold = 100.millis
       )
 
       val probe = wrappedSource.runWith(TestSink[ByteString]())
@@ -75,6 +76,66 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
         next = probe.requestNext(2.seconds)
       }
       val _ = next shouldBe (ResilientHlsSource.MPEGTS_DISCONTINUITY_PACKET ++ realData)
+      probe.cancel()
+    }
+
+    "inject custom resume prefix when real data resumes after gap fill" in {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
+      val realData = ByteString("real-payload-resumed")
+      val customPrefix = ByteString("custom-pat-pmt-prefix")
+      val factory = () =>
+        Source.future(org.apache.pekko.pattern.after(150.millis, classicSystemProvider.classicSystem.scheduler)(scala.concurrent.Future.successful(realData)))
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-custom-resume-prefix"
+      , recoveryTimeout = 5.seconds
+      , minBackoff = 100.millis
+      , maxBackoff = 200.millis
+      , resumePrefixSupplier = () => Some(customPrefix)
+      , gapThreshold = 100.millis
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      val first = probe.requestNext(2.seconds)
+      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
+
+      var next = probe.requestNext(2.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(2.seconds)
+      }
+      val _ = next shouldBe (customPrefix ++ realData)
+      probe.cancel()
+    }
+
+    "not inject discontinuity packet when gap is shorter than gapThreshold" in {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
+      val realData = ByteString("real-payload-short-gap")
+      val factory = () =>
+        Source.future(org.apache.pekko.pattern.after(100.millis, classicSystemProvider.classicSystem.scheduler)(scala.concurrent.Future.successful(realData)))
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-short-gap-no-discontinuity"
+      , recoveryTimeout = 5.seconds
+      , minBackoff = 100.millis
+      , maxBackoff = 200.millis
+      , gapThreshold = 500.millis
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      val first = probe.requestNext(2.seconds)
+      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
+
+      var next = probe.requestNext(2.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(2.seconds)
+      }
+      val _ = next shouldBe realData
       probe.cancel()
     }
 

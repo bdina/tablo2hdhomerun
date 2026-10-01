@@ -236,9 +236,9 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val attached = probe.expectMessageType[Response.Attached]
       val outBytes = attached.source.runWith(org.apache.pekko.stream.scaladsl.Sink.fold(ByteString.empty)(_ ++ _)).futureValue
 
-      val _ = outBytes.take(188) shouldBe patPacket
-      val _ = outBytes.slice(188, 376) shouldBe pmtPacket
-      val _ = outBytes.slice(376, 564) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = outBytes.take(188) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = outBytes.slice(188, 376) shouldBe patPacket
+      val _ = outBytes.slice(376, 564) shouldBe pmtPacket
       outBytes.drop(564) shouldBe payload
     }
 
@@ -318,9 +318,9 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val outBytes = attached.source.runWith(org.apache.pekko.stream.scaladsl.Sink.fold(ByteString.empty)(_ ++ _)).futureValue
 
       // Out bytes should have been primed with headers from channelHeaderCache
-      val _ = outBytes.take(188) shouldBe patPacket
-      val _ = outBytes.slice(188, 376) shouldBe pmtPacket
-      val _ = outBytes.slice(376, 564) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = outBytes.take(188) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = outBytes.slice(188, 376) shouldBe patPacket
+      val _ = outBytes.slice(376, 564) shouldBe pmtPacket
       val _ = outBytes.drop(564) shouldBe payload
 
       // emptyRef should now have been updated with fallback headers

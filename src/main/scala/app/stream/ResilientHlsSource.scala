@@ -36,12 +36,16 @@ object ResilientHlsSource {
   private final case class Real(data: ByteString) extends Elem
   private case object GapFill extends Elem
 
+  val defaultGapThreshold: FiniteDuration = 3500.millis
+
   def apply(
     streamFactory: () => Source[ByteString, ?]
   , streamName: String
   , recoveryTimeout: FiniteDuration = AppContext.config.stream.resilient.recoveryTimeoutSec.seconds
   , minBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMinBackoffSec.seconds
   , maxBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMaxBackoffSec.seconds
+  , resumePrefixSupplier: () => Option[ByteString] = () => None
+  , gapThreshold: FiniteDuration = defaultGapThreshold
   ): Source[ByteString, ?] = {
     val maxGapSec = AppContext.config.stream.resilient.maxGapSec
 
@@ -58,7 +62,7 @@ object ResilientHlsSource {
       streamFactory().idleTimeout(maxGapSec.seconds).map(Real(_))
     }
     .keepAlive(nullPacketIntervalMs.millis, () => GapFill)
-    .via(RecoveryTimeout.flow(recoveryTimeout, streamName))
+    .via(RecoveryTimeout.flow(recoveryTimeout, streamName, resumePrefixSupplier, gapThreshold))
     .map {
       case Real(data) => data
       case GapFill => MPEGTS_NULL_PACKET
@@ -67,18 +71,27 @@ object ResilientHlsSource {
 
   // After keepAlive: only Real backend bytes reset the timer; null keepalive does not.
   private object RecoveryTimeout {
-    def flow(timeout: FiniteDuration, streamName: String): Flow[Elem, Elem, NotUsed] =
-      Flow.fromGraph(new Stage(timeout, streamName))
+    def flow(
+      timeout: FiniteDuration
+    , streamName: String
+    , resumePrefixSupplier: () => Option[ByteString] = () => None
+    , gapThreshold: FiniteDuration = defaultGapThreshold
+    ): Flow[Elem, Elem, NotUsed] =
+      Flow.fromGraph(new Stage(timeout, streamName, resumePrefixSupplier, gapThreshold))
 
-    private final class Stage(timeout: FiniteDuration, streamName: String)
-        extends GraphStage[FlowShape[Elem, Elem]] {
+    private final class Stage(
+      timeout: FiniteDuration
+    , streamName: String
+    , resumePrefixSupplier: () => Option[ByteString]
+    , gapThreshold: FiniteDuration
+    ) extends GraphStage[FlowShape[Elem, Elem]] {
       val in: Inlet[Elem] = Inlet("RecoveryTimeout.in")
       val out: Outlet[Elem] = Outlet("RecoveryTimeout.out")
       override val shape: FlowShape[Elem, Elem] = FlowShape(in, out)
 
       override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) {
         private var lastRealNanos = System.nanoTime()
-        private var padding = false
+        private var hadGap = false
         private val checkInterval = (timeout / 4).max(50.millis)
         private var failAsync: org.apache.pekko.stream.stage.AsyncCallback[Throwable] = uninitialized
 
@@ -99,20 +112,22 @@ object ResilientHlsSource {
             val elem = grab(in)
             elem match {
               case Real(data) =>
-                val toPush = if (padding) {
-                  log.debug("[{}] gap-fill ended, real data resumed with discontinuity marker", streamName)
-                  padding = false
-                  Real(MPEGTS_DISCONTINUITY_PACKET ++ data)
+                val nowNanos = System.nanoTime()
+                val gapNanos = nowNanos - lastRealNanos
+                val isLongGap = hadGap && (gapNanos > gapThreshold.toNanos)
+                val toPush = if (isLongGap) {
+                  log.info(s"[$streamName] gap-fill ended after ${gapNanos / 1000000}ms, real data resumed with discontinuity marker")
+                  hadGap = false
+                  val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
+                  Real(prefix ++ data)
                 } else {
+                  hadGap = false
                   elem
                 }
-                lastRealNanos = System.nanoTime()
+                lastRealNanos = nowNanos
                 push(out, toPush)
               case GapFill =>
-                if (!padding) {
-                  log.debug("[{}] gap-fill started, emitting null packets", streamName)
-                  padding = true
-                }
+                hadGap = true
                 push(out, elem)
             }
           }

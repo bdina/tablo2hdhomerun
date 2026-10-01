@@ -40,7 +40,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.hls.health.ccMax shouldBe 30
     val _ = config.stream.hls.health.syncMax shouldBe 10
     val _ = config.stream.hls.health.nullRatioMax shouldBe 0.6
-    val _ = config.stream.hls.health.enforce shouldBe false
+    val _ = config.stream.hls.health.enforce shouldBe true
+    val _ = config.stream.hls.health.teiMax shouldBe 10
     val _ = config.stream.hls.pollFailuresMax shouldBe 60
     val _ = config.mediaRoot shouldBe None
     val _ = loaded.tabloAuth.email shouldBe None
@@ -69,10 +70,12 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val config = AppConfig.load(Map(
       "STREAM_HLS_NULL_RATIO_MAX" -> "0.8",
       "STREAM_HLS_HEALTH_ENFORCE" -> "true",
+      "STREAM_HLS_TEI_ERROR_MAX" -> "25",
       "STREAM_PRE_ROLL_KEEP_ALIVE" -> "false"
     )).config
     val _ = config.stream.hls.health.nullRatioMax shouldBe 0.8
     val _ = config.stream.hls.health.enforce shouldBe true
+    val _ = config.stream.hls.health.teiMax shouldBe 25
     val _ = config.proxy.enablePreRollKeepAlive shouldBe false
 
     val notTrue = AppConfig.load(Map("STREAM_HLS_HEALTH_ENFORCE" -> "yes")).config

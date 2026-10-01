@@ -131,11 +131,11 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         .runWith(Sink.fold(ByteString.empty)(_ ++ _))
         .futureValue
 
-      // Primed source should contain: PAT (188) + PMT (188) + Discontinuity (188) + Media (188) = 752 bytes
+      // Primed source should contain: Discontinuity (188) + PAT (188) + PMT (188) + Media (188) = 752 bytes
       val _ = primed.length shouldBe (188 * 4)
-      val _ = primed.take(188) shouldBe pat
-      val _ = primed.slice(188, 376) shouldBe pmt
-      val _ = primed.slice(376, 564) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = primed.take(188) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val _ = primed.slice(188, 376) shouldBe pat
+      val _ = primed.slice(376, 564) shouldBe pmt
       val _ = primed.drop(564) shouldBe media
     }
 
@@ -328,6 +328,56 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       val failure = streamFut.failed.futureValue
       failure.getMessage shouldBe "Tuner failed to lock"
+    }
+
+    "dedupConsecutiveDiscontinuity should drop adjacent duplicate discontinuity packets" in {
+      val media = buildMediaPacket(0x0101)
+      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val pat = buildPatPacket(0x0100)
+
+      val stream = Source(List(media, disc, disc, pat))
+        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = stream.length shouldBe 3
+      val _ = stream(0) shouldBe media
+      val _ = stream(1) shouldBe disc
+      stream(2) shouldBe pat
+    }
+
+    "dedupConsecutiveDiscontinuity should drop duplicate discontinuity packet across multi-packet chunks (e.g. syncPrefix)" in {
+      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildPmtPacket(0x0100)
+      val syncPrefix = disc ++ pat ++ pmt
+
+      // PreRoll emits disc (188 bytes), followed by syncPrefix (564 bytes starting with disc)
+      val stream = Source(List(disc, syncPrefix))
+        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      // Output should have exactly 1 disc + 1 pat + 1 pmt = 3 * 188 = 564 bytes
+      val _ = stream.length shouldBe (188 * 3)
+      val _ = stream.slice(0, 188) shouldBe disc
+      val _ = stream.slice(188, 376) shouldBe pat
+      stream.slice(376, 564) shouldBe pmt
+    }
+
+    "dedupConsecutiveDiscontinuity should drop adjacent duplicate discontinuity packets within the same chunk" in {
+      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val pat = buildPatPacket(0x0100)
+      val combined = disc ++ disc ++ pat
+
+      val stream = Source.single(combined)
+        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = stream.length shouldBe (188 * 2)
+      val _ = stream.slice(0, 188) shouldBe disc
+      stream.slice(188, 376) shouldBe pat
     }
   }
 }

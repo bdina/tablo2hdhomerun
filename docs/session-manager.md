@@ -497,11 +497,14 @@ the current per-request path, but as **one instance per channel lease**.
 
 | Event | Behavior |
 |-------|----------|
-| Watch fails while Opening | `AcquireFailed` → all waiters `Rejected(Failed(_))` |
+| Initial watch fails while Opening | Retries with backoff up to `STREAM_RECOVERY_TIMEOUT_SEC` (60s) before `AcquireFailed` → `Rejected(Failed(_))`; client receives pre-roll null keepalive |
+| Client releases while Opening | Waiter removed; if all waiters release, Opening is cancelled and tune retries cease |
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
+| Signal degradation / fringe corruption | `MpegTsHealth` sanitizes TEI packets into nulls; on threshold breach, inner producer fails; `ResilientHlsSource` bridges with null packets while `streamFactory` actively retunes via `/watch` |
 | Outer resilient exhaustion / hub complete | Subscribers complete → `Release` drain → IdleGrace → teardown |
+| User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 256 buffer) | That subscriber fails; others continue; that client `Release` |
 | Acquire during IdleGrace | Cancel timer; attach; no new `/watch` |
 | Teardown after Tablo session already gone | Log and ignore DELETE errors |

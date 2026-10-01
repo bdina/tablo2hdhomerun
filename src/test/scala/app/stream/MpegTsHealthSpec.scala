@@ -25,12 +25,37 @@ class MpegTsHealthSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike wi
 
   private def videoPacket(cc: Int): ByteString = packet(0x00, 0x10, cc, payload = true)
 
+  private def teiPacket(cc: Int): ByteString = packet(0x80, 0x10, cc, payload = true)
+
   "MpegTsHealth" should {
     "pass through clean stream" in {
       val settings = MpegTsHealth.Settings(windowSec = 1, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = false)
       val stream = (0 until 10).map(i => videoPacket(i & 0x0F)).foldLeft(ByteString.empty)(_ ++ _)
       val out = Source.single(stream).via(MpegTsHealth.monitor(settings)).runWith(Sink.head).futureValue
       out shouldBe stream
+    }
+
+    "sanitize TEI-flagged packets into null packets" in {
+      val settings = MpegTsHealth.Settings(windowSec = 1, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = false, teiMax = 100)
+      val damaged = teiPacket(3)
+      val out = Source.single(damaged).via(MpegTsHealth.monitor(settings)).runWith(Sink.head).futureValue
+      val _ = out.length shouldBe 188
+      val _ = out(0) shouldBe 0x47.toByte
+      val _ = out(1) shouldBe 0x1F.toByte // Null PID hi (TEI bit cleared!)
+      val _ = out(2) shouldBe 0xFF.toByte // Null PID lo
+      out(3) shouldBe 0x10.toByte // payload only, CC = 0
+    }
+
+    "fail when enforce is true and TEI errors exceed threshold" in {
+      val settings = MpegTsHealth.Settings(windowSec = 1, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = true, teiMax = 0)
+      val stream = teiPacket(0)
+      val failed = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.ignore)
+        .failed
+        .futureValue
+      failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
     }
 
     "fail when enforce is true and null ratio is high" in {

@@ -78,6 +78,73 @@ object MpegTsSync {
         preRollSource
           .concat(Source.single(MPEGTS_DISCONTINUITY_PACKET))
           .concat(delayedRealSource)
+          .via(dedupConsecutiveDiscontinuity)
+    }
+  }
+
+  def dedupConsecutiveDiscontinuity: Flow[ByteString, ByteString, NotUsed] =
+    Flow.fromGraph(new DedupDiscontinuityStage)
+
+  private final class DedupDiscontinuityStage extends GraphStage[FlowShape[ByteString, ByteString]] {
+    val in: Inlet[ByteString] = Inlet("DedupDiscontinuity.in")
+    val out: Outlet[ByteString] = Outlet("DedupDiscontinuity.out")
+    override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
+
+    override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
+      private var lastWasDiscontinuity = false
+
+      private def isDiscontinuity(bs: ByteString, offset: Int): Boolean =
+        bs.length >= offset + PacketSize &&
+        bs(offset) == 0x47.toByte &&
+        bs(offset + 1) == 0x1F.toByte &&
+        bs(offset + 2) == 0xFF.toByte &&
+        bs(offset + 3) == 0x20.toByte &&
+        bs(offset + 4) == 183.toByte &&
+        (bs(offset + 5) & 0x80) != 0
+
+      setHandler(in, new InHandler {
+        override def onPush(): Unit = {
+          val elem = grab(in)
+          if (elem.length < PacketSize || elem.length % PacketSize != 0) {
+            push(out, elem)
+          } else {
+            var pos = 0
+            val filtered = ByteString.newBuilder
+            var droppedAny = false
+
+            while (pos + PacketSize <= elem.length) {
+              val isDiscont = isDiscontinuity(elem, pos)
+              if (isDiscont) {
+                if (lastWasDiscontinuity) {
+                  droppedAny = true
+                } else {
+                  lastWasDiscontinuity = true
+                  filtered ++= elem.slice(pos, pos + PacketSize)
+                }
+              } else {
+                lastWasDiscontinuity = false
+                filtered ++= elem.slice(pos, pos + PacketSize)
+              }
+              pos += PacketSize
+            }
+
+            if (!droppedAny) {
+              push(out, elem)
+            } else {
+              val result = filtered.result()
+              if (result.nonEmpty) {
+                push(out, result)
+              } else {
+                pull(in)
+              }
+            }
+          }
+        }
+      })
+
+      setHandler(out, new OutHandler {
+        override def onPull(): Unit = pull(in)
+      })
     }
   }
 
@@ -89,9 +156,9 @@ object MpegTsSync {
 
     def syncPrefix: ByteString = {
       val b = ByteString.newBuilder
+      b ++= MPEGTS_DISCONTINUITY_PACKET
       pat.foreach(b ++= _)
       pmt.foreach(b ++= _)
-      b ++= MPEGTS_DISCONTINUITY_PACKET
       b.result()
     }
   }
