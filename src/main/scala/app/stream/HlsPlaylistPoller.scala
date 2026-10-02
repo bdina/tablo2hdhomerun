@@ -8,6 +8,7 @@ object HlsPlaylistPoller {
   , byteRange: Option[(Long, Long)]
   , sequence: Int
   , duration: Double
+  , isDiscontinuity: Boolean = false
   )
 
   final case class PollState(
@@ -90,8 +91,15 @@ object HlsPlaylistPoller {
         allSegments.takeRight(liveEdgeSegmentCount)
       else
         allSegments.filter(_.sequence >= effectiveLastSeq)
-      val segments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
-      val advanced = isFirstPoll || (newLastSeq > effectiveLastSeq)
+      val rawSegments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
+      val hasSequenceGap = state.lastSeq > 0 && rawSegments.nonEmpty && rawSegments.head.sequence > state.lastSeq
+      val segments = if (hasSequenceGap) {
+        val head = rawSegments.head.copy(isDiscontinuity = true)
+        head +: rawSegments.tail
+      } else {
+        rawSegments
+      }
+      val advanced = isFirstPoll || segments.nonEmpty || (newLastSeq > effectiveLastSeq)
       val nextStall = if (advanced) 0 else state.stallPolls + 1
       if (!advanced && nextStall >= maxStallPolls) {
         Fail(HlsBackend.HlsError.PlaylistStall)

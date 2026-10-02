@@ -300,7 +300,13 @@ object HlsBackend extends StreamBackend {
             .mapConcat(identity)
             .buffer(16, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
-              fetchSegmentSource(seg.url, seg.byteRange)
+              val raw = fetchSegmentSource(seg.url, seg.byteRange)
+              val source = if (seg.isDiscontinuity) {
+                Source.single(MpegTsSync.MPEGTS_DISCONTINUITY_PACKET).concat(raw)
+              } else {
+                raw
+              }
+              source
                 .map { chunk =>
                   val _ = bytesOut.addAndGet(chunk.size)
                   chunk

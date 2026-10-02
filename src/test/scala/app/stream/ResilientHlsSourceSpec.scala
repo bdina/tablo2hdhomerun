@@ -143,6 +143,47 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       probe.cancel()
     }
 
+    "inject resume prefix when stream restarts after failure even if gap is short" in {
+      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
+      val attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
+      val customPrefix = ByteString("retune-prefix-")
+      val stream1 = ByteString("stream-1")
+      val stream2 = ByteString("stream-2")
+      val failPromise = scala.concurrent.Promise[ByteString]()
+
+      val factory = () => {
+        val a = attemptCount.incrementAndGet()
+        if (a == 1) {
+          Source.single(stream1).concat(Source.future(failPromise.future))
+        } else {
+          Source.single(stream2)
+        }
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-retune-prefix"
+      , recoveryTimeout = 5.seconds
+      , minBackoff = 50.millis
+      , maxBackoff = 50.millis
+      , resumePrefixSupplier = () => Some(customPrefix)
+      , gapThreshold = 30.seconds
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      probe.requestNext(2.seconds) shouldBe stream1
+
+      failPromise.failure(new RuntimeException("stream 1 failure"))
+
+      var next = probe.requestNext(2.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(2.seconds)
+      }
+      next shouldBe (customPrefix ++ stream2)
+      probe.cancel()
+    }
+
     "pass through a successful stream without modification" in {
       val testData = ByteString("real-data")
       val factory = () => {

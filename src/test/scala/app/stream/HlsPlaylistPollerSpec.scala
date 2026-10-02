@@ -82,6 +82,44 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "set isDiscontinuity on first segment when a sequence gap occurs" in {
+    val state = HlsPlaylistPoller.PollState(
+      baseUrl = "http://host/pl.m3u8"
+    , lastSeq = 5
+    , lastTargetDuration = 6
+    , stallPolls = 0
+    , fetchFailures = 0
+    , loggedFirstSegment = true
+    )
+    val p = playlist(10, Seq("seg10.ts", "seg11.ts"))
+    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 10, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(_, segments) =>
+        segments should have size 2
+        segments.head.sequence shouldBe 10
+        segments.head.isDiscontinuity shouldBe true
+        segments(1).isDiscontinuity shouldBe false
+      case _ => fail("expected emit on sequence gap")
+    }
+  }
+
+  it should "reset stall polls when new segments are emitted" in {
+    val state = HlsPlaylistPoller.PollState(
+      baseUrl = "http://host/pl.m3u8"
+    , lastSeq = 5
+    , lastTargetDuration = 6
+    , stallPolls = 4
+    , fetchFailures = 0
+    , loggedFirstSegment = true
+    )
+    val p = playlist(5, Seq("seg5.ts", "seg6.ts"))
+    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 10, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        segments should not be empty
+        next.stallPolls shouldBe 0
+      case _ => fail("expected emit")
+    }
+  }
+
   it should "emit distinct byte ranges for the same URI" in {
     val state = HlsPlaylistPoller.initial("http://host/pl.m3u8")
     val p = byteRangePlaylist(

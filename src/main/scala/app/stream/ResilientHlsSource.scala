@@ -33,7 +33,7 @@ object ResilientHlsSource {
   val MPEGTS_DISCONTINUITY_PACKET: ByteString = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
 
   private sealed trait Elem
-  private final case class Real(data: ByteString) extends Elem
+  private final case class Real(data: ByteString, isResumed: Boolean = false) extends Elem
   private case object GapFill extends Elem
 
   val defaultGapThreshold: FiniteDuration = 15.seconds
@@ -62,12 +62,27 @@ object ResilientHlsSource {
       val n = attempts.incrementAndGet()
       if (n == 1) log.info(s"[$streamName] stream connect attempt=$n")
       else log.warn(s"[$streamName] stream recovery retune attempt=$n")
-      streamFactory().idleTimeout(maxGapSec.seconds).map(Real(_))
+      val inner = streamFactory().idleTimeout(maxGapSec.seconds)
+      if (n > 1) {
+        val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
+        inner.statefulMapConcat { () =>
+          var isFirst = true
+          chunk =>
+            if (isFirst) {
+              isFirst = false
+              List(Real(prefix ++ chunk, isResumed = true))
+            } else {
+              List(Real(chunk, isResumed = false))
+            }
+        }
+      } else {
+        inner.map(data => Real(data, isResumed = false))
+      }
     }
     .keepAlive(nullPacketIntervalMs.millis, () => GapFill)
     .via(RecoveryTimeout.flow(recoveryTimeout, streamName, resumePrefixSupplier, gapThreshold))
     .map {
-      case Real(data) => data
+      case Real(data, _) => data
       case GapFill => MPEGTS_NULL_PACKET
     }
   }
@@ -114,16 +129,19 @@ object ResilientHlsSource {
           override def onPush(): Unit = {
             val elem = grab(in)
             elem match {
-              case Real(data) =>
+              case Real(data, isResumed) =>
                 val nowNanos = System.nanoTime()
                 val gapNanos = nowNanos - lastRealNanos
-                val isLongGap = hadGap && (gapNanos > gapThreshold.toNanos)
+                val isLongGap = !isResumed && hadGap && (gapNanos > gapThreshold.toNanos)
                 val toPush = if (isLongGap) {
                   log.info(s"[$streamName] gap-fill ended after ${gapNanos / 1000000}ms, real data resumed with discontinuity marker")
                   hadGap = false
                   val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
                   Real(prefix ++ data)
                 } else {
+                  if (isResumed) {
+                    log.info(s"[$streamName] stream retuned after ${gapNanos / 1000000}ms, real data resumed with discontinuity marker")
+                  }
                   hadGap = false
                   elem
                 }

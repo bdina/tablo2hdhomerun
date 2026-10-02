@@ -131,7 +131,7 @@ object AppConfig {
     , gapThresholdSec = getInt(get, "STREAM_RESILIENT_GAP_THRESHOLD_SEC", 15)
     )
     val hls = HlsStreamConfig(
-      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 10)
+      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 25)
     , heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
     , health = MpegTsHealth.Settings(
         windowSec = getInt(get, "STREAM_HLS_HEALTH_WINDOW_SEC", 10)
