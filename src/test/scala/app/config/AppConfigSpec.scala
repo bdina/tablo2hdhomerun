@@ -34,6 +34,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.retryMinBackoffSec shouldBe 2
     val _ = config.stream.resilient.retryMaxBackoffSec shouldBe 30
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 60
+    val _ = config.stream.resilient.gapThresholdSec shouldBe 15
     val _ = config.stream.hls.stallPolls shouldBe 10
     val _ = config.stream.hls.heartbeatSec shouldBe 60
     val _ = config.stream.hls.health.windowSec shouldBe 10
@@ -57,12 +58,14 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "STREAM_RETRY_MIN_BACKOFF_SEC" -> "bad",
       "SESSION_IDLE_GRACE_SEC" -> "60",
       "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
-      "STREAM_PRE_ROLL_PACKETS" -> "14"
+      "STREAM_PRE_ROLL_PACKETS" -> "14",
+      "STREAM_RESILIENT_GAP_THRESHOLD_SEC" -> "20"
     )).config
     val _ = config.stream.resilient.maxGapSec shouldBe 120
     val _ = config.proxy.idleGraceSec shouldBe 60
     val _ = config.proxy.preRollIntervalMs shouldBe 50
     val _ = config.proxy.preRollPackets shouldBe 14
+    val _ = config.stream.resilient.gapThresholdSec shouldBe 20
     config.stream.resilient.retryMinBackoffSec shouldBe 2
   }
 

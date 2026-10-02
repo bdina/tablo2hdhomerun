@@ -58,6 +58,7 @@ final case class ResilientHlsConfig(
 , retryMinBackoffSec: Int
 , retryMaxBackoffSec: Int
 , recoveryTimeoutSec: Int
+, gapThresholdSec: Int = 15
 )
 
 final case class HlsStreamConfig(
@@ -127,6 +128,7 @@ object AppConfig {
     , retryMinBackoffSec = getInt(get, "STREAM_RETRY_MIN_BACKOFF_SEC", 2)
     , retryMaxBackoffSec = getInt(get, "STREAM_RETRY_MAX_BACKOFF_SEC", 30)
     , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
+    , gapThresholdSec = getInt(get, "STREAM_RESILIENT_GAP_THRESHOLD_SEC", 15)
     )
     val hls = HlsStreamConfig(
       stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 10)

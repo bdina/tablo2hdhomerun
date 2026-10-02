@@ -50,6 +50,10 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = (packet(5) & 0x80) should not be 0
     }
 
+    "resolve defaultThreshold from AppContext configuration" in {
+      ResilientHlsSource.defaultThreshold shouldBe 15.seconds
+    }
+
     "inject discontinuity packet when real data resumes after gap fill" in {
       implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
       implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem

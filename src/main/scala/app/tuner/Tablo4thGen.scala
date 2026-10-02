@@ -1465,6 +1465,7 @@ object Tablo4thGen {
             , streamName = s"4thgen-channel-$channelId"
             , resumePrefixSupplier = () => Some(cachedHeadersRef.get().syncPrefix)
             )
+              .via(MpegTsSync.dedupConsecutiveDiscontinuity)
               .via(MpegTsSync.cacheFlow(cachedHeadersRef, updated => {
                 SessionManager.setCachedHeaders(channelId, updated)
                 if (updated.pat.isDefined && updated.pmt.isDefined) {

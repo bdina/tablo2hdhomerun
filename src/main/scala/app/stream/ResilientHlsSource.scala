@@ -36,7 +36,10 @@ object ResilientHlsSource {
   private final case class Real(data: ByteString) extends Elem
   private case object GapFill extends Elem
 
-  val defaultGapThreshold: FiniteDuration = 3500.millis
+  val defaultGapThreshold: FiniteDuration = 15.seconds
+
+  def defaultThreshold: FiniteDuration =
+    Option(AppContext.config).map(_.stream.resilient.gapThresholdSec.seconds).getOrElse(defaultGapThreshold)
 
   def apply(
     streamFactory: () => Source[ByteString, ?]
@@ -45,7 +48,7 @@ object ResilientHlsSource {
   , minBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMinBackoffSec.seconds
   , maxBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMaxBackoffSec.seconds
   , resumePrefixSupplier: () => Option[ByteString] = () => None
-  , gapThreshold: FiniteDuration = defaultGapThreshold
+  , gapThreshold: FiniteDuration = defaultThreshold
   ): Source[ByteString, ?] = {
     val maxGapSec = AppContext.config.stream.resilient.maxGapSec
 
@@ -75,7 +78,7 @@ object ResilientHlsSource {
       timeout: FiniteDuration
     , streamName: String
     , resumePrefixSupplier: () => Option[ByteString] = () => None
-    , gapThreshold: FiniteDuration = defaultGapThreshold
+    , gapThreshold: FiniteDuration = defaultThreshold
     ): Flow[Elem, Elem, NotUsed] =
       Flow.fromGraph(new Stage(timeout, streamName, resumePrefixSupplier, gapThreshold))
 
