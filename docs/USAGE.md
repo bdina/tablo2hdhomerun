@@ -177,7 +177,9 @@ The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 - Distinct recovery errors for playlist stalls, segment-not-ready races, and auth failures
 - 4th gen watch-session expiry awareness before recovery retune
 - 4th gen Tablo player-session keepalive (`POST /player/sessions/{token}/keepalive`) while client playback is active
-- 4th gen session teardown (`DELETE /player/sessions/{token}`) when the client disconnects or the session is replaced on retune
+- 4th gen session teardown (`DELETE /player/sessions/{token}`) when the client disconnects and idle grace expires
+- Fast failure and immediate background recovery retune on fatal playlist HTTP status codes (`404`, `410`, `401`, `403`)
+- Retried ranged segment fetching with backoff to tolerate in-flight Tablo segment write races
 
 MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session keepalive are separate mechanisms: the former keeps the HTTP chunked response alive during HLS gaps; the latter renews the Tablo watch session token on the device.
 

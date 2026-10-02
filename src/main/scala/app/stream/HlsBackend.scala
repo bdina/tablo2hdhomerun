@@ -128,17 +128,18 @@ object HlsBackend extends StreamBackend {
       }
       def failSource(error: HlsError): Source[ByteString, ?] = Source.failed(error)
       def attemptFetch(retriesLeft: Int): Source[ByteString, ?] = {
-        val request = HlsSegmentFetch.safeByteRange(byteRange) match {
-          case Some((offset, length)) =>
-            log.debug("[stream:hls] segment range fetch offset={} length={} url={}", offset, length, url)
-            HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
-          case None =>
-            if (byteRange.isDefined) {
-              val (offset, length) = byteRange.get
-              log.warn("[stream:hls] ignoring invalid byte range offset={} length={} url={}", offset, length, url)
-            }
-            HttpRequest(uri = url)
-        }
+        if (byteRange.isDefined && HlsSegmentFetch.safeByteRange(byteRange).isEmpty) {
+          val (offset, length) = byteRange.get
+          log.warn("[stream:hls] skipping segment with invalid byte range offset={} length={} url={}", offset, length, url)
+          Source.empty[ByteString]
+        } else {
+          val request = HlsSegmentFetch.safeByteRange(byteRange) match {
+            case Some((offset, length)) =>
+              log.debug("[stream:hls] segment range fetch offset={} length={} url={}", offset, length, url)
+              HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
+            case None =>
+              HttpRequest(uri = url)
+          }
         Source.futureSource(
           http.singleRequest(request).map { response =>
             HlsSegmentFetch.decideSegmentResponse(
@@ -163,6 +164,7 @@ object HlsBackend extends StreamBackend {
             retryAfter(retriesLeft, s"segment fetch error: ${ex.getMessage}", attemptFetch(retriesLeft - 1))
           }
         ).mapMaterializedValue(_ => pekko.NotUsed)
+        }
       }
       attemptFetch(maxSegmentRetries)
     }
@@ -233,7 +235,7 @@ object HlsBackend extends StreamBackend {
             }
           }
           .recover { case ex =>
-            val outcome = HlsPlaylistPoller.onFetchError(state, hlsConfig.pollFailuresMax)
+            val outcome = HlsPlaylistPoller.onFetchError(state, hlsConfig.pollFailuresMax, ex)
             outcome match {
               case HlsPlaylistPoller.Emit(_, _) =>
                 log.warn("[stream:hls] poll failed retrying error={}", ex.getMessage)

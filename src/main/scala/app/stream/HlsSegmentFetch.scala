@@ -69,16 +69,20 @@ object HlsSegmentFetch {
           parseContentRange(value) match {
             case Some((start, end)) if start == request.offset && end == request.endInclusive => Accept
             case Some((start, end)) =>
-              Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"expected ${request.offset}-${request.endInclusive}, got $start-$end"))
+              if (retriesLeft > 0) Retry(s"range mismatch: expected ${request.offset}-${request.endInclusive}, got $start-$end")
+              else Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"expected ${request.offset}-${request.endInclusive}, got $start-$end"))
             case None =>
-              Fail(HlsBackend.HlsError.SegmentRangeMismatch("missing or invalid Content-Range"))
+              if (retriesLeft > 0) Retry("missing or invalid Content-Range")
+              else Fail(HlsBackend.HlsError.SegmentRangeMismatch("missing or invalid Content-Range"))
           }
         case None => Accept
       }
     } else if (status.isSuccess()) {
-      Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"expected 206 Partial Content, got ${status.intValue()}"))
+      if (retriesLeft > 0) Retry(s"expected 206 Partial Content, got ${status.intValue()}")
+      else Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"expected 206 Partial Content, got ${status.intValue()}"))
     } else if (status == StatusCodes.RangeNotSatisfiable) {
-      Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"range not satisfiable for ${request.offset}-${request.endInclusive}"))
+      if (retriesLeft > 0) Retry(s"range not satisfiable for ${request.offset}-${request.endInclusive}")
+      else Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"range not satisfiable for ${request.offset}-${request.endInclusive}"))
     } else {
       classifyStatus(status, retriesLeft)
     }

@@ -19,18 +19,32 @@ class HlsSegmentFetchSpec extends AnyFlatSpec with Matchers {
       HlsSegmentFetch.Accept
   }
 
-  it should "reject 200 OK for ranged requests" in {
+  it should "reject 200 OK for ranged requests when retries exhausted" in {
     HlsSegmentFetch.validateRangedResponse(StatusCodes.OK, Seq.empty, rangeRequest, retriesLeft = 0) shouldBe a[HlsSegmentFetch.Fail]
   }
 
-  it should "reject mismatched Content-Range" in {
+  it should "retry 200 OK for ranged requests when retries remain" in {
+    HlsSegmentFetch.validateRangedResponse(StatusCodes.OK, Seq.empty, rangeRequest, retriesLeft = 1) shouldBe a[HlsSegmentFetch.Retry]
+  }
+
+  it should "reject mismatched Content-Range when retries exhausted" in {
     val headers = Seq(RawHeader("Content-Range", "bytes 0-499/5000"))
     HlsSegmentFetch.validateRangedResponse(StatusCodes.PartialContent, headers, rangeRequest, retriesLeft = 0) shouldBe a[HlsSegmentFetch.Fail]
   }
 
-  it should "reject 416 for ranged requests" in {
+  it should "retry mismatched Content-Range when retries remain" in {
+    val headers = Seq(RawHeader("Content-Range", "bytes 1000-1200/5000"))
+    HlsSegmentFetch.validateRangedResponse(StatusCodes.PartialContent, headers, rangeRequest, retriesLeft = 2) shouldBe a[HlsSegmentFetch.Retry]
+  }
+
+  it should "reject 416 for ranged requests when retries exhausted" in {
     HlsSegmentFetch.validateRangedResponse(StatusCodes.RangeNotSatisfiable, Seq.empty, rangeRequest, retriesLeft = 0) shouldBe
       a[HlsSegmentFetch.Fail]
+  }
+
+  it should "retry 416 for ranged requests when retries remain" in {
+    HlsSegmentFetch.validateRangedResponse(StatusCodes.RangeNotSatisfiable, Seq.empty, rangeRequest, retriesLeft = 1) shouldBe
+      a[HlsSegmentFetch.Retry]
   }
 
   "HlsSegmentFetch.classifyStatus" should "retry 404 while retries remain" in {

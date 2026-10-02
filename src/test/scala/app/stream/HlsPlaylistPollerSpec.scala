@@ -100,10 +100,53 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     }
   }
 
+  it should "filter out segments with non-positive byte ranges" in {
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8")
+    val p = byteRangePlaylist(
+      0
+    , Seq(
+        M3U8.Segment("stream.ts", 6.0, None, Some((0L, 1000L)))
+      , M3U8.Segment("stream.ts", 6.0, None, Some((1000L, 0L)))
+      , M3U8.Segment("stream.ts", 6.0, None, Some((1000L, -100L)))
+      )
+    )
+    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(_, segments) =>
+        segments should have size 1
+        segments.head.byteRange shouldBe Some((0L, 1000L))
+      case _ => fail("expected emit")
+    }
+  }
+
   "HlsPlaylistPoller.onFetchError" should "fail when max failures reached" in {
     val state = HlsPlaylistPoller.PollState("http://host/pl.m3u8", 0, 0, 0, 1, false)
     HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 2) shouldBe
       HlsPlaylistPoller.Fail(HlsBackend.HlsError.PollExhausted)
+  }
+
+  it should "fail immediately on 404 Not Found" in {
+    val state = HlsPlaylistPoller.PollState("http://host/pl.m3u8", 0, 0, 0, 0, false)
+    val err = HlsBackend.HlsError.PlaylistFetchError(org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound)
+    HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 60, err) shouldBe
+      HlsPlaylistPoller.Fail(err)
+  }
+
+  it should "fail immediately on 401 Unauthorized" in {
+    val state = HlsPlaylistPoller.PollState("http://host/pl.m3u8", 0, 0, 0, 0, false)
+    val err = HlsBackend.HlsError.PlaylistFetchError(org.apache.pekko.http.scaladsl.model.StatusCodes.Unauthorized)
+    HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 60, err) shouldBe
+      HlsPlaylistPoller.Fail(err)
+  }
+
+  it should "retry transient errors when below max failures" in {
+    val state = HlsPlaylistPoller.PollState("http://host/pl.m3u8", 0, 0, 0, 0, false)
+    val err = new RuntimeException("connection reset")
+    HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 3, err) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        next.fetchFailures shouldBe 1
+        segments shouldBe empty
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit on transient failure")
+    }
   }
 
   "HlsPlaylistPoller.pollDelaySec" should "return zero for first poll" in {

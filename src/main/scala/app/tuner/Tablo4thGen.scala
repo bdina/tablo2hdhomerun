@@ -1332,11 +1332,10 @@ object Tablo4thGen {
               Future.failed(Tablo4thGen.Error.SessionTokenMissing)
           }
 
-        def retuneWatchSession(priorToken: Option[String]): Future[WatchSession.Session] =
+        def retuneWatchSession(): Future[WatchSession.Session] =
           watchChannel().flatMap { data =>
             WatchSession.fromResponse(data) match {
               case Right(newSession) =>
-                endSessionIfNeeded(priorToken, newSession.token)
                 Future.successful(newSession)
               case Left(message) =>
                 Future.failed(Tablo4thGen.Error.WatchFailed(message))
@@ -1443,8 +1442,10 @@ object Tablo4thGen {
             } else {
               log.info("[4thgen-channel] recovery retune attempt={} channelId={}", attempt, channelId)
               Source.futureSource(
-                retuneWatchSession(session.token).map { newSession =>
+                retuneWatchSession().map { newSession =>
                   currentSession.set(newSession)
+                  keepaliveTask.foreach(_.cancel())
+                  scheduleKeepalive()
                   streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef)
                 }(ec)
               )

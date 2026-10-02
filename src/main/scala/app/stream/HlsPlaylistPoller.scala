@@ -54,13 +54,17 @@ object HlsPlaylistPoller {
     }
 
   private def segmentInfos(baseUrl: String, playlist: M3U8.Playlist): Seq[SegmentInfo] =
-    playlist.segments.zipWithIndex.map { case (seg, idx) =>
-      SegmentInfo(
-        url = M3U8.resolveSegmentUri(seg.uri, baseUrl)
-      , byteRange = seg.byteRange
-      , sequence = playlist.mediaSequence + idx
-      , duration = seg.duration
-      )
+    playlist.segments.zipWithIndex.flatMap { case (seg, idx) =>
+      if (seg.byteRange.exists(_._2 <= 0)) None
+      else
+        Some(
+          SegmentInfo(
+            url = M3U8.resolveSegmentUri(seg.uri, baseUrl)
+          , byteRange = seg.byteRange
+          , sequence = playlist.mediaSequence + idx
+          , duration = seg.duration
+          )
+        )
     }
 
   val sequenceResetThreshold: Int = 10
@@ -112,14 +116,31 @@ object HlsPlaylistPoller {
     }
   }
 
-  def onFetchError(state: PollState, maxFetchFailures: Int): Outcome = {
-    val n = state.fetchFailures + 1
-    if (n >= maxFetchFailures) {
-      Fail(HlsBackend.HlsError.PollExhausted)
-    } else {
-      Emit(state.copy(fetchFailures = n), Seq.empty)
+  def isFatalError(error: Throwable): Boolean =
+    error match {
+      case HlsBackend.HlsError.PlaylistFetchError(status) =>
+        import org.apache.pekko.http.scaladsl.model.StatusCodes
+        status == StatusCodes.NotFound ||
+        status == StatusCodes.Gone ||
+        status == StatusCodes.Unauthorized ||
+        status == StatusCodes.Forbidden
+      case _ => false
     }
-  }
+
+  def onFetchError(state: PollState, maxFetchFailures: Int, error: Throwable): Outcome =
+    if (isFatalError(error)) {
+      Fail(error)
+    } else {
+      val n = state.fetchFailures + 1
+      if (n >= maxFetchFailures) {
+        Fail(HlsBackend.HlsError.PollExhausted)
+      } else {
+        Emit(state.copy(fetchFailures = n), Seq.empty)
+      }
+    }
+
+  def onFetchError(state: PollState, maxFetchFailures: Int): Outcome =
+    onFetchError(state, maxFetchFailures, HlsBackend.HlsError.PollExhausted)
 
   def onPlaylistNotModified(state: PollState, maxStallPolls: Int): Outcome = {
     val nextStall = state.stallPolls + 1
