@@ -379,5 +379,120 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = stream.slice(0, 188) shouldBe disc
       stream.slice(188, 376) shouldBe pat
     }
+
+    "drop non-sync bytes in the middle of stream and maintain strict 188-byte packet alignment" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildPmtPacket(0x0100)
+      val media = buildMediaPacket(0x0101)
+      val junk1 = ByteString(Array[Byte](0x11, 0x22, 0x33, 0x44, 0x55))
+      val junk2 = ByteString(Array[Byte](0x66.toByte, 0x77.toByte, 0x88.toByte))
+
+      val combined = pat ++ junk1 ++ pmt ++ junk2 ++ media
+      val stream = Source.single(combined)
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val total = stream.foldLeft(ByteString.empty)(_ ++ _)
+      val _ = total.length shouldBe (188 * 3)
+      (0 until 3).foreach { i =>
+        val _ = total(i * 188) shouldBe 0x47.toByte
+      }
+      val _ = total.slice(0, 188) shouldBe pat
+      val _ = total.slice(188, 376) shouldBe pmt
+      total.slice(376, 564) shouldBe media
+    }
+
+    "replace TEI-corrupted packets with MPEG-TS null packets in cacheFlow" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val tei = {
+        val arr = Array.fill[Byte](188)(0x55.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = 0x81.toByte // TEI = 1
+        arr(2) = 0x00.toByte
+        arr(3) = 0x10.toByte
+        ByteString(arr)
+      }
+      val media = buildMediaPacket(0x0101)
+
+      val stream = Source.single(tei ++ media)
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = stream.length shouldBe (188 * 2)
+      val _ = stream.slice(0, 188) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      stream.slice(188, 376) shouldBe media
+    }
+
+    "dedupConsecutiveDiscontinuity should handle arbitrary non-aligned chunk splits" in {
+      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val pat = buildPatPacket(0x0100)
+      val combined = disc ++ disc ++ pat
+
+      // Split into 50-byte chunks that do not align to 188-byte boundaries
+      val chunks = combined.grouped(50).toList
+      val stream = Source(chunks)
+        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = stream.length shouldBe (188 * 2)
+      val _ = stream.slice(0, 188) shouldBe disc
+      stream.slice(188, 376) shouldBe pat
+    }
+
+    "validate packet headers correctly in isValidPacketHeader" in {
+      val validPacket = buildMediaPacket(0x0101).toArray
+      val _ = MpegTsSync.isValidPacketHeader(validPacket, 0, validPacket.length) shouldBe true
+
+      // Invalid sync byte
+      val badSync = validPacket.clone()
+      badSync(0) = 0x00.toByte
+      val _ = MpegTsSync.isValidPacketHeader(badSync, 0, badSync.length) shouldBe false
+
+      // Invalid afc = 0
+      val badAfc = validPacket.clone()
+      badAfc(3) = (badAfc(3) & 0xCF).toByte // clears bits 4 and 5
+      val _ = MpegTsSync.isValidPacketHeader(badAfc, 0, badAfc.length) shouldBe false
+
+      // Out of bounds / short buffer
+      val _ = MpegTsSync.isValidPacketHeader(validPacket, 0, 100) shouldBe false
+      val _ = MpegTsSync.isValidPacketHeader(validPacket, -1, validPacket.length) shouldBe false
+
+      // afc = 2 (adaptation field only) with valid length
+      val afc2Valid = validPacket.clone()
+      afc2Valid(3) = ((afc2Valid(3) & 0xCF) | 0x20).toByte
+      afc2Valid(4) = 183.toByte
+      val _ = MpegTsSync.isValidPacketHeader(afc2Valid, 0, afc2Valid.length) shouldBe true
+
+      // afc = 2 with invalid length (> 183)
+      val afc2Invalid = validPacket.clone()
+      afc2Invalid(3) = ((afc2Invalid(3) & 0xCF) | 0x20).toByte
+      afc2Invalid(4) = 184.toByte
+      val _ = MpegTsSync.isValidPacketHeader(afc2Invalid, 0, afc2Invalid.length) shouldBe false
+
+      // afc = 3 (adaptation field + payload) with valid length
+      val afc3Valid = validPacket.clone()
+      afc3Valid(3) = ((afc3Valid(3) & 0xCF) | 0x30).toByte
+      afc3Valid(4) = 182.toByte
+      val _ = MpegTsSync.isValidPacketHeader(afc3Valid, 0, afc3Valid.length) shouldBe true
+
+      // afc = 3 with invalid length (> 182)
+      val afc3Invalid = validPacket.clone()
+      afc3Invalid(3) = ((afc3Invalid(3) & 0xCF) | 0x30).toByte
+      afc3Invalid(4) = 183.toByte
+      MpegTsSync.isValidPacketHeader(afc3Invalid, 0, afc3Invalid.length) shouldBe false
+    }
+
+    "find next sync position accurately in findNextSync" in {
+      val packet = buildMediaPacket(0x0101).toArray
+      val junk = Array[Byte](0x01, 0x02, 0x03, 0x04)
+      val combined = junk ++ packet
+
+      val _ = MpegTsSync.findNextSync(combined, 0, combined.length) shouldBe 4
+      MpegTsSync.findNextSync(junk, 0, junk.length) shouldBe -1
+    }
   }
 }

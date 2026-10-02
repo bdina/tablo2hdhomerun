@@ -94,9 +94,9 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val p = playlist(10, Seq("seg10.ts", "seg11.ts"))
     HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 10, defaultPollSec = 2) match {
       case HlsPlaylistPoller.Emit(_, segments) =>
-        segments should have size 2
-        segments.head.sequence shouldBe 10
-        segments.head.isDiscontinuity shouldBe true
+        val _ = segments should have size 2
+        val _ = segments.head.sequence shouldBe 10
+        val _ = segments.head.isDiscontinuity shouldBe true
         segments(1).isDiscontinuity shouldBe false
       case _ => fail("expected emit on sequence gap")
     }
@@ -114,7 +114,7 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val p = playlist(5, Seq("seg5.ts", "seg6.ts"))
     HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 10, defaultPollSec = 2) match {
       case HlsPlaylistPoller.Emit(next, segments) =>
-        segments should not be empty
+        val _ = segments should not be empty
         next.stallPolls shouldBe 0
       case _ => fail("expected emit")
     }

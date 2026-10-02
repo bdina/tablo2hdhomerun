@@ -172,7 +172,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
 
       val probe = wrappedSource.runWith(TestSink[ByteString]())
       val _ = probe.ensureSubscription()
-      probe.requestNext(2.seconds) shouldBe stream1
+      val _ = probe.requestNext(2.seconds) shouldBe stream1
 
       failPromise.failure(new RuntimeException("stream 1 failure"))
 
@@ -180,7 +180,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
         next = probe.requestNext(2.seconds)
       }
-      next shouldBe (customPrefix ++ stream2)
+      val _ = next shouldBe (customPrefix ++ stream2)
       probe.cancel()
     }
 

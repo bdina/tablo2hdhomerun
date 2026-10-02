@@ -119,31 +119,25 @@ object MpegTsHealth {
         }
       }
 
-      private def parseForMetrics(buf: Array[Byte], length: Int): Int = {
+      private def parseForMetrics(buf: Array[Byte], length: Int): (Int, ByteString) = {
         var pos = 0
+        val outBuilder = ByteString.newBuilder
         while (pos + PacketSize <= length) {
           if (buf(pos) == 0x47.toByte) {
             processPacket(buf, pos)
+            outBuilder ++= ByteString.fromArray(buf, pos, PacketSize)
             pos += PacketSize
           } else {
             syncLoss += 1
-            var found = -1
-            var scan = pos + 1
-            while (scan + PacketSize <= length && found < 0) {
-              if (buf(scan) == 0x47.toByte) {
-                found = scan
-              } else {
-                scan += 1
-              }
-            }
+            val found = MpegTsSync.findNextSync(buf, pos + 1, length)
             if (found < 0) {
-              pos = length
+              pos = length - PacketSize + 1
             } else {
               pos = found
             }
           }
         }
-        pos
+        (pos, outBuilder.result())
       }
 
       setHandler(in, new InHandler {
@@ -151,10 +145,10 @@ object MpegTsHealth {
           val incoming = grab(in)
           val combined = carry ++ incoming
           val arr = combined.toArray
-          val consumed = parseForMetrics(arr, arr.length)
+          val (consumed, output) = parseForMetrics(arr, arr.length)
           carry = combined.drop(consumed)
-          if (consumed > 0) {
-            push(out, ByteString.fromArray(arr, 0, consumed))
+          if (output.nonEmpty) {
+            push(out, output)
           } else {
             pull(in)
           }
@@ -168,15 +162,11 @@ object MpegTsHealth {
           if (s.enforce && degraded) {
             failAsync.invoke(HlsBackend.HlsError.TsHealthDegraded(detail))
           } else {
-            if (carry.nonEmpty) {
+            if (carry.length >= PacketSize) {
               val arr = carry.toArray
-              val consumed = parseForMetrics(arr, arr.length)
-              if (consumed > 0) {
-                emit(out, ByteString.fromArray(arr, 0, consumed))
-              }
-              val remainder = carry.drop(consumed)
-              if (remainder.nonEmpty) {
-                emit(out, remainder)
+              val (_, output) = parseForMetrics(arr, arr.length)
+              if (output.nonEmpty) {
+                emit(out, output)
               }
             }
             completeStage()

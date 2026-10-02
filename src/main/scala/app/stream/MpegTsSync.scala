@@ -53,6 +53,32 @@ object MpegTsSync {
     b.result()
   }
 
+  def isValidPacketHeader(arr: Array[Byte], offset: Int, len: Int): Boolean =
+    offset >= 0 &&
+    offset + PacketSize <= len &&
+    arr(offset) == 0x47.toByte && {
+      val afc = (arr(offset + 3) & 0x30) >> 4
+      afc match {
+        case 1 => true
+        case 2 => (arr(offset + 4) & 0xFF) <= 183
+        case 3 => (arr(offset + 4) & 0xFF) <= 182
+        case _ => false
+      }
+    }
+
+  def findNextSync(arr: Array[Byte], start: Int, len: Int): Int = {
+    var scan = math.max(0, start)
+    var found = -1
+    while (scan + PacketSize <= len && found < 0) {
+      if (isValidPacketHeader(arr, scan, len)) {
+        found = scan
+      } else {
+        scan += 1
+      }
+    }
+    found
+  }
+
   def withPreRollKeepAlive(
     realSourceFuture: Future[Source[ByteString, NotUsed]]
   , interval: FiniteDuration = 100.millis
@@ -91,6 +117,7 @@ object MpegTsSync {
     override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
 
     override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
+      private var carry: ByteString = ByteString.empty
       private var lastWasDiscontinuity = false
 
       private def isDiscontinuity(bs: ByteString, offset: Int): Boolean =
@@ -104,32 +131,36 @@ object MpegTsSync {
 
       setHandler(in, new InHandler {
         override def onPush(): Unit = {
-          val elem = grab(in)
-          if (elem.length < PacketSize || elem.length % PacketSize != 0) {
-            push(out, elem)
+          val incoming = grab(in)
+          val combined = carry ++ incoming
+          val fullLen = (combined.length / PacketSize) * PacketSize
+          if (fullLen == 0) {
+            carry = combined
+            pull(in)
           } else {
+            carry = combined.drop(fullLen)
             var pos = 0
             val filtered = ByteString.newBuilder
             var droppedAny = false
 
-            while (pos + PacketSize <= elem.length) {
-              val isDiscont = isDiscontinuity(elem, pos)
+            while (pos + PacketSize <= fullLen) {
+              val isDiscont = isDiscontinuity(combined, pos)
               if (isDiscont) {
                 if (lastWasDiscontinuity) {
                   droppedAny = true
                 } else {
                   lastWasDiscontinuity = true
-                  filtered ++= elem.slice(pos, pos + PacketSize)
+                  filtered ++= combined.slice(pos, pos + PacketSize)
                 }
               } else {
                 lastWasDiscontinuity = false
-                filtered ++= elem.slice(pos, pos + PacketSize)
+                filtered ++= combined.slice(pos, pos + PacketSize)
               }
               pos += PacketSize
             }
 
-            if (!droppedAny) {
-              push(out, elem)
+            if (!droppedAny && carry.isEmpty) {
+              push(out, combined)
             } else {
               val result = filtered.result()
               if (result.nonEmpty) {
@@ -139,6 +170,14 @@ object MpegTsSync {
               }
             }
           }
+        }
+
+        override def onUpstreamFinish(): Unit = {
+          val fullLen = (carry.length / PacketSize) * PacketSize
+          if (fullLen > 0) {
+            emit(out, carry.take(fullLen))
+          }
+          completeStage()
         }
       })
 
@@ -226,72 +265,81 @@ object MpegTsSync {
       setHandler(in, new InHandler {
         override def onPush(): Unit = {
           val incoming = grab(in)
-          var combined = carry ++ incoming
+          val combined = carry ++ incoming
+          val len = combined.length
+          val arr = combined.toArray
+          var pos = 0
+          var updated = cachedHeadersRef.get()
+          val outputBuilder = ByteString.newBuilder
 
-          // Strip any leading non-sync bytes to ensure packet alignment
-          var start = 0
-          while (start < combined.length && combined(start) != 0x47.toByte) {
-            start += 1
-          }
-          if (start > 0) {
-            combined = combined.drop(start)
-          }
-
-          val fullLen = (combined.length / PacketSize) * PacketSize
-          if (fullLen > 0) {
-            val toPush = combined.take(fullLen)
-            carry = combined.drop(fullLen)
-            val arr = toPush.toArray
-            var pos = 0
-            var updated = cachedHeadersRef.get()
-
-            while (pos + PacketSize <= fullLen) {
-              if (arr(pos) == 0x47.toByte) {
-                val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
-                if (pid == PatPid) {
-                  val patPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
-                  extractPmtPid(arr, pos).foreach { pmtPid =>
-                    detectedPmtPid = Some(pmtPid)
-                  }
-                  updated = updated.copy(pat = Some(patPacket))
-                } else if (detectedPmtPid.contains(pid)) {
-                  val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
-                  updated = updated.copy(pmt = Some(pmtPacket))
+          while (pos + PacketSize <= len) {
+            if (arr(pos) == 0x47.toByte) {
+              val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
+              if (pid == PatPid) {
+                val patPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
+                extractPmtPid(arr, pos).foreach { pmtPid =>
+                  detectedPmtPid = Some(pmtPid)
                 }
-                pos += PacketSize
+                updated = updated.copy(pat = Some(patPacket))
+              } else if (detectedPmtPid.contains(pid)) {
+                val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
+                updated = updated.copy(pmt = Some(pmtPacket))
+              }
+
+              val isTei = (arr(pos + 1) & 0x80) != 0
+              if (isTei) {
+                outputBuilder ++= MPEGTS_NULL_PACKET
               } else {
-                var found = -1
-                var scan = pos + 1
-                while (scan + PacketSize <= fullLen && found < 0) {
-                  if (arr(scan) == 0x47.toByte) found = scan
-                  else scan += 1
-                }
-                if (found < 0) pos = fullLen
-                else pos = found
+                outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+              }
+              pos += PacketSize
+            } else {
+              val nextSync = findNextSync(arr, pos + 1, len)
+              if (nextSync >= 0) {
+                pos = nextSync
+              } else {
+                pos = len - PacketSize + 1
               }
             }
+          }
 
-            val prev = cachedHeadersRef.get()
-            if (updated != prev) {
-              cachedHeadersRef.set(updated)
-              onHeadersUpdated(updated)
-            }
-            push(out, toPush)
+          carry = combined.drop(pos)
+
+          val prev = cachedHeadersRef.get()
+          if (updated != prev) {
+            cachedHeadersRef.set(updated)
+            onHeadersUpdated(updated)
+          }
+
+          val result = outputBuilder.result()
+          if (result.nonEmpty) {
+            push(out, result)
           } else {
-            carry = combined
             pull(in)
           }
         }
 
         override def onUpstreamFinish(): Unit = {
-          var start = 0
-          while (start < carry.length && carry(start) != 0x47.toByte) {
-            start += 1
-          }
-          val synced = if (start > 0) carry.drop(start) else carry
-          val fullLen = (synced.length / PacketSize) * PacketSize
-          if (fullLen > 0) {
-            emit(out, synced.take(fullLen))
+          if (carry.length >= PacketSize) {
+            val arr = carry.toArray
+            var pos = 0
+            val outputBuilder = ByteString.newBuilder
+            while (pos + PacketSize <= arr.length) {
+              if (arr(pos) == 0x47.toByte) {
+                val isTei = (arr(pos + 1) & 0x80) != 0
+                if (isTei) outputBuilder ++= MPEGTS_NULL_PACKET
+                else outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                pos += PacketSize
+              } else {
+                val next = findNextSync(arr, pos + 1, arr.length)
+                if (next >= 0) pos = next
+                else pos = arr.length
+              }
+            }
+            val result = outputBuilder.result()
+            if (result.nonEmpty) {
+              emit(out, result)
+            }
           }
           completeStage()
         }

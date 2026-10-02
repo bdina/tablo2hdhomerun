@@ -105,5 +105,18 @@ class MpegTsHealthSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike wi
         .futureValue
       failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
     }
+
+    "drop non-sync bytes from output stream when enforce is false" in {
+      val settings = MpegTsHealth.Settings(windowSec = 1, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = false)
+      val junk = ByteString(Array.fill[Byte](10)(0x00.toByte))
+      val p = videoPacket(0)
+      val stream = junk ++ p
+      val out = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+      out shouldBe p
+    }
   }
 }
