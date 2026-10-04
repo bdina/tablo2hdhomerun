@@ -124,14 +124,14 @@ object AppConfig {
     , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)
     )
     val resilient = ResilientHlsConfig(
-      maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 60)
+      maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 10)
     , retryMinBackoffSec = getInt(get, "STREAM_RETRY_MIN_BACKOFF_SEC", 2)
     , retryMaxBackoffSec = getInt(get, "STREAM_RETRY_MAX_BACKOFF_SEC", 30)
     , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
     , gapThresholdSec = getInt(get, "STREAM_RESILIENT_GAP_THRESHOLD_SEC", 15)
     )
     val hls = HlsStreamConfig(
-      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 25)
+      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 4)
     , heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
     , health = MpegTsHealth.Settings(
         windowSec = getInt(get, "STREAM_HLS_HEALTH_WINDOW_SEC", 10)
@@ -141,7 +141,7 @@ object AppConfig {
       , enforce = getBoolTrue(get, "STREAM_HLS_HEALTH_ENFORCE", true)
       , teiMax = getInt(get, "STREAM_HLS_TEI_ERROR_MAX", 10)
       )
-    , pollFailuresMax = getInt(get, "STREAM_HLS_POLL_FAILURES_MAX", 60)
+    , pollFailuresMax = getInt(get, "STREAM_HLS_POLL_FAILURES_MAX", 4)
     )
     val stream = StreamConfig(
       backend = getStreamBackend(get)

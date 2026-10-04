@@ -15,6 +15,7 @@ trait StreamBackend {
   , label: String = ""
   , initialSeq: Int = 0
   , onSeqAdvanced: Int => Unit = _ => ()
+  , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   )(implicit system: ActorSystem[?]): Source[ByteString, ?]
   def name: String
 }

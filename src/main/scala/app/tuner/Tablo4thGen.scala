@@ -36,7 +36,7 @@ import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
 import app.config.TabloAuthEnv
-import app.stream.{MpegTsSync, StreamBackend}
+import app.stream.{HlsPlaylistPoller, MpegTsSync, StreamBackend}
 import app.sys.LogConfig
 
 object Tablo4thGen {
@@ -1346,6 +1346,7 @@ object Tablo4thGen {
           session: WatchSession.Session
         , streamKillSwitch: AtomicReference[Option[UniqueKillSwitch]]
         , lastSeqRef: java.util.concurrent.atomic.AtomicInteger
+        , isRecovery: Boolean = false
         ): Source[ByteString, ?] = {
           log.info(
             "[4thgen-channel] stream session expires={} keepalive={} playlist={}"
@@ -1353,12 +1354,14 @@ object Tablo4thGen {
           , session.keepalive.map(_.toString).getOrElse("unknown")
           , LogConfig.truncate(session.playlistUrl)
           )
+          val liveEdgeCount = if (isRecovery) 1 else HlsPlaylistPoller.liveEdgeSegmentCount
           StreamBackend()
             .stream(
               session.playlistUrl
             , leaseId
             , initialSeq = lastSeqRef.get()
             , onSeqAdvanced = seq => lastSeqRef.set(seq)
+            , liveEdgeCount = liveEdgeCount
             )
             .viaMat(KillSwitches.single)(Keep.right)
             .mapMaterializedValue { killSwitch =>
@@ -1446,7 +1449,8 @@ object Tablo4thGen {
                   currentSession.set(newSession)
                   keepaliveTask.foreach(_.cancel())
                   scheduleKeepalive()
-                  streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef)
+                  lastSeqRef.set(0)
+                  streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true)
                 }(ec)
               )
             }

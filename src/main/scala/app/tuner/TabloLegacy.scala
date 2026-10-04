@@ -937,11 +937,13 @@ object TabloLegacy {
                       Source.futureSource(
                         startWatchSession(checkTuners = false).map { data =>
                           log.info("[channel] recovered tune playlist={}", data.playlist_url)
+                          lastSeqRef.set(0)
                           StreamBackend().stream(
                             data.playlist_url.toString
                           , streamId
-                          , initialSeq = lastSeqRef.get()
+                          , initialSeq = 0
                           , onSeqAdvanced = seq => lastSeqRef.set(seq)
+                          , liveEdgeCount = 1
                           )
                         }
                       )

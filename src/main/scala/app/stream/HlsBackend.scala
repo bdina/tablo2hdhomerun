@@ -61,6 +61,7 @@ object HlsBackend extends StreamBackend {
   , label: String = ""
   , initialSeq: Int = 0
   , onSeqAdvanced: Int => Unit = _ => ()
+  , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -296,7 +297,7 @@ object HlsBackend extends StreamBackend {
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
           log.debug("[stream:hls] resolved media playlist={}", url)
-          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq))(s => step(s)(mat))
+          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s)(mat))
             .mapConcat(identity)
             .buffer(16, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>

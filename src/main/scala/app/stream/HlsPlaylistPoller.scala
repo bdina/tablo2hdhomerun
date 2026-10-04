@@ -22,14 +22,15 @@ object HlsPlaylistPoller {
   , lastAdvanced: Boolean = false
   , etag: Option[String] = None
   , lastModified: Option[String] = None
+  , liveEdgeCount: Int = liveEdgeSegmentCount
   )
 
   sealed trait Outcome
   final case class Emit(next: PollState, segments: Seq[SegmentInfo]) extends Outcome
   final case class Fail(error: Throwable) extends Outcome
 
-  def initial(baseUrl: String, lastSeq: Int = 0): PollState =
-    PollState(baseUrl, lastSeq, 0, 0, 0, false)
+  def initial(baseUrl: String, lastSeq: Int = 0, liveEdgeCount: Int = liveEdgeSegmentCount): PollState =
+    PollState(baseUrl, lastSeq, 0, 0, 0, false, liveEdgeCount = liveEdgeCount)
 
   val pollDelayMinSec: Int = 1
   val pollDelayMaxSec: Int = 10
@@ -87,13 +88,16 @@ object HlsPlaylistPoller {
         allSegments.last.sequence < (state.lastSeq - math.max(sequenceResetThreshold, allSegments.size))
       val isFirstPoll = state.lastSeq == 0 || isReset
       val effectiveLastSeq = if (isReset) 0 else state.lastSeq
-      val candidates = if (isFirstPoll)
-        allSegments.takeRight(liveEdgeSegmentCount)
-      else
+      val candidates = if (isFirstPoll) {
+        val count = if (isReset) 1 else state.liveEdgeCount
+        allSegments.takeRight(count)
+      } else {
         allSegments.filter(_.sequence >= effectiveLastSeq)
+      }
       val rawSegments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
       val hasSequenceGap = state.lastSeq > 0 && rawSegments.nonEmpty && rawSegments.head.sequence > state.lastSeq
-      val segments = if (hasSequenceGap) {
+      val isDiscontinuous = isReset || hasSequenceGap
+      val segments = if (isDiscontinuous && rawSegments.nonEmpty) {
         val head = rawSegments.head.copy(isDiscontinuity = true)
         head +: rawSegments.tail
       } else {

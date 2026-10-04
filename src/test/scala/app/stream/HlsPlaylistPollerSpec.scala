@@ -244,10 +244,37 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val p = playlist(0, Seq("seg0.ts", "seg1.ts", "seg2.ts", "seg3.ts", "seg4.ts"))
     HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
       case HlsPlaylistPoller.Emit(next, segments) =>
-        // Falls back to liveEdgeSegmentCount (3 segments)
-        val _ = segments.map(_.sequence) shouldBe Seq(2, 3, 4)
+        // Falls back to 1 live edge segment on backward jump to avoid replaying stale video
+        val _ = segments.map(_.sequence) shouldBe Seq(4)
+        val _ = segments.head.isDiscontinuity shouldBe true
         val _ = next.lastSeq shouldBe 5
         next.stallPolls shouldBe 0
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit")
+    }
+  }
+
+  it should "respect custom liveEdgeCount on initial poll" in {
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", liveEdgeCount = 1)
+    val p = playlist(0, Seq("seg0.ts", "seg1.ts", "seg2.ts", "seg3.ts", "seg4.ts"))
+    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = segments.map(_.sequence) shouldBe Seq(4)
+        next.lastSeq shouldBe 5
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit")
+    }
+  }
+
+  it should "mark discontinuity when there is a forward sequence gap" in {
+    // Stream was at sequence 10 (next expected is 10)
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 10)
+    // Playlist jumped forward to 12, 13 (sequence gap from 10 to 12)
+    val p = playlist(12, Seq("seg12.ts", "seg13.ts"))
+    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = segments.map(_.sequence) shouldBe Seq(12, 13)
+        val _ = segments.head.isDiscontinuity shouldBe true
+        val _ = segments(1).isDiscontinuity shouldBe false
+        next.lastSeq shouldBe 14
       case HlsPlaylistPoller.Fail(_) => fail("expected emit")
     }
   }
