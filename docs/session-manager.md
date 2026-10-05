@@ -47,7 +47,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Scope | 4th gen only |
 | Idle grace | 75s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
 | Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` with explicit multi-PID discontinuity transition markers |
-| BroadcastHub buffer | 256 elements |
+| BroadcastHub buffer | 1024 elements |
 | Session runner | Functions/object inside `Tablo4thGen.Channel` (not a typed actor) |
 | Upstream failure | Hub completes → client `watchTermination` → `Release`; teardown is idempotent |
 
@@ -65,7 +65,7 @@ Tablo4thGen.Channel.SessionRunner
   POST /watch
        │
        ▼
-  StreamBackend → ResilientHlsSource → MpegTsSync.dedupConsecutiveDiscontinuity → MpegTsSync.cacheFlow → KillSwitch → BroadcastHub.sink(256)
+  StreamBackend → ResilientHlsSource → MpegTsSync.dedupConsecutiveDiscontinuity → MpegTsSync.cacheFlow → KillSwitch → BroadcastHub.sink(1024)
                          ▲
                          │
               keepalive / playlist change / near-expiry retune
@@ -118,7 +118,7 @@ Style matches existing 4th-gen actors (`LineupActor`): nested `Request` / `Respo
 ```scala
 object SessionManager {
   val IdleGrace: FiniteDuration = 15.seconds
-  val BroadcastHubBufferSize: Int = 256
+  val BroadcastHubBufferSize: Int = 1024
 
   sealed trait Request
 
@@ -496,7 +496,7 @@ a per-channel typed actor (smaller diff, one new actor total: SessionManager).
 
 1. `POST /guide/channels/{id}/watch` (existing 503 retry behavior)
 2. Materialize roughly:
-   `ResilientHlsSource(streamFactory) → KillSwitches.single → BroadcastHub.sink(bufferSize = 256)`
+   `ResilientHlsSource(streamFactory) → KillSwitches.single → BroadcastHub.sink(bufferSize = 1024)`
 3. Start the keepalive loop (moved out of per-request `streamWithTunerTracking`)
 4. Invoke `onCheckIn(meta, hubSource, teardown)` (caller turns this into `Command.CheckIn`)
 
@@ -519,10 +519,10 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Signal degradation / fringe corruption | `MpegTsHealth` sanitizes TEI packets into nulls; on threshold breach, inner producer fails; `ResilientHlsSource` bridges with null packets while `streamFactory` actively retunes via `/watch` |
+| Signal degradation / fringe corruption | `MpegTsHealth` sanitizes TEI packets into nulls, respects `discontinuity_indicator`, and enforces health inline in `onPush`; on threshold breach, inner producer fails immediately; `ResilientHlsSource` bridges with null packets while `streamFactory` actively retunes via `/watch` (cleaning up prior tuner token) |
 | Outer resilient exhaustion / hub complete | Subscribers complete → `Release` drain → IdleGrace → teardown |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
-| Slow client (lags past 256 buffer) | That subscriber fails; others continue; that client `Release` |
+| Slow client (lags past 1024 buffer) | That subscriber fails; others continue; that client `Release` |
 | Acquire during IdleGrace | Cancel timer; attach; no new `/watch` |
 | Teardown after Tablo session already gone | Log and ignore DELETE errors |
 
@@ -545,7 +545,7 @@ Today `activeStreams` counts HTTP clients. With SessionManager, a tuner slot is 
 | Setting | v1 value |
 |---------|----------|
 | Idle grace | 75 seconds (configurable via `SESSION_IDLE_GRACE_SEC`) |
-| BroadcastHub buffer | 256 elements |
+| BroadcastHub buffer | 1024 elements |
 | Recovery live edge | 2 segments (~4s cushion, via `HlsPlaylistPoller.recoveryLiveEdgeSegmentCount`) |
 
 Hardcoded for v1 is fine; promote to config later if needed.

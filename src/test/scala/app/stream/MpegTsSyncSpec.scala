@@ -520,7 +520,18 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val afc3Invalid = validPacket.clone()
       afc3Invalid(3) = ((afc3Invalid(3) & 0xCF) | 0x30).toByte
       afc3Invalid(4) = 183.toByte
-      MpegTsSync.isValidPacketHeader(afc3Invalid, 0, afc3Invalid.length) shouldBe false
+      val _ = MpegTsSync.isValidPacketHeader(afc3Invalid, 0, afc3Invalid.length) shouldBe false
+
+      // Scrambled packets (TSC != 0) should be rejected
+      val scrambled = validPacket.clone()
+      scrambled(3) = (scrambled(3) | 0x80).toByte
+      val _ = MpegTsSync.isValidPacketHeader(scrambled, 0, scrambled.length) shouldBe false
+
+      // Reserved PIDs (0x0002 to 0x000F) should be rejected
+      val reservedPid = validPacket.clone()
+      reservedPid(1) = 0x00.toByte
+      reservedPid(2) = 0x05.toByte
+      MpegTsSync.isValidPacketHeader(reservedPid, 0, reservedPid.length) shouldBe false
     }
 
     "find next sync position accurately in findNextSync" in {
@@ -530,6 +541,27 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       val _ = MpegTsSync.findNextSync(combined, 0, combined.length) shouldBe 4
       MpegTsSync.findNextSync(junk, 0, junk.length) shouldBe -1
+    }
+
+    "reject false sync in payload when multi-packet consecutive headers are present in findNextSync" in {
+      val p1 = buildMediaPacket(0x0101).toArray
+      val p2 = buildMediaPacket(0x0101).toArray
+      val junkPrefix = Array.fill[Byte](50)(0xAA.toByte)
+      // Inject a false sync byte 0x47 with valid afc (payload only) inside junkPrefix at offset 20
+      junkPrefix(20) = 0x47.toByte
+      junkPrefix(21) = 0x01.toByte // PID 0x0100
+      junkPrefix(22) = 0x00.toByte
+      junkPrefix(23) = 0x10.toByte // afc = 1 (payload only), TSC = 0, CC = 0
+
+      val combined = junkPrefix ++ p1 ++ p2
+      // junkPrefix is 50 bytes, so real packet p1 starts at offset 50, followed by p2 at 50 + 188 = 238
+      // Offset 20 has a valid single header, but offset 20 + 188 = 208 is inside p1 and NOT a valid header
+      // findNextSync should reject offset 20 and lock onto offset 50
+      val found = MpegTsSync.findNextSync(combined, 0, combined.length)
+      val _ = found shouldBe 50
+
+      // If we scan starting at offset 21, it should also find offset 50
+      MpegTsSync.findNextSync(combined, 21, combined.length) shouldBe 50
     }
 
     "construct a valid 188-byte discontinuity packet for a custom PID" in {

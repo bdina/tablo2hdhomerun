@@ -960,7 +960,7 @@ object Tablo4thGen {
       def defaultIdleGrace: FiniteDuration =
         Option(AppContext.config).map(_.proxy.idleGraceSec.seconds).getOrElse(75.seconds)
       val IdleGrace: FiniteDuration = 75.seconds
-      val BroadcastHubBufferSize: Int = 256
+      val BroadcastHubBufferSize: Int = 1024
 
       sealed trait Request
 
@@ -1461,10 +1461,12 @@ object Tablo4thGen {
               log.info("[4thgen-channel] recovery retune attempt={} channelId={}", attempt, channelId)
               Source.futureSource(
                 retuneWatchSession().map { newSession =>
+                  val oldToken = currentSession.get().token
                   currentSession.set(newSession)
                   keepaliveTask.foreach(_.cancel())
                   scheduleKeepalive()
                   lastSeqRef.set(0)
+                  endSessionIfNeeded(oldToken, newSession.token)
                   streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true)
                 }(ec)
               )

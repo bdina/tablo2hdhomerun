@@ -56,24 +56,40 @@ object MpegTsSync {
   def isValidPacketHeader(arr: Array[Byte], offset: Int, len: Int): Boolean =
     offset >= 0 &&
     offset + PacketSize <= len &&
-    arr(offset) == 0x47.toByte && {
-      val afc = (arr(offset + 3) & 0x30) >> 4
-      afc match {
-        case 1 => true
-        case 2 => (arr(offset + 4) & 0xFF) <= 183
-        case 3 => (arr(offset + 4) & 0xFF) <= 182
-        case _ => false
+    arr(offset) == 0x47.toByte &&
+    (arr(offset + 3) & 0xC0) == 0 && {
+      val pid = ((arr(offset + 1) & 0x1F) << 8) | (arr(offset + 2) & 0xFF)
+      (pid < 0x0002 || pid >= 0x0010) && {
+        val afc = (arr(offset + 3) & 0x30) >> 4
+        afc match {
+          case 1 => true
+          case 2 => (arr(offset + 4) & 0xFF) <= 183
+          case 3 => (arr(offset + 4) & 0xFF) <= 182
+          case _ => false
+        }
       }
     }
 
   def findNextSync(arr: Array[Byte], start: Int, len: Int): Int = {
     var scan = math.max(0, start)
     var found = -1
-    while (scan + PacketSize <= len && found < 0) {
-      if (isValidPacketHeader(arr, scan, len)) {
+    // Pass 1: Look for confirmed sync with 2 consecutive valid packet headers when buffer space permits
+    while (scan + 2 * PacketSize <= len && found < 0) {
+      if (isValidPacketHeader(arr, scan, len) && isValidPacketHeader(arr, scan + PacketSize, len)) {
         found = scan
       } else {
         scan += 1
+      }
+    }
+    // Pass 2: Fall back to single packet header if buffer has no consecutive pairs (e.g. short buffer or isolated packet)
+    if (found < 0) {
+      scan = math.max(0, start)
+      while (scan + PacketSize <= len && found < 0) {
+        if (isValidPacketHeader(arr, scan, len)) {
+          found = scan
+        } else {
+          scan += 1
+        }
       }
     }
     found

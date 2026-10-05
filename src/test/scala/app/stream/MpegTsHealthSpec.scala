@@ -118,5 +118,45 @@ class MpegTsHealthSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike wi
         .futureValue
       out shouldBe p
     }
+
+    "not count continuity errors when discontinuity_indicator is signaled" in {
+      val settings = MpegTsHealth.Settings(windowSec = 10, ccMax = 0, syncMax = 100, nullRatioMax = 0.9, enforce = true)
+      val discPacket = {
+        val arr = Array.fill[Byte](188)(0xFF.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = 0x00.toByte
+        arr(2) = 0x10.toByte // PID 0x0010 (same as videoPacket)
+        arr(3) = 0x20.toByte // adaptation field only, CC = 0
+        arr(4) = 183.toByte  // adaptation field length
+        arr(5) = 0x80.toByte // discontinuity_indicator = 1
+        ByteString(arr)
+      }
+
+      // Packet 1: CC = 0
+      // Packet 2: Discontinuity packet on same PID
+      // Packet 3: CC = 7 (arbitrary jump after signaled discontinuity)
+      // Packet 4: CC = 8 (consecutive to 7)
+      val stream = videoPacket(0) ++ discPacket ++ videoPacket(7) ++ videoPacket(8)
+      val out = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      out.length shouldBe (188 * 4)
+    }
+
+    "fail inline during onPush when errors exceed threshold without waiting for timer" in {
+      // Set windowSec to 3600 (1 hour) to prove degradation occurs inline on packet push
+      val settings = MpegTsHealth.Settings(windowSec = 3600, ccMax = 0, syncMax = 100, nullRatioMax = 0.9, enforce = true)
+      val stream = videoPacket(0) ++ videoPacket(5)
+      val failed = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.ignore)
+        .failed
+        .futureValue
+      failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
+    }
   }
 }

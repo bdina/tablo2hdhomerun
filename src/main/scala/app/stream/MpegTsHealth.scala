@@ -23,7 +23,7 @@ object MpegTsHealth {
   , syncMax: Int
   , nullRatioMax: Double
   , enforce: Boolean
-  , teiMax: Int = 10
+  , teiMax: Int = 3
   )
 
   val NullPacketArray: Array[Byte] = {
@@ -84,7 +84,7 @@ object MpegTsHealth {
           ccErrors > s.ccMax ||
           syncLoss > s.syncMax ||
           teiErrors > s.teiMax ||
-          (totalPackets > 0 && nullPackets.toDouble / totalPackets > s.nullRatioMax)
+          (totalPackets >= 10 && (nullPackets.toDouble / totalPackets > s.nullRatioMax))
         val detail =
           s"syncLoss=$syncLoss ccErrors=$ccErrors teiErrors=$teiErrors nullPackets=$nullPackets totalPackets=$totalPackets"
         (degraded, detail)
@@ -105,14 +105,26 @@ object MpegTsHealth {
           if (pid == NullPid) {
             nullPackets += 1
           }
-          val afc = arr(offset + 3) & 0x30
-          val hasPayload = (afc & 0x10) != 0
+          val afc = (arr(offset + 3) & 0x30) >> 4
+          val hasPayload = (afc & 0x01) != 0
+          val hasAdaptation = (afc & 0x02) != 0
+          val isDiscontinuity =
+            hasAdaptation &&
+            (arr(offset + 4) & 0xFF) >= 1 &&
+            (arr(offset + 5) & 0x80) != 0
+
+          if (isDiscontinuity) {
+            val _ = prevCc.remove(pid)
+          }
+
           if (hasPayload) {
             val cc = arr(offset + 3) & 0x0F
-            prevCc.get(pid) match {
-              case Some(prev) if cc != prev && cc != ((prev + 1) & 0x0F) =>
-                ccErrors += 1
-              case _ => ()
+            if (!isDiscontinuity) {
+              prevCc.get(pid) match {
+                case Some(prev) if cc != prev && cc != ((prev + 1) & 0x0F) =>
+                  ccErrors += 1
+                case _ => ()
+              }
             }
             prevCc(pid) = cc
           }
@@ -147,10 +159,27 @@ object MpegTsHealth {
           val arr = combined.toArray
           val (consumed, output) = parseForMetrics(arr, arr.length)
           carry = combined.drop(consumed)
-          if (output.nonEmpty) {
-            push(out, output)
+          val (degraded, detail) = degradedSnapshot()
+          if (degraded) {
+            if (!warnedDegraded) {
+              log.warn("[stream:hls] ts health degraded {}", detail)
+              warnedDegraded = true
+            }
+            if (s.enforce) {
+              failStage(HlsBackend.HlsError.TsHealthDegraded(detail))
+            } else {
+              if (output.nonEmpty) {
+                push(out, output)
+              } else {
+                pull(in)
+              }
+            }
           } else {
-            pull(in)
+            if (output.nonEmpty) {
+              push(out, output)
+            } else {
+              pull(in)
+            }
           }
         }
 
