@@ -149,7 +149,7 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
     val delayedBehavior: Behavior[Tablo4thGen.Channel.SessionManager.Request] = Behaviors.receive { (_, msg) =>
       msg match {
         case Tablo4thGen.Channel.SessionManager.Request.Acquire(_, _, replyTo) =>
-          system.scheduler.scheduleOnce(500.millis, new Runnable {
+          val _ = system.scheduler.scheduleOnce(500.millis, new Runnable {
             override def run(): Unit =
               replyTo ! Tablo4thGen.Channel.SessionManager.Response.Attached(org.apache.pekko.stream.scaladsl.Source.empty)
           })(system.dispatcher)

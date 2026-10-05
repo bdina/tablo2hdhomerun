@@ -958,8 +958,8 @@ object Tablo4thGen {
         channelHeaderCache.clear()
 
       def defaultIdleGrace: FiniteDuration =
-        Option(AppContext.config).map(_.proxy.idleGraceSec.seconds).getOrElse(45.seconds)
-      val IdleGrace: FiniteDuration = 45.seconds
+        Option(AppContext.config).map(_.proxy.idleGraceSec.seconds).getOrElse(75.seconds)
+      val IdleGrace: FiniteDuration = 75.seconds
       val BroadcastHubBufferSize: Int = 256
 
       sealed trait Request
@@ -1030,6 +1030,7 @@ object Tablo4thGen {
         , graceTimer: pekko.actor.Cancellable
         , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders] =
             new AtomicReference(MpegTsSync.CachedHeaders())
+        , drainSwitch: Option[pekko.stream.UniqueKillSwitch] = None
         ) extends SessionState
       }
 
@@ -1077,10 +1078,31 @@ object Tablo4thGen {
           , idleGrace.toSeconds
           , LogConfig.truncate(live.meta.token)
           )
-          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef)
+          val drainSwitch =
+            try {
+              import pekko.stream.scaladsl.{Keep, Sink}
+              import pekko.stream.KillSwitches
+              implicit val classicSystem: org.apache.pekko.actor.ActorSystem = context.system.classicSystem
+              Some(
+                live.hubSource
+                  .viaMat(KillSwitches.single)(Keep.right)
+                  .to(Sink.ignore)
+                  .run()
+              )
+            } catch {
+              case ex: Throwable =>
+                context.log.debug("[session] idle-grace drain switch error channelId={}", channelId, ex)
+                None
+            }
+          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef, drainSwitch)
         }
 
         def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
+          sessions.get(channelId) match {
+            case Some(idle: SessionState.IdleGrace) =>
+              idle.drainSwitch.foreach(_.shutdown())
+            case _ => ()
+          }
           sessions -= channelId
           try teardown()
           catch {
@@ -1132,6 +1154,7 @@ object Tablo4thGen {
 
               case Some(idle: SessionState.IdleGrace) =>
                 val _ = idle.graceTimer.cancel()
+                idle.drainSwitch.foreach(_.shutdown())
                 sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
                 context.log.info("[session] grace-cancel channelId={} clientId={}", channelId, clientId)
                 attachClient(channelId, clientId, idle.hubSource, idle.cachedHeadersRef, replyTo)
@@ -1354,7 +1377,7 @@ object Tablo4thGen {
           , session.keepalive.map(_.toString).getOrElse("unknown")
           , LogConfig.truncate(session.playlistUrl)
           )
-          val liveEdgeCount = if (isRecovery) 1 else HlsPlaylistPoller.liveEdgeSegmentCount
+          val liveEdgeCount = if (isRecovery) HlsPlaylistPoller.recoveryLiveEdgeSegmentCount else HlsPlaylistPoller.liveEdgeSegmentCount
           StreamBackend()
             .stream(
               session.playlistUrl

@@ -2,6 +2,7 @@ package app.stream
 
 object HlsPlaylistPoller {
   val liveEdgeSegmentCount: Int = 3
+  val recoveryLiveEdgeSegmentCount: Int = 2
 
   final case class SegmentInfo(
     url: String

@@ -242,9 +242,9 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       outBytes.drop(564) shouldBe payload
     }
 
-    "expose defaultIdleGrace as 45 seconds by default" in {
-      val _ = SessionManager.defaultIdleGrace shouldBe 45.seconds
-      SessionManager.IdleGrace shouldBe 45.seconds
+    "expose defaultIdleGrace as 75 seconds by default" in {
+      val _ = SessionManager.defaultIdleGrace shouldBe 75.seconds
+      SessionManager.IdleGrace shouldBe 75.seconds
     }
 
     "persist channel headers in channelHeaderCache across session lifecycles" in {
@@ -282,7 +282,7 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
 
       // Release client to trigger idle-grace and eventual teardown
       mgr ! Request.Release("ch-persist", "client-1")
-      eventually(timeout(3.seconds), interval(50.millis)) {
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
         teardownCount.get() shouldBe 1
       }
 
@@ -324,8 +324,50 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val _ = outBytes.drop(564) shouldBe payload
 
       // emptyRef should now have been updated with fallback headers
-      emptyRef.get().pat shouldBe Some(patPacket)
+      val _ = emptyRef.get().pat shouldBe Some(patPacket)
       emptyRef.get().pmt shouldBe Some(pmtPacket)
+    }
+
+    "drain hubSource during IdleGrace to avoid backpressuring upstream" in {
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager(
+        startRunner = { (_, self) => selfRef.set(self) }
+      , idleGrace = 2.seconds
+      )
+      val probeA = testKit.createTestProbe[Response.Acquire]()
+      val probeB = testKit.createTestProbe[Response.Acquire]()
+
+      val drainedCounter = new AtomicInteger(0)
+      val hub = Source.repeat(ByteString(0x47, 0x1F, 0xFF, 0x10))
+        .map { bs =>
+          val _ = drainedCounter.incrementAndGet()
+          bs
+        }
+
+      mgr ! Request.Acquire("ch-drain-test", "client-1", probeA.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+      selfRef.get() ! Command.CheckIn("ch-drain-test", meta(), hub, () => ())
+      val attachedA = probeA.expectMessageType[Response.Attached]
+
+      // Client A takes 2 elements then finishes
+      val clientAFut = attachedA.source.take(2).runWith(org.apache.pekko.stream.scaladsl.Sink.seq)
+      val _ = clientAFut.futureValue.length shouldBe 2
+
+      // Release Client A: manager transitions to IdleGrace and attaches drain sink
+      mgr ! Request.Release("ch-drain-test", "client-1")
+
+      // In IdleGrace, drain sink continues consuming elements so upstream doesn't stall
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        drainedCounter.get() should be > 2
+      }
+
+      // Client B acquires during IdleGrace: cancels timer and shuts down drain switch
+      mgr ! Request.Acquire("ch-drain-test", "client-2", probeB.ref)
+      val attachedB = probeB.expectMessageType[Response.Attached]
+      val clientBFut = attachedB.source.take(2).runWith(org.apache.pekko.stream.scaladsl.Sink.seq)
+      clientBFut.futureValue.length shouldBe 2
     }
   }
 }

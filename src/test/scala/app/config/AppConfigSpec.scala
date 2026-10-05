@@ -25,7 +25,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.effectiveTunerCount shouldBe 2
     val _ = config.proxy.enableUdpDiscovery shouldBe true
     val _ = config.proxy.enableHlsEndpoint shouldBe true
-    val _ = config.proxy.idleGraceSec shouldBe 45
+    val _ = config.proxy.idleGraceSec shouldBe 75
     val _ = config.proxy.enablePreRollKeepAlive shouldBe true
     val _ = config.proxy.preRollIntervalMs shouldBe 100
     val _ = config.proxy.preRollPackets shouldBe 7

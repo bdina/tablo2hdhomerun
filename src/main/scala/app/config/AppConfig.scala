@@ -118,7 +118,7 @@ object AppConfig {
     , tunerCount = get("TUNER_COUNT").flatMap(s => scala.util.Try(s.trim.toInt).toOption)
     , enableUdpDiscovery = getBoolTrue(get, "ENABLE_UDP_DISCOVERY", true)
     , enableHlsEndpoint = getBoolTrue(get, "ENABLE_HLS_ENDPOINT", true)
-    , idleGraceSec = getInt(get, "SESSION_IDLE_GRACE_SEC", 45)
+    , idleGraceSec = getInt(get, "SESSION_IDLE_GRACE_SEC", 75)
     , enablePreRollKeepAlive = getBoolTrue(get, "STREAM_PRE_ROLL_KEEP_ALIVE", true)
     , preRollIntervalMs = getInt(get, "STREAM_PRE_ROLL_INTERVAL_MS", 100)
     , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)

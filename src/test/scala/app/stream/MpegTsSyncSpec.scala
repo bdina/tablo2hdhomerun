@@ -56,6 +56,43 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
     ByteString(arr)
   }
 
+  private def buildFullPmtPacket(pmtPid: Int, pcrPid: Int, videoPid: Int): ByteString = {
+    val arr = Array.fill[Byte](188)(0xFF.toByte)
+    arr(0) = 0x47.toByte
+    arr(1) = (0x40 | ((pmtPid >> 8) & 0x1F)).toByte // PUSI = 1
+    arr(2) = (pmtPid & 0xFF).toByte
+    arr(3) = 0x10.toByte // payload only, CC = 0
+    arr(4) = 0x00.toByte // pointer field = 0
+    // Table section starts at offset 5
+    arr(5) = 0x02.toByte // table_id = 0x02 (PMT)
+    // section_length = 9 (header) + 5 (video stream entry) + 4 (CRC) = 18 = 0x0012
+    arr(6) = 0xB0.toByte
+    arr(7) = 0x12.toByte
+    arr(8) = 0x00.toByte // program number
+    arr(9) = 0x01.toByte
+    arr(10) = 0xC1.toByte // version / current_next
+    arr(11) = 0x00.toByte // section_number
+    arr(12) = 0x00.toByte // last_section_number
+    // PCR PID at offset 5 + 8 = 13, 14
+    arr(13) = (0xE0 | ((pcrPid >> 8) & 0x1F)).toByte
+    arr(14) = (pcrPid & 0xFF).toByte
+    // Program info length at offset 5 + 10 = 15, 16 -> 0
+    arr(15) = 0xF0.toByte
+    arr(16) = 0x00.toByte
+    // Stream entry starts at offset 5 + 12 = 17
+    arr(17) = 0x02.toByte // stream_type = 0x02 (MPEG-2 Video)
+    arr(18) = (0xE0 | ((videoPid >> 8) & 0x1F)).toByte
+    arr(19) = (videoPid & 0xFF).toByte
+    arr(20) = 0xF0.toByte // ES info length = 0
+    arr(21) = 0x00.toByte
+    // CRC (4 bytes at 22, 23, 24, 25)
+    arr(22) = 0x00.toByte
+    arr(23) = 0x00.toByte
+    arr(24) = 0x00.toByte
+    arr(25) = 0x00.toByte
+    ByteString(arr)
+  }
+
   private def buildMediaPacket(pid: Int): ByteString = {
     val arr = Array.fill[Byte](188)(0xAA.toByte)
     arr(0) = 0x47.toByte
@@ -255,7 +292,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val streamFut = compositeSource.runWith(Sink.seq)
 
       // Allow 2-3 ticks of null packets to emit, then complete the promise with real media
-      system.classicSystem.scheduler.scheduleOnce(140.millis, new Runnable {
+      val _ = system.classicSystem.scheduler.scheduleOnce(140.millis, new Runnable {
         override def run(): Unit = promise.success(Source.single(media))
       })
 
@@ -281,7 +318,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val compositeSource = MpegTsSync.withPreRollKeepAlive(promise.future, interval = 20.millis, chunkPackets = 1)
       val streamFut = compositeSource.runWith(Sink.seq)
 
-      system.classicSystem.scheduler.scheduleOnce(50.millis, new Runnable {
+      val _ = system.classicSystem.scheduler.scheduleOnce(50.millis, new Runnable {
         override def run(): Unit = promise.success(Source.single(media))
       })
 
@@ -322,7 +359,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val compositeSource = MpegTsSync.withPreRollKeepAlive(promise.future, interval = 50.millis, chunkPackets = 1)
       val streamFut = compositeSource.runWith(Sink.seq)
 
-      system.classicSystem.scheduler.scheduleOnce(80.millis, new Runnable {
+      val _ = system.classicSystem.scheduler.scheduleOnce(80.millis, new Runnable {
         override def run(): Unit = promise.failure(expectedError)
       })
 
@@ -493,6 +530,91 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       val _ = MpegTsSync.findNextSync(combined, 0, combined.length) shouldBe 4
       MpegTsSync.findNextSync(junk, 0, junk.length) shouldBe -1
+    }
+
+    "construct a valid 188-byte discontinuity packet for a custom PID" in {
+      val packet = MpegTsSync.discontinuityPacket(0x0105)
+      val _ = packet.length shouldBe 188
+      val _ = packet(0) shouldBe 0x47.toByte
+      val pid = ((packet(1) & 0x1F) << 8) | (packet(2) & 0xFF)
+      val _ = pid shouldBe 0x0105
+      val _ = packet(3) shouldBe 0x20.toByte
+      val _ = packet(4) shouldBe 183.toByte
+      (packet(5) & 0x80) should not be 0
+    }
+
+    "extract PCR PID and Video PID from PMT packet in extractPmtStreamPids" in {
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0100, videoPid = 0x0101).toArray
+      val pids = MpegTsSync.extractPmtStreamPids(pmt, 0)
+      val _ = pids should not be None
+      val _ = pids.get.pcrPid shouldBe Some(0x0100)
+      pids.get.videoPid shouldBe Some(0x0101)
+    }
+
+    "include video and PCR discontinuity packets in CachedHeaders.syncPrefix when available" in {
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0100, videoPid = 0x0101)
+      val cached = MpegTsSync.CachedHeaders(
+        pat = Some(pat)
+      , pmt = Some(pmt)
+      , pcrPid = Some(0x0100)
+      , videoPid = Some(0x0101)
+      )
+
+      val prefix = cached.syncPrefix
+      // Should have: Video Disc (188) + Null Disc (188) + PAT (188) + PMT (188) = 752 bytes (since PCR PID == Video PID is false, Video + PCR + Null = 5 * 188 = 940 bytes)
+      val _ = prefix.length shouldBe (188 * 5)
+      val videoDisc = prefix.take(188)
+      val _ = (((videoDisc(1) & 0x1F) << 8) | (videoDisc(2) & 0xFF)) shouldBe 0x0101
+      val _ = (videoDisc(5) & 0x80) should not be 0
+
+      val pcrDisc = prefix.slice(188, 376)
+      val _ = (((pcrDisc(1) & 0x1F) << 8) | (pcrDisc(2) & 0xFF)) shouldBe 0x0100
+      val _ = (pcrDisc(5) & 0x80) should not be 0
+
+      val nullDisc = prefix.slice(376, 564)
+      val _ = nullDisc shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+
+      val _ = prefix.slice(564, 752) shouldBe pat
+      prefix.slice(752, 940) shouldBe pmt
+    }
+
+    "dedupConsecutiveDiscontinuity should preserve discontinuity across different PIDs but drop consecutive on same PID" in {
+      val videoDisc = MpegTsSync.discontinuityPacket(0x0101)
+      val pcrDisc = MpegTsSync.discontinuityPacket(0x0100)
+      val nullDisc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      val media = buildMediaPacket(0x0101)
+
+      // videoDisc, pcrDisc, nullDisc should all be preserved because they are different PIDs
+      // an adjacent duplicate nullDisc should be dropped
+      val stream = Source(List(videoDisc, pcrDisc, nullDisc, nullDisc, media))
+        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = stream.length shouldBe 4
+      val _ = stream(0) shouldBe videoDisc
+      val _ = stream(1) shouldBe pcrDisc
+      val _ = stream(2) shouldBe nullDisc
+      stream(3) shouldBe media
+    }
+
+    "cacheFlow should populate pcrPid and videoPid from full PMT packet" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0100, videoPid = 0x0101)
+      val media = buildMediaPacket(0x0101)
+
+      val _ = Source(List(pat, pmt, media))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val cached = cachedHeadersRef.get()
+      val _ = cached.pat shouldBe Some(pat)
+      val _ = cached.pmt shouldBe Some(pmt)
+      val _ = cached.pcrPid shouldBe Some(0x0100)
+      cached.videoPid shouldBe Some(0x0101)
     }
   }
 }

@@ -108,6 +108,17 @@ object MpegTsSync {
     }
   }
 
+  def discontinuityPacket(pid: Int): ByteString = {
+    val arr = Array.fill[Byte](PacketSize)(0xFF.toByte)
+    arr(0) = 0x47.toByte
+    arr(1) = ((pid >> 8) & 0x1F).toByte
+    arr(2) = (pid & 0xFF).toByte
+    arr(3) = 0x20.toByte // adaptation field only, CC = 0
+    arr(4) = 183.toByte  // adaptation field length (188 - 5)
+    arr(5) = 0x80.toByte // discontinuity_indicator = 1
+    ByteString(arr)
+  }
+
   def dedupConsecutiveDiscontinuity: Flow[ByteString, ByteString, NotUsed] =
     Flow.fromGraph(new DedupDiscontinuityStage)
 
@@ -118,16 +129,18 @@ object MpegTsSync {
 
     override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
       private var carry: ByteString = ByteString.empty
-      private var lastWasDiscontinuity = false
+      private var lastDiscontinuityPid: Option[Int] = None
 
-      private def isDiscontinuity(bs: ByteString, offset: Int): Boolean =
-        bs.length >= offset + PacketSize &&
-        bs(offset) == 0x47.toByte &&
-        bs(offset + 1) == 0x1F.toByte &&
-        bs(offset + 2) == 0xFF.toByte &&
-        bs(offset + 3) == 0x20.toByte &&
-        bs(offset + 4) == 183.toByte &&
-        (bs(offset + 5) & 0x80) != 0
+      private def discontinuityPid(bs: ByteString, offset: Int): Option[Int] =
+        if (
+          bs.length >= offset + PacketSize &&
+          bs(offset) == 0x47.toByte &&
+          (bs(offset + 3) & 0x20) != 0 &&
+          (bs(offset + 4) & 0xFF) >= 1 &&
+          (bs(offset + 5) & 0x80) != 0
+        ) {
+          Some(((bs(offset + 1) & 0x1F) << 8) | (bs(offset + 2) & 0xFF))
+        } else None
 
       setHandler(in, new InHandler {
         override def onPush(): Unit = {
@@ -144,17 +157,17 @@ object MpegTsSync {
             var droppedAny = false
 
             while (pos + PacketSize <= fullLen) {
-              val isDiscont = isDiscontinuity(combined, pos)
-              if (isDiscont) {
-                if (lastWasDiscontinuity) {
-                  droppedAny = true
-                } else {
-                  lastWasDiscontinuity = true
+              discontinuityPid(combined, pos) match {
+                case Some(pid) =>
+                  if (lastDiscontinuityPid.contains(pid)) {
+                    droppedAny = true
+                  } else {
+                    lastDiscontinuityPid = Some(pid)
+                    filtered ++= combined.slice(pos, pos + PacketSize)
+                  }
+                case None =>
+                  lastDiscontinuityPid = None
                   filtered ++= combined.slice(pos, pos + PacketSize)
-                }
-              } else {
-                lastWasDiscontinuity = false
-                filtered ++= combined.slice(pos, pos + PacketSize)
               }
               pos += PacketSize
             }
@@ -187,14 +200,66 @@ object MpegTsSync {
     }
   }
 
+  final case class PmtStreamPids(pcrPid: Option[Int], videoPid: Option[Int])
+
+  def isVideoType(streamType: Int): Boolean =
+    streamType match {
+      case 0x01 | 0x02 | 0x1B | 0x24 => true // MPEG-1, MPEG-2, H.264, H.265/HEVC
+      case _ => false
+    }
+
+  def extractPmtStreamPids(packet: Array[Byte], offset: Int): Option[PmtStreamPids] = {
+    val pusi = (packet(offset + 1) & 0x40) != 0
+    val afc = (packet(offset + 3) & 0x30) >> 4
+    val payloadOffset =
+      if (afc == 1) offset + 4
+      else if (afc == 3) offset + 5 + (packet(offset + 4) & 0xFF)
+      else offset + PacketSize
+
+    if (payloadOffset < offset + PacketSize) {
+      val pointerField = if (pusi) packet(payloadOffset) & 0xFF else 0
+      val tableOffset = payloadOffset + (if (pusi) 1 + pointerField else 0)
+      if (tableOffset + 12 < offset + PacketSize) {
+        val tableId = packet(tableOffset) & 0xFF
+        if (tableId == 0x02) {
+          val sectionLength = ((packet(tableOffset + 1) & 0x0F) << 8) | (packet(tableOffset + 2) & 0xFF)
+          val pcrPid = ((packet(tableOffset + 8) & 0x1F) << 8) | (packet(tableOffset + 9) & 0xFF)
+          val progInfoLen = ((packet(tableOffset + 10) & 0x0F) << 8) | (packet(tableOffset + 11) & 0xFF)
+          var entryPos = tableOffset + 12 + progInfoLen
+          val endPos = math.min(offset + PacketSize, tableOffset + 3 + sectionLength - 4)
+          var videoPidOpt: Option[Int] = None
+          while (entryPos + 5 <= endPos) {
+            val streamType = packet(entryPos) & 0xFF
+            val elemPid = ((packet(entryPos + 1) & 0x1F) << 8) | (packet(entryPos + 2) & 0xFF)
+            val esInfoLen = ((packet(entryPos + 3) & 0x0F) << 8) | (packet(entryPos + 4) & 0xFF)
+            if (videoPidOpt.isEmpty && isVideoType(streamType)) {
+              videoPidOpt = Some(elemPid)
+            }
+            entryPos += 5 + math.max(0, esInfoLen)
+          }
+          val validPcr = if (pcrPid > 0 && pcrPid != NullPid) Some(pcrPid) else None
+          Some(PmtStreamPids(validPcr, videoPidOpt))
+        } else None
+      } else None
+    } else None
+  }
+
   final case class CachedHeaders(
     pat: Option[ByteString] = None
   , pmt: Option[ByteString] = None
+  , pcrPid: Option[Int] = None
+  , videoPid: Option[Int] = None
   ) {
     def isEmpty: Boolean = pat.isEmpty && pmt.isEmpty
 
     def syncPrefix: ByteString = {
       val b = ByteString.newBuilder
+      videoPid.filter(p => p > 0 && p != NullPid).foreach { pid =>
+        b ++= discontinuityPacket(pid)
+      }
+      pcrPid.filter(p => p > 0 && p != NullPid && !videoPid.contains(p)).foreach { pid =>
+        b ++= discontinuityPacket(pid)
+      }
       b ++= MPEGTS_DISCONTINUITY_PACKET
       pat.foreach(b ++= _)
       pmt.foreach(b ++= _)
@@ -283,7 +348,12 @@ object MpegTsSync {
                 updated = updated.copy(pat = Some(patPacket))
               } else if (detectedPmtPid.contains(pid)) {
                 val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
-                updated = updated.copy(pmt = Some(pmtPacket))
+                val streamPids = extractPmtStreamPids(arr, pos)
+                updated = updated.copy(
+                  pmt = Some(pmtPacket)
+                , pcrPid = streamPids.flatMap(_.pcrPid).orElse(updated.pcrPid)
+                , videoPid = streamPids.flatMap(_.videoPid).orElse(updated.videoPid)
+                )
               }
 
               val isTei = (arr(pos + 1) & 0x80) != 0

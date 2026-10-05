@@ -42,11 +42,11 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
 | Retune | Seamless: restart inner producer under `ResilientHlsSource`; hub stays up |
-| Stream priming | Dynamic PAT/PMT & discontinuity packet prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
+| Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
-| Idle grace | 45s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
-| Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` with an explicit `MPEGTS_DISCONTINUITY_PACKET` transition marker |
+| Idle grace | 75s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
+| Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` with explicit multi-PID discontinuity transition markers |
 | BroadcastHub buffer | 256 elements |
 | Session runner | Functions/object inside `Tablo4thGen.Channel` (not a typed actor) |
 | Upstream failure | Hub completes → client `watchTermination` → `Release`; teardown is idempotent |
@@ -89,7 +89,7 @@ before format probing timeouts fire. The KillSwitch is used only for final teard
               │                      ▲                │
               │                      │                │ Acquire (cancel timer)
               └--AcquireFailed--> (absent)            │
-                                                      └--45s--> teardown → (absent)
+                                                      └--75s--> teardown → (absent)
 
 Live --hub completes--> clients Release → IdleGrace → teardown → (absent)
 ```
@@ -98,7 +98,7 @@ Live --hub completes--> clients Release → IdleGrace → teardown → (absent)
 |-------|----------|
 | **Opening** | One Tablo open in flight; further Acquires enqueue waiters |
 | **Live** | `hubSource` available; `clientCount ≥ 1`; keepalive running in runner |
-| **IdleGrace** | `clientCount == 0`; 45s timer armed (configurable); Acquire cancels timer and attaches (no new `/watch`) |
+| **IdleGrace** | `clientCount == 0`; 75s timer armed (configurable); Acquire cancels timer and attaches (no new `/watch`) |
 | **absent** | No map entry; next Acquire starts Opening |
 
 ## Scala ADT / Behavior sketch
@@ -212,6 +212,7 @@ object SessionManager {
     , hubSource: Source[ByteString, NotUsed]
     , teardown: () => Unit
     , graceTimer: pekko.actor.Cancellable
+    , drainSwitch: Option[UniqueKillSwitch] = None
     ) extends SessionState
   }
 }
@@ -250,9 +251,22 @@ object SessionManager {
       waiters.foreach(w => w.replyTo ! Response.Rejected(reason))
 
     def enterIdleGrace(channelId: String, live: SessionState.Live): SessionState.IdleGrace = {
+      val drainSwitch =
+        try {
+          Some(
+            live.hubSource
+              .viaMat(KillSwitches.single)(Keep.right)
+              .to(Sink.ignore)
+              .run()
+          )
+        } catch {
+          case ex: Throwable =>
+            context.log.warn("[session] failed to attach drain sink during idle-grace channelId={}", channelId, ex)
+            None
+        }
       val timer = context.scheduleOnce(IdleGrace, context.self, Command.GraceExpired(channelId))
       context.log.info("[session] idle-grace channelId={} token={}", channelId, LogConfig.truncate(live.meta.token))
-      SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer)
+      SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, drainSwitch)
     }
 
     def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
@@ -298,6 +312,7 @@ object SessionManager {
 
           case Some(idle: SessionState.IdleGrace) =>
             idle.graceTimer.cancel()
+            idle.drainSwitch.foreach(_.shutdown())
             sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId))
             context.log.info("[session] grace-cancel channelId={} clientId={}", channelId, clientId)
             attachClient(channelId, clientId, idle.hubSource, replyTo)
@@ -512,9 +527,9 @@ the current per-request path, but as **one instance per channel lease**.
 
 ## Idle grace and BroadcastHub backpressure
 
-With zero subscribers during IdleGrace, `BroadcastHub` backpressures the upstream for up to 15 seconds. That pauses HLS
-segment pull while keepalive still runs on the Tablo session — acceptable for v1 channel surfing. Do not add a dummy
-sink unless this proves problematic in practice.
+When zero subscribers remain during IdleGrace, `BroadcastHub` buffers fill, which halts upstream pulls. In practice, this caused upstream pipelines under `ResilientHlsSource` to trip with `StreamIdleTimeoutException: No elements passed in the last 10 seconds`, forcing spurious `/watch` retunes to the Tablo hardware every 10–12 seconds while in grace.
+
+To prevent upstream backpressure stalls, `SessionManager` attaches an active `Sink.ignore` drain managed by a `UniqueKillSwitch` upon entering `IdleGrace`. This maintains live stream flow and keepalives without stalls. When a new client connects (`Acquire` grace-cancel) or when `GraceExpired` fires, the drain kill switch is immediately shut down.
 
 ## Tuner accounting
 
@@ -528,8 +543,9 @@ Today `activeStreams` counts HTTP clients. With SessionManager, a tuner slot is 
 
 | Setting | v1 value |
 |---------|----------|
-| Idle grace | 15 seconds |
+| Idle grace | 75 seconds (configurable via `SESSION_IDLE_GRACE_SEC`) |
 | BroadcastHub buffer | 256 elements |
+| Recovery live edge | 2 segments (~4s cushion, via `HlsPlaylistPoller.recoveryLiveEdgeSegmentCount`) |
 
 Hardcoded for v1 is fine; promote to config later if needed.
 

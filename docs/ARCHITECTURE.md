@@ -102,8 +102,8 @@ The live channel stream can use one of two backends, selected by `STREAM_BACKEND
 - **hls** (default): Fetches M3U8 playlists and TS segments directly via HTTP; no external process. Optimized for HLS v4 byte-range playlists with adaptive polling, conditional playlist requests (`ETag` / `Last-Modified`), safe byte-range validation (filtering zero-length or negative sub-ranges to prevent range header errors), strict `206 Partial Content` validation for ranged segment fetches, and status-aware segment recovery. Wrapped by `ResilientHlsSource` for null-packet padding and retune backoff.
 - **ffmpeg**: Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH. Includes reconnect and error-detect flags to survive transient stream drops.
 
-The resulting stream is monitored by `MpegTsHealth` and wrapped by `ResilientHlsSource`. `MpegTsHealth` sanitizes corrupt packets marked with the Transport Error Indicator (TEI) bit into MPEG-TS null packets (PID 0x1FFF) to protect downstream decoders (such as Plex's FFmpeg transcoder) from bitstream crashes, and triggers stream degradation when error thresholds are exceeded. If the stream backend fails, degrades, or connection to the Tablo drops, `ResilientHlsSource` automatically injects MPEG-TS null packets every 80ms to keep the HTTP chunked transfer alive, preventing downstream players like Plex from disconnecting. While bridging gaps with null packets for up to `STREAM_RECOVERY_TIMEOUT_SEC` (default 60s), the proxy actively retunes the physical Tablo hardware via `/watch`. When real data resumes after gap fill, `ResilientHlsSource` prepends cached PAT/PMT headers and a standard MPEG-TS discontinuity marker packet to inform downstream decoders that frame state and timestamps reset. It also implements an `idleTimeout` and `RestartSource.withBackoff` to retry connection to the backend and enforce a maximum outage gap.
-Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.dedupConsecutiveDiscontinuity` and `MpegTsSync.cacheFlow`. `MpegTsSync.cacheFlow` enforces strict 188-byte packet framing starting with `0x47`, drops non-sync bytes caused by OTA noise or TCP gaps, sanitizes TEI-corrupted packets into MPEG-TS null packets, and continuously captures the latest PAT (Program Association Table) on PID 0 and PMT (Program Map Table). When new or reconnecting clients attach to the hub, `MpegTsSync.primeClientSource` prepends the cached PAT, PMT, and a discontinuity packet, guaranteeing that decoders (like FFmpeg in Plex) always receive valid stream parameters and never encounter framing or decoder crashes.
+The resulting stream is monitored by `MpegTsHealth` and wrapped by `ResilientHlsSource`. `MpegTsHealth` sanitizes corrupt packets marked with the Transport Error Indicator (TEI) bit into MPEG-TS null packets (PID 0x1FFF) to protect downstream decoders (such as Plex's FFmpeg transcoder) from bitstream crashes, and triggers stream degradation when error thresholds are exceeded. If the stream backend fails, degrades, or connection to the Tablo drops, `ResilientHlsSource` automatically injects MPEG-TS null packets every 40ms to keep the HTTP chunked transfer alive, preventing downstream players like Plex from disconnecting. While bridging gaps with null packets for up to `STREAM_RECOVERY_TIMEOUT_SEC` (default 60s), the proxy actively retunes the physical Tablo hardware via `/watch`. When real data resumes after gap fill, `ResilientHlsSource` prepends cached PAT/PMT headers and multi-PID discontinuity marker packets (video PID, PCR PID, and null PID) to inform downstream decoders that frame state and timestamps reset. It also implements an `idleTimeout` and `RestartSource.withBackoff` to retry connection to the backend and enforce a maximum outage gap.
+Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.dedupConsecutiveDiscontinuity` and `MpegTsSync.cacheFlow`. `MpegTsSync.cacheFlow` enforces strict 188-byte packet framing starting with `0x47`, drops non-sync bytes caused by OTA noise or TCP gaps, sanitizes TEI-corrupted packets into MPEG-TS null packets, and continuously captures the latest PAT (Program Association Table) on PID 0, PMT (Program Map Table), PCR PID, and elementary video PID. When new or reconnecting clients attach to the hub, `MpegTsSync.primeClientSource` prepends the cached PAT, PMT, and multi-PID discontinuity packets, guaranteeing that decoders (like FFmpeg in Plex) always receive valid stream parameters, recognize stream resets across retunes, and never encounter framing or decoder crashes.
 
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌────────────────────────┐
@@ -161,14 +161,15 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.dedupCon
    d. Receive watch response with HLS playlist URL, expiry, and keepalive metadata
    e. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
    f. Pre-roll keepalive seamlessly switches over to real MPEG-TS data when ready, inserting
-      an explicit MPEG-TS discontinuity packet and prepending primed PAT/PMT headers
+      explicit multi-PID MPEG-TS discontinuity packets and prepending primed PAT/PMT headers
 4. 4th gen session maintenance:
    a. Periodically POST /player/sessions/{token}/keepalive while the client stream is active
    b. ResilientHlsSource retunes via `/watch` when the HLS session stalls, expires, or degrades
    c. MpegTsSync normalizes packet boundaries and caches PAT/PMT headers (persisted per channel
       in SessionManager.channelHeaderCache across session lifecycles for fast subsequent tunes)
 5. Client teardown:
-   a. On client disconnect, tuner enters idle grace period (default 45s) for instant reconnect
+   a. On client disconnect, tuner enters idle grace period (default 75s) for instant reconnect,
+      actively draining the BroadcastHub via a background sink to avoid upstream backpressure stalls
    b. If idle grace expires without reconnection, DELETE /player/sessions/{token} to release hardware tuner
 6. If no tuners: return 503 Service Unavailable
 ```
@@ -214,7 +215,7 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.dedupCon
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit periodic null MPEG-TS packets during cold tune to prevent client timeouts |
 | `STREAM_PRE_ROLL_INTERVAL_MS`| `100` | Interval in ms between pre-roll keepalive chunks |
 | `STREAM_PRE_ROLL_PACKETS` | `7` | Number of 188-byte null packets per keepalive chunk (7 = 1316 bytes MTU) |
-| `SESSION_IDLE_GRACE_SEC` | `45` | Idle grace period (in seconds) to retain tuner session |
+| `SESSION_IDLE_GRACE_SEC` | `75` | Idle grace period (in seconds) to retain tuner session |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### Fixed Configuration

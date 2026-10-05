@@ -18,7 +18,7 @@ object ResilientHlsSource {
   val log = LoggerFactory.getLogger(this.getClass)
 
   // Configuration (from AppContext.config.stream.resilient)
-  val nullPacketIntervalMs: Int = 80
+  val nullPacketIntervalMs: Int = 40
 
   // MPEG-TS null packet constant (188 bytes, sync byte 0x47, PID 0x1FFF)
   val MPEGTS_NULL_PACKET: ByteString = {
