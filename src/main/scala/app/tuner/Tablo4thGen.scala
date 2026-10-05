@@ -1078,36 +1078,29 @@ object Tablo4thGen {
           , idleGrace.toSeconds
           , LogConfig.truncate(live.meta.token)
           )
-          val drainSwitch =
-            try {
-              import pekko.stream.scaladsl.{Keep, Sink}
-              import pekko.stream.KillSwitches
-              implicit val classicSystem: org.apache.pekko.actor.ActorSystem = context.system.classicSystem
-              Some(
-                live.hubSource
-                  .viaMat(KillSwitches.single)(Keep.right)
-                  .to(Sink.ignore)
-                  .run()
-              )
-            } catch {
-              case ex: Throwable =>
+          val drainSwitch = {
+            import pekko.stream.scaladsl.{Keep, Sink}
+            import pekko.stream.KillSwitches
+            implicit val classicSystem: org.apache.pekko.actor.ActorSystem = context.system.classicSystem
+            val drainGraph = live.hubSource.viaMat(KillSwitches.single)(Keep.right).to(Sink.ignore)
+            Try(drainGraph.run()) match {
+              case Success(switch) => Some(switch)
+              case Failure(ex) =>
                 context.log.debug("[session] idle-grace drain switch error channelId={}", channelId, ex)
                 None
             }
+          }
           SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef, drainSwitch)
         }
 
         def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
-          sessions.get(channelId) match {
-            case Some(idle: SessionState.IdleGrace) =>
-              idle.drainSwitch.foreach(_.shutdown())
+          sessions.get(channelId).foreach {
+            case idle: SessionState.IdleGrace => idle.drainSwitch.foreach(_.shutdown())
             case _ => ()
           }
           sessions -= channelId
-          try teardown()
-          catch {
-            case ex: Throwable =>
-              context.log.warn("[session] teardown failed channelId={}", channelId, ex)
+          Try(teardown()).failed.foreach { ex =>
+            context.log.warn("[session] teardown failed channelId={}", channelId, ex)
           }
           context.log.info("[session] removed channelId={} occupied={}", channelId, occupied)
         }
@@ -1202,8 +1195,7 @@ object Tablo4thGen {
                 waiters.foreach(w => attachClient(channelId, w.clientId, hubSource, cachedHeadersRef, w.replyTo))
               case other =>
                 context.log.warn("[session] check-in unexpected state channelId={} state={}", channelId, other)
-                try teardown()
-                catch { case _: Throwable => () }
+                val _ = Try(teardown())
             }
             Behaviors.same
 

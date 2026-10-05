@@ -251,30 +251,31 @@ object SessionManager {
       waiters.foreach(w => w.replyTo ! Response.Rejected(reason))
 
     def enterIdleGrace(channelId: String, live: SessionState.Live): SessionState.IdleGrace = {
-      val drainSwitch =
-        try {
-          Some(
-            live.hubSource
-              .viaMat(KillSwitches.single)(Keep.right)
-              .to(Sink.ignore)
-              .run()
-          )
-        } catch {
-          case ex: Throwable =>
-            context.log.warn("[session] failed to attach drain sink during idle-grace channelId={}", channelId, ex)
+      val drainSwitch = {
+        import pekko.stream.scaladsl.{Keep, Sink}
+        import pekko.stream.KillSwitches
+        implicit val classicSystem: org.apache.pekko.actor.ActorSystem = context.system.classicSystem
+        val drainGraph = live.hubSource.viaMat(KillSwitches.single)(Keep.right).to(Sink.ignore)
+        Try(drainGraph.run()) match {
+          case Success(switch) => Some(switch)
+          case Failure(ex) =>
+            context.log.debug("[session] idle-grace drain switch error channelId={}", channelId, ex)
             None
         }
+      }
       val timer = context.scheduleOnce(IdleGrace, context.self, Command.GraceExpired(channelId))
       context.log.info("[session] idle-grace channelId={} token={}", channelId, LogConfig.truncate(live.meta.token))
       SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, drainSwitch)
     }
 
     def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
+      sessions.get(channelId).foreach {
+        case idle: SessionState.IdleGrace => idle.drainSwitch.foreach(_.shutdown())
+        case _ => ()
+      }
       sessions -= channelId
-      try teardown()
-      catch {
-        case ex: Throwable =>
-          context.log.warn("[session] teardown failed channelId={}", channelId, ex)
+      Try(teardown()).failed.foreach { ex =>
+        context.log.warn("[session] teardown failed channelId={}", channelId, ex)
       }
       context.log.info("[session] removed channelId={} occupied={}", channelId, occupied)
     }
