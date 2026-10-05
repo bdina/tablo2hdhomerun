@@ -158,5 +158,70 @@ class MpegTsHealthSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike wi
         .futureValue
       failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
     }
+
+    "inject discontinuity packet before packet with continuity counter jump when enforce is false" in {
+      val settings = MpegTsHealth.Settings(windowSec = 10, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = false)
+      val stream = videoPacket(0) ++ videoPacket(5) ++ videoPacket(6)
+      val out = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      out.length shouldBe (188 * 4)
+      out.take(188) shouldBe videoPacket(0)
+      out.slice(188, 188 * 2) shouldBe MpegTsSync.discontinuityPacket(0x0010)
+      out.slice(188 * 2, 188 * 3) shouldBe videoPacket(5)
+      out.slice(188 * 3, 188 * 4) shouldBe videoPacket(6)
+    }
+
+    "inject discontinuity packet on next packet after TEI corruption on same PID" in {
+      val settings = MpegTsHealth.Settings(windowSec = 10, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = false)
+      val stream = videoPacket(0) ++ teiPacket(1) ++ videoPacket(2)
+      val out = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      out.length shouldBe (188 * 4)
+      out.take(188) shouldBe videoPacket(0)
+      out.slice(188, 188 * 2) shouldBe ByteString(MpegTsHealth.NullPacketArray)
+      out.slice(188 * 2, 188 * 3) shouldBe MpegTsSync.discontinuityPacket(0x0010)
+      out.slice(188 * 3, 188 * 4) shouldBe videoPacket(2)
+    }
+
+    "inject discontinuity packet for active PIDs and general discontinuity upon sync loss recovery" in {
+      val settings = MpegTsHealth.Settings(windowSec = 10, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = false)
+      val junk = ByteString(Array.fill[Byte](10)(0x00.toByte))
+      val stream = videoPacket(0) ++ junk ++ videoPacket(1)
+      val out = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      out.length shouldBe (188 * 4)
+      out.take(188) shouldBe videoPacket(0)
+      out.slice(188, 188 * 2) shouldBe MpegTsSync.discontinuityPacket(0x0010)
+      out.slice(188 * 2, 188 * 3) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      out.slice(188 * 3, 188 * 4) shouldBe videoPacket(1)
+    }
+
+    "clear active PID continuity on NullPid discontinuity packet" in {
+      val settings = MpegTsHealth.Settings(windowSec = 10, ccMax = 0, syncMax = 100, nullRatioMax = 0.9, enforce = true)
+      val stream = videoPacket(0) ++ MpegTsSync.MPEGTS_DISCONTINUITY_PACKET ++ videoPacket(7)
+      val out = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      out.length shouldBe (188 * 4)
+      out.take(188) shouldBe videoPacket(0)
+      out.slice(188, 188 * 2) shouldBe MpegTsSync.discontinuityPacket(0x0010)
+      out.slice(188 * 2, 188 * 3) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+      out.slice(188 * 3, 188 * 4) shouldBe videoPacket(7)
+    }
   }
 }

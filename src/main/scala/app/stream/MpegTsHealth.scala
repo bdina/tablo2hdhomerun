@@ -23,7 +23,7 @@ object MpegTsHealth {
   , syncMax: Int
   , nullRatioMax: Double
   , enforce: Boolean
-  , teiMax: Int = 3
+  , teiMax: Int = 10
   )
 
   val NullPacketArray: Array[Byte] = {
@@ -52,6 +52,7 @@ object MpegTsHealth {
       private var totalPackets = 0
       private var warnedDegraded = false
       private val prevCc = mutable.HashMap.empty[Int, Int]
+      private val teiPids = mutable.HashSet.empty[Int]
       private var failAsync: org.apache.pekko.stream.stage.AsyncCallback[Throwable] = uninitialized
 
       override def preStart(): Unit = {
@@ -93,13 +94,18 @@ object MpegTsHealth {
       private def pidAt(arr: Array[Byte], offset: Int): Int =
         ((arr(offset + 1) & 0x1F) << 8) | (arr(offset + 2) & 0xFF)
 
-      private def processPacket(arr: Array[Byte], offset: Int): Unit = {
+      private def processPacket(arr: Array[Byte], offset: Int): Option[ByteString] = {
         totalPackets += 1
         val isTei = (arr(offset + 1) & 0x80) != 0
         if (isTei) {
           teiErrors += 1
+          val pid = pidAt(arr, offset)
+          if (pid >= 0x0010 && pid != NullPid) {
+            val _ = teiPids += pid
+          }
           System.arraycopy(NullPacketArray, 0, arr, offset, PacketSize)
           nullPackets += 1
+          None
         } else {
           val pid = pidAt(arr, offset)
           if (pid == NullPid) {
@@ -113,21 +119,44 @@ object MpegTsHealth {
             (arr(offset + 4) & 0xFF) >= 1 &&
             (arr(offset + 5) & 0x80) != 0
 
+          var prefix: Option[ByteString] = None
+
           if (isDiscontinuity) {
-            val _ = prevCc.remove(pid)
+            if (pid == NullPid) {
+              val b = ByteString.newBuilder
+              for (elemPid <- prevCc.keys if elemPid >= 0x0010 && elemPid != NullPid) {
+                b ++= MpegTsSync.discontinuityPacket(elemPid)
+              }
+              prevCc.clear()
+              teiPids.clear()
+              val res = b.result()
+              if (res.nonEmpty) {
+                prefix = Some(res)
+              }
+            } else {
+              val _ = prevCc.remove(pid)
+              val _ = teiPids.remove(pid)
+            }
           }
 
           if (hasPayload) {
             val cc = arr(offset + 3) & 0x0F
             if (!isDiscontinuity) {
-              prevCc.get(pid) match {
-                case Some(prev) if cc != prev && cc != ((prev + 1) & 0x0F) =>
-                  ccErrors += 1
-                case _ => ()
+              val hadTeiLoss = teiPids.remove(pid)
+              val ccJump = prevCc.get(pid) match {
+                case Some(prev) => cc != prev && cc != ((prev + 1) & 0x0F)
+                case None => false
+              }
+              if (ccJump) {
+                ccErrors += 1
+              }
+              if ((ccJump || hadTeiLoss) && pid >= 0x0010 && pid != NullPid) {
+                prefix = Some(MpegTsSync.discontinuityPacket(pid))
               }
             }
             prevCc(pid) = cc
           }
+          prefix
         }
       }
 
@@ -136,11 +165,20 @@ object MpegTsHealth {
         val outBuilder = ByteString.newBuilder
         while (pos + PacketSize <= length) {
           if (buf(pos) == 0x47.toByte) {
-            processPacket(buf, pos)
+            val prefix = processPacket(buf, pos)
+            prefix.foreach(outBuilder ++= _)
             outBuilder ++= ByteString.fromArray(buf, pos, PacketSize)
             pos += PacketSize
           } else {
             syncLoss += 1
+            if (prevCc.nonEmpty) {
+              for (elemPid <- prevCc.keys if elemPid >= 0x0010 && elemPid != NullPid) {
+                outBuilder ++= MpegTsSync.discontinuityPacket(elemPid)
+              }
+              outBuilder ++= MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
+              prevCc.clear()
+              teiPids.clear()
+            }
             val found = MpegTsSync.findNextSync(buf, pos + 1, length)
             if (found < 0) {
               pos = length - PacketSize + 1

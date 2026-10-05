@@ -192,9 +192,9 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `STREAM_HLS_STALL_POLLS` | `30` | Playlist polls with no media-sequence advance before retune (~35-40s) |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
 | `STREAM_HLS_HEALTH_WINDOW_SEC` | `10` | MPEG-TS health metric sliding window |
-| `STREAM_HLS_CC_ERROR_MAX` | `10` | Continuity-counter errors per window before degraded |
-| `STREAM_HLS_SYNC_LOSS_MAX` | `3` | Sync-byte misalignments per window before degraded |
-| `STREAM_HLS_TEI_ERROR_MAX` | `3` | Transport error indicator (TEI) corrupted packets per window before degraded |
+| `STREAM_HLS_CC_ERROR_MAX` | `30` | Continuity-counter errors per window before degraded |
+| `STREAM_HLS_SYNC_LOSS_MAX` | `10` | Sync-byte misalignments per window before degraded |
+| `STREAM_HLS_TEI_ERROR_MAX` | `10` | Transport error indicator (TEI) corrupted packets per window before degraded |
 | `STREAM_HLS_NULL_RATIO_MAX` | `0.6` | Null-packet fraction per window before degraded |
 | `STREAM_HLS_HEALTH_ENFORCE` | `true` | When `true`, degraded TS fails the stream and triggers retune |
 | `STREAM_HLS_POLL_FAILURES_MAX` | `15` | Consecutive playlist fetch failures before retune |
