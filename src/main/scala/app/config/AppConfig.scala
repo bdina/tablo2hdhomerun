@@ -124,14 +124,14 @@ object AppConfig {
     , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)
     )
     val resilient = ResilientHlsConfig(
-      maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 10)
+      maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 15)
     , retryMinBackoffSec = getInt(get, "STREAM_RETRY_MIN_BACKOFF_SEC", 2)
     , retryMaxBackoffSec = getInt(get, "STREAM_RETRY_MAX_BACKOFF_SEC", 30)
     , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
     , gapThresholdSec = getInt(get, "STREAM_RESILIENT_GAP_THRESHOLD_SEC", 15)
     )
     val hls = HlsStreamConfig(
-      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 4)
+      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 10)
     , heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
     , health = MpegTsHealth.Settings(
         windowSec = getInt(get, "STREAM_HLS_HEALTH_WINDOW_SEC", 10)

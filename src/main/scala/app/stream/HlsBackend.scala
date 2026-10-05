@@ -299,7 +299,7 @@ object HlsBackend extends StreamBackend {
           log.debug("[stream:hls] resolved media playlist={}", url)
           Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s)(mat))
             .mapConcat(identity)
-            .buffer(16, OverflowStrategy.backpressure)
+            .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
               val raw = fetchSegmentSource(seg.url, seg.byteRange)
               val source = if (seg.isDiscontinuity) {
