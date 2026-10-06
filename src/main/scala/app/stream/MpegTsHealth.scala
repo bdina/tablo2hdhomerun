@@ -250,7 +250,7 @@ object MpegTsHealth {
             log.warn("[stream:hls] ts health degraded {}", detail)
           }
           if (s.enforce && degraded) {
-            failAsync.invoke(HlsBackend.HlsError.TsHealthDegraded(detail))
+            failStage(HlsBackend.HlsError.TsHealthDegraded(detail))
           } else {
             if (carry.length >= PacketSize) {
               val arr = carry.toArray

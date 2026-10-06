@@ -1604,7 +1604,7 @@ object Tablo4thGen {
         pekko.http.scaladsl.model.headers.RawHeader("Cache-Control", "no-cache, no-store, must-revalidate")
       , pekko.http.scaladsl.model.headers.RawHeader("Pragma", "no-cache")
       , pekko.http.scaladsl.model.headers.RawHeader("Expires", "0")
-      , pekko.http.scaladsl.model.headers.RawHeader("Connection", "close")
+      , pekko.http.scaladsl.model.headers.Connection("close")
       )
 
       val corsHeaders = Seq(
