@@ -182,6 +182,7 @@ The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 - Retried ranged segment fetching with backoff to tolerate in-flight Tablo segment write races
 - PES-aligned elementary stream protection: suppresses corrupted mid-frame packet fragments on video/audio PIDs until the next payload unit start indicator (`PUSI`), preventing decoder syntax desynchronization and transcoder crashes (e.g. `slice below image`)
 - Standards-compliant MPEG-TS discontinuity signaling (ISO/IEC 13818-1): emits continuity-counter preserving adaptation-field discontinuity packets on elementary PIDs upon recovery
+- Live-edge recovery drain: cuts directly to the latest 2 segments (`recoveryLiveEdgeSegmentCount = 2`) on retunes and deduplicates via emitted keys to prevent repeating already-viewed broadcast content
 
 MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session keepalive are separate mechanisms: the former keeps the HTTP chunked response alive during HLS gaps; the latter renews the Tablo watch session token on the device.
 
@@ -212,7 +213,7 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `TUNER_COUNT` | `2` | Number of virtual tuners reported in discover.json |
 | `ENABLE_UDP_DISCOVERY` | `true` | Enable UDP 65001 HDHomeRun broadcast auto-discovery responder |
 | `ENABLE_HLS_ENDPOINT` | `true` | Enable open-standard HLS playlist (`.m3u8` and `.m3u`) endpoints |
-| `SESSION_IDLE_GRACE_SEC` | `45` | Idle grace period (in seconds) to keep tuner session active after client disconnects |
+| `SESSION_IDLE_GRACE_SEC` | `75` | Idle grace period (in seconds) to keep tuner session active after client disconnects |
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Stream MPEG-TS null packets (PID 0x1FFF) immediately on cold tunes to satisfy Plex grabber timeouts |
 | `STREAM_PRE_ROLL_INTERVAL_MS` | `100` | Pre-roll keepalive emission interval in milliseconds |
 | `STREAM_PRE_ROLL_PACKETS` | `7` | Number of 188-byte MPEG-TS null packets per pre-roll emission chunk (7 packets = 1316 bytes) |

@@ -95,7 +95,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | `PROXY_IP` | `127.0.0.1` | IP address for proxy to bind |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit MPEG-TS null packets during cold tune to prevent client timeouts |
-| `SESSION_IDLE_GRACE_SEC` | `45` | Idle grace period (in seconds) to retain tuner session |
+| `SESSION_IDLE_GRACE_SEC` | `75` | Idle grace period (in seconds) to retain tuner session |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 
 ## API Endpoints
