@@ -9,7 +9,8 @@ Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibil
 - HDHomeRun device emulation for TabloTV
 - 4th Generation Tablo support (Tablo account / Lighthouse auth)
 - Live TV streaming via MPEG-TS with cold-start keepalive to eliminate client timeouts
-- Resilient HLS session management with automatic tuner recovery and idle grace retention
+- Resilient HLS session management with automatic tuner recovery, zero seen-content replay at live edge, and idle grace retention
+- Plex-optimized stream resilience: keeps clients playing with frozen video during background tuner re-tunes, preventing fatal playback error modals
 - XMLTV program guide generation
 - Channel lineup in HDHomeRun format
 - Docker support with native image builds
@@ -122,6 +123,8 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 
 1. Settings > Live TV & DVR > Set Up Plex DVR
 2. Enter `http://<proxy-ip>:8080` as the tuner address
+
+> **Resilience & Playback Experience**: The proxy is specifically optimized for Plex clients. During broadcast drops or tuner hiccups, it trickles MPEG-TS null packets to keep Plex grabbers warm (displaying a brief frozen frame instead of crashing with playback error dialogs) while re-tuning the Tablo tuner in the background. Streams recover cleanly at the live edge without repeating previously viewed footage, and gracefully terminate only if a channel remains unrecoverable for more than 60 seconds.
 
 ### Jellyfin
 

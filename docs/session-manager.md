@@ -22,6 +22,13 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 
 ## Goals
 
+### Playback Resilience & End-User Experience
+- **Uninterrupted Plex Playback**: Keep Plex clients playing during periods of OTA channel and tuner instability without crashing or requiring manual viewer intervention.
+- **Warm Client Keepalive with Frozen Video**: Keep Plex client grabbers warm with MPEG-TS null packets during upstream recovery retunes, presenting frozen video rather than fatal playback errors.
+- **Live-Edge Resumption (No Content Replay)**: Recover stream playback at the live edge without replaying video or audio segments the client has already seen.
+- **Deterministic 60-Second Teardown**: Terminate the stream cleanly when a channel is unrecoverable for more than 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`).
+
+### Tuner & Session Management
 - One Tablo player session per channel while any proxy client (or idle grace) holds it
 - Multiplex MPEG-TS to N HDHomeRun clients via `BroadcastHub`
 - Seamless keepalive / playlist change / retune for attached clients (no client reconnect required)

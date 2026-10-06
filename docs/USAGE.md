@@ -221,6 +221,11 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 
 1. **Cold Tuning & Pre-Roll Keep-Alive**: Tablo 4th Gen hardware takes 8.5 to 9.0 seconds to lock onto an OTA broadcast frequency and start internal transcoding. Plex Media Server's Live TV grabber times out if zero bytes are received within ~9 seconds. With `STREAM_PRE_ROLL_KEEP_ALIVE=true` (enabled by default), `tablo2hdhomerun` responds immediately with `HTTP 200 OK Chunked` and trickles ISO/IEC 13818-1 compliant MPEG-TS null packets (~100 kbps) to keep Plex's connection alive and active. As soon as the Tablo tuner finishes locking, the stream transitions seamlessly to live broadcast.
 2. **Channel Lineup Cleanup**: In Plex Web (**Settings $\rightarrow$ Live TV & DVR $\rightarrow$ Channels**), disable any un-tunable or weak subchannels (for example, subchannels that return HTTP 503 "No available tuners" due to weak antenna reception). This prevents Plex from automatically attempting to route tuning requests to inactive or unreceivable frequencies.
+3. **Ideal End-User Experience & Failure Recovery**:
+   - **Continuous Playback During Instability**: When OTA reception drops or the Tablo tuner hiccups, Plex clients (Apple TV, iOS, Android TV, Roku, Plex Web) remain in active playback state instead of exiting with fatal error dialogs ("Playback Error" or "Can't Play This: Format isn't supported").
+   - **Frozen Video Over Fatal Errors**: The proxy trickles MPEG-TS null packets every 40 ms to keep Plex client grabbers warm while re-tuning the Tablo tuner in the background. The viewer observes a momentary frozen picture while the signal recovers, requiring zero manual intervention.
+   - **No Seen-Content Replay**: Upon tuner recovery, streaming reconnects strictly at the live edge. Video and audio segments already seen prior to the interruption are never re-sent, preventing disorienting loops or time-warps.
+   - **Graceful 60-Second Outage Cutoff**: If an antenna disconnection or transmission outage prevents re-tuning for more than 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`), the proxy terminates the stream, allowing the Plex client to exit cleanly rather than remaining frozen indefinitely.
 
 ## Streaming a Channel
 

@@ -4,6 +4,17 @@
 
 Tablo2HDHomeRun is an HTTP proxy server that exposes a TabloTV DVR device as an HDHomeRun-compatible tuner. This allows applications and media servers that support HDHomeRun devices (like Plex, Jellyfin, or Channels DVR) to stream live TV from a Tablo device.
 
+## Project Goals & End-User Experience
+
+The primary design goal of Tablo2HDHomeRun is to provide an **optimized, resilient live TV playback experience for Plex clients** (as well as Jellyfin and Channels DVR). Over-the-air (OTA) television reception is subject to RF multipath interference, antenna flutter, and tuner dropouts. Conventional network tuners propagate these interruptions downstream, causing Plex client apps (Apple TV, iOS, Roku, Android TV, Plex Web) to crash playback with fatal error dialogs (e.g., "Playback Error", "Can't Play This: Format isn't supported") and forcing the viewer to manually exit back to the guide and re-tune.
+
+Tablo2HDHomeRun is built to deliver a seamless, couch-friendly viewing experience governed by four core resilience pillars:
+
+1. **Uninterrupted Client Playback**: Plex client apps stay in an active playback state during RF glitches and temporary channel dropouts. The proxy absorbs stream degradations, preventing player termination and eliminating the need for manual viewer intervention.
+2. **Warm Client Keepalive with Frozen Video**: When an upstream Tablo stream stalls or fails, the proxy immediately initiates background hardware re-tuning while continuously streaming standards-compliant MPEG-TS null packets (PID `0x1FFF`) to the client every 40 ms. Downstream Plex grabbers and transcoders stay fed with valid transport stream packets without timing out. The viewer experiences a brief, clean video freeze rather than a crash or error modal.
+3. **Live-Edge Resumption (No Seen-Content Replay)**: When the Tablo tuner recovers and valid broadcast packets resume, playback cuts directly to the live edge. The session manager and HLS poller suppress segments already emitted prior to the dropout, while injecting ISO/IEC 13818-1 discontinuity markers and cached PAT/PMT headers. The viewer never experiences jarring rewind loops, time-warps, or replayed audio/video.
+4. **Deterministic Clean Outage Termination**: If an outage is persistent and the proxy cannot successfully recover the stream after 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`), the stream terminates cleanly. This gracefully ends playback on the Plex client rather than looping keepalive packets indefinitely for an abandoned television or dead channel.
+
 ## Technology Stack
 
 | Component | Technology |
