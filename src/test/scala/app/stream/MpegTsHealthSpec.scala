@@ -161,6 +161,18 @@ class MpegTsHealthSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike wi
       failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
     }
 
+    "fail inline during onPush on continuity jump even when pusi is true with ccMax 0" in {
+      val settings = MpegTsHealth.Settings(windowSec = 3600, ccMax = 0, syncMax = 100, nullRatioMax = 0.9, enforce = true)
+      val stream = videoPacket(0) ++ videoPacket(5, pusi = true)
+      val failed = Source
+        .single(stream)
+        .via(MpegTsHealth.monitor(settings))
+        .runWith(Sink.ignore)
+        .failed
+        .futureValue
+      failed shouldBe a[HlsBackend.HlsError.TsHealthDegraded]
+    }
+
     "inject discontinuity packet before packet with continuity counter jump when enforce is false" in {
       val settings = MpegTsHealth.Settings(windowSec = 10, ccMax = 100, syncMax = 100, nullRatioMax = 0.9, enforce = false)
       val stream = videoPacket(0) ++ videoPacket(5, pusi = true) ++ videoPacket(6)

@@ -23,7 +23,7 @@ object MpegTsHealth {
   , syncMax: Int
   , nullRatioMax: Double
   , enforce: Boolean
-  , teiMax: Int = 10
+  , teiMax: Int = 0
   )
 
   val NullPacketArray: Array[Byte] = {

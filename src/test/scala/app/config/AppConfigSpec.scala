@@ -38,11 +38,11 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.hls.stallPolls shouldBe 10
     val _ = config.stream.hls.heartbeatSec shouldBe 60
     val _ = config.stream.hls.health.windowSec shouldBe 10
-    val _ = config.stream.hls.health.ccMax shouldBe 10
-    val _ = config.stream.hls.health.syncMax shouldBe 3
+    val _ = config.stream.hls.health.ccMax shouldBe 0
+    val _ = config.stream.hls.health.syncMax shouldBe 0
     val _ = config.stream.hls.health.nullRatioMax shouldBe 0.6
     val _ = config.stream.hls.health.enforce shouldBe true
-    val _ = config.stream.hls.health.teiMax shouldBe 3
+    val _ = config.stream.hls.health.teiMax shouldBe 0
     val _ = config.stream.hls.pollFailuresMax shouldBe 4
     val _ = config.mediaRoot shouldBe None
     val _ = loaded.tabloAuth.email shouldBe None
