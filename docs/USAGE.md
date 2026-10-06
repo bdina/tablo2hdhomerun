@@ -159,7 +159,7 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 | `TABLO_PORT` | `8887` (4th gen) / `8885` (legacy) | Tablo device REST API port |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
-| `STREAM_MAX_GAP_SEC` | `45` | Maximum gap (in seconds) before a single HLS attempt is retuned |
+| `STREAM_MAX_GAP_SEC` | `15` | Maximum gap (in seconds) before a single HLS attempt is retuned |
 | `LOG_LEVEL` | (none) | Application log level (e.g. `DEBUG`, `INFO`) |
 | `PEKKO_LOG_LEVEL` | (same as `LOG_LEVEL`) | Pekko/Actor log level; falls back to `LOG_LEVEL` |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
@@ -167,6 +167,12 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 ### Weak OTA / Plex recovery (default `hls` backend)
 
 Recovery retunes automatically on stalls, session end, unauthorized segment responses, range mismatches, or degraded MPEG-TS. Playback stays active while real video flows; null packets keep the HTTP connection alive during gaps. The stream ends when you stop it from the remote, or when `STREAM_RECOVERY_TIMEOUT_SEC` elapses with no real backend data (unattended TV on a dead channel).
+
+Transport data loss during severe OTA signal interruptions (such as antenna flutter or wind gusts) is expected and acceptable. Rather than trying to salvage corrupted slices from a failing signal—which risks leaking damaged macroblocks to downstream hardware decoders (e.g., Plex Intel GPU transcoder) and causing fatal player crashes—the proxy prioritizes hands-free playback continuity:
+1. Degraded or corrupted streams fast-fail immediately based on responsive health thresholds.
+2. `ResilientHlsSource` holds a clean **frozen video frame** by continuously emitting MPEG-TS null packets.
+3. Physical hardware is automatically retuned in the background via `/watch`.
+4. Playback resumes cleanly at the live broadcast edge without seen-content replay or player crashes.
 
 The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 
@@ -192,15 +198,15 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 | `STREAM_RETRY_MAX_BACKOFF_SEC` | `30` | Maximum delay between retune attempts |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | End stream after this many seconds without real backend data |
 | `STREAM_RESILIENT_GAP_THRESHOLD_SEC` | `15` | Minimum null-keepalive gap duration (in seconds) before injecting an MPEG-TS discontinuity packet and cached PAT/PMT on resumption |
-| `STREAM_HLS_STALL_POLLS` | `30` | Playlist polls with no media-sequence advance before retune (~35-40s) |
+| `STREAM_HLS_STALL_POLLS` | `10` | Playlist polls with no media-sequence advance before retune (~10-12s) |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
 | `STREAM_HLS_HEALTH_WINDOW_SEC` | `10` | MPEG-TS health metric sliding window |
-| `STREAM_HLS_CC_ERROR_MAX` | `30` | Continuity-counter errors per window before degraded |
-| `STREAM_HLS_SYNC_LOSS_MAX` | `10` | Sync-byte misalignments per window before degraded |
-| `STREAM_HLS_TEI_ERROR_MAX` | `10` | Transport error indicator (TEI) corrupted packets per window before degraded |
+| `STREAM_HLS_CC_ERROR_MAX` | `10` | Continuity-counter errors per window before degraded |
+| `STREAM_HLS_SYNC_LOSS_MAX` | `3` | Sync-byte misalignments per window before degraded |
+| `STREAM_HLS_TEI_ERROR_MAX` | `3` | Transport error indicator (TEI) corrupted packets per window before degraded |
 | `STREAM_HLS_NULL_RATIO_MAX` | `0.6` | Null-packet fraction per window before degraded |
 | `STREAM_HLS_HEALTH_ENFORCE` | `true` | When `true`, degraded TS fails the stream and triggers retune |
-| `STREAM_HLS_POLL_FAILURES_MAX` | `15` | Consecutive playlist fetch failures before retune |
+| `STREAM_HLS_POLL_FAILURES_MAX` | `4` | Consecutive playlist fetch failures before retune |
 
 ### 4th Generation Variables
 

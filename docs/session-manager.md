@@ -25,6 +25,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 ### Playback Resilience & End-User Experience
 - **Uninterrupted Plex Playback**: Keep Plex clients playing during periods of OTA channel and tuner instability without crashing or requiring manual viewer intervention.
 - **Warm Client Keepalive with Frozen Video**: Keep Plex client grabbers warm with MPEG-TS null packets during upstream recovery retunes, presenting frozen video rather than fatal playback errors.
+- **Acceptable Data Loss During Recovery**: Prioritize stream continuity and frozen-frame keepalive over capturing corrupted slices from dying signals; fast-fail degraded streams immediately, bridge outages with MPEG-TS null packets, and recover cleanly at the live edge.
 - **Live-Edge Resumption (No Content Replay)**: Recover stream playback at the live edge without replaying video or audio segments the client has already seen.
 - **Deterministic 60-Second Teardown**: Terminate the stream cleanly when a channel is unrecoverable for more than 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`).
 
@@ -526,7 +527,7 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Signal degradation / fringe corruption | `MpegTsHealth` sanitizes TEI packets into nulls, respects `discontinuity_indicator`, and enforces health inline in `onPush`; on threshold breach, inner producer fails immediately; `ResilientHlsSource` bridges with null packets while `streamFactory` actively retunes via `/watch` (cleaning up prior tuner token) |
+| Signal degradation / fringe corruption | `MpegTsHealth` sanitizes TEI packets into nulls, respects `discontinuity_indicator`, and enforces health inline in `onPush`; on threshold breach (`ccMax=10`, `syncMax=3`, `teiMax=3`), inner producer fast-fails immediately rather than leaking damaged macroblocks; `ResilientHlsSource` bridges with null packets (clean frozen frame) while `streamFactory` actively retunes via `/watch` (cleaning up prior tuner token) to resume at the live edge |
 | Outer resilient exhaustion / hub complete | Subscribers complete → `Release` drain → IdleGrace → teardown |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 1024 buffer) | That subscriber fails; others continue; that client `Release` |
