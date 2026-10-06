@@ -150,8 +150,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     )
     HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
       case HlsPlaylistPoller.Emit(_, segments) =>
-        segments should have size 1
-        segments.head.byteRange shouldBe Some((0L, 1000L))
+        val _ = segments should have size 1
+        val _ = segments.head.byteRange shouldBe Some((0L, 1000L))
       case _ => fail("expected emit")
     }
   }
@@ -181,8 +181,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val err = new RuntimeException("connection reset")
     HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 3, err) match {
       case HlsPlaylistPoller.Emit(next, segments) =>
-        next.fetchFailures shouldBe 1
-        segments shouldBe empty
+        val _ = next.fetchFailures shouldBe 1
+        val _ = segments shouldBe empty
       case HlsPlaylistPoller.Fail(_) => fail("expected emit on transient failure")
     }
   }

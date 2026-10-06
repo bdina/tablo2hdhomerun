@@ -180,6 +180,8 @@ The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 - 4th gen session teardown (`DELETE /player/sessions/{token}`) when the client disconnects and idle grace expires
 - Fast failure and immediate background recovery retune on fatal playlist HTTP status codes (`404`, `410`, `401`, `403`)
 - Retried ranged segment fetching with backoff to tolerate in-flight Tablo segment write races
+- PES-aligned elementary stream protection: suppresses corrupted mid-frame packet fragments on video/audio PIDs until the next payload unit start indicator (`PUSI`), preventing decoder syntax desynchronization and transcoder crashes (e.g. `slice below image`)
+- Standards-compliant MPEG-TS discontinuity signaling (ISO/IEC 13818-1): emits continuity-counter preserving adaptation-field discontinuity packets on elementary PIDs upon recovery
 
 MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session keepalive are separate mechanisms: the former keeps the HTTP chunked response alive during HLS gaps; the latter renews the Tablo watch session token on the device.
 

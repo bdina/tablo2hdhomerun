@@ -52,7 +52,7 @@ object MpegTsHealth {
       private var totalPackets = 0
       private var warnedDegraded = false
       private val prevCc = mutable.HashMap.empty[Int, Int]
-      private val teiPids = mutable.HashSet.empty[Int]
+      private val resyncPids = mutable.HashSet.empty[Int]
       private var failAsync: org.apache.pekko.stream.stage.AsyncCallback[Throwable] = uninitialized
 
       override def preStart(): Unit = {
@@ -101,7 +101,7 @@ object MpegTsHealth {
           teiErrors += 1
           val pid = pidAt(arr, offset)
           if (pid >= 0x0010 && pid != NullPid) {
-            val _ = teiPids += pid
+            val _ = resyncPids += pid
           }
           System.arraycopy(NullPacketArray, 0, arr, offset, PacketSize)
           nullPackets += 1
@@ -111,6 +111,7 @@ object MpegTsHealth {
           if (pid == NullPid) {
             nullPackets += 1
           }
+          val pusi = (arr(offset + 1) & 0x40) != 0
           val afc = (arr(offset + 3) & 0x30) >> 4
           val hasPayload = (afc & 0x01) != 0
           val hasAdaptation = (afc & 0x02) != 0
@@ -125,36 +126,58 @@ object MpegTsHealth {
             if (pid == NullPid) {
               val b = ByteString.newBuilder
               for (elemPid <- prevCc.keys if elemPid >= 0x0010 && elemPid != NullPid) {
-                b ++= MpegTsSync.discontinuityPacket(elemPid)
+                b ++= MpegTsSync.discontinuityPacket(elemPid, prevCc.getOrElse(elemPid, 0))
               }
               prevCc.clear()
-              teiPids.clear()
+              resyncPids.clear()
               val res = b.result()
               if (res.nonEmpty) {
                 prefix = Some(res)
               }
             } else {
               val _ = prevCc.remove(pid)
-              val _ = teiPids.remove(pid)
+              val _ = resyncPids.remove(pid)
             }
           }
 
           if (hasPayload) {
             val cc = arr(offset + 3) & 0x0F
-            if (!isDiscontinuity) {
-              val hadTeiLoss = teiPids.remove(pid)
-              val ccJump = prevCc.get(pid) match {
-                case Some(prev) => cc != prev && cc != ((prev + 1) & 0x0F)
-                case None => false
+            val isElementary = pid >= 0x0010 && pid != NullPid
+
+            if (isElementary && !isDiscontinuity) {
+              if (resyncPids.contains(pid)) {
+                if (pusi) {
+                  val hadPrev = prevCc.contains(pid)
+                  val _ = resyncPids.remove(pid)
+                  if (hadPrev) {
+                    prefix = Some(MpegTsSync.discontinuityPacket(pid, prevCc.getOrElse(pid, 0)))
+                  }
+                  prevCc(pid) = cc
+                } else {
+                  System.arraycopy(NullPacketArray, 0, arr, offset, PacketSize)
+                  nullPackets += 1
+                  prevCc(pid) = cc
+                }
+              } else {
+                val ccJump = prevCc.get(pid) match {
+                  case Some(prev) => cc != prev && cc != ((prev + 1) & 0x0F)
+                  case None => false
+                }
+                if (ccJump) {
+                  ccErrors += 1
+                  if (pusi) {
+                    prefix = Some(MpegTsSync.discontinuityPacket(pid, prevCc.getOrElse(pid, 0)))
+                  } else {
+                    val _ = resyncPids += pid
+                    System.arraycopy(NullPacketArray, 0, arr, offset, PacketSize)
+                    nullPackets += 1
+                  }
+                }
+                prevCc(pid) = cc
               }
-              if (ccJump) {
-                ccErrors += 1
-              }
-              if ((ccJump || hadTeiLoss) && pid >= 0x0010 && pid != NullPid) {
-                prefix = Some(MpegTsSync.discontinuityPacket(pid))
-              }
+            } else {
+              prevCc(pid) = cc
             }
-            prevCc(pid) = cc
           }
           prefix
         }
@@ -173,11 +196,11 @@ object MpegTsHealth {
             syncLoss += 1
             if (prevCc.nonEmpty) {
               for (elemPid <- prevCc.keys if elemPid >= 0x0010 && elemPid != NullPid) {
-                outBuilder ++= MpegTsSync.discontinuityPacket(elemPid)
+                outBuilder ++= MpegTsSync.discontinuityPacket(elemPid, prevCc.getOrElse(elemPid, 0))
+                val _ = resyncPids += elemPid
               }
               outBuilder ++= MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
               prevCc.clear()
-              teiPids.clear()
             }
             val found = MpegTsSync.findNextSync(buf, pos + 1, length)
             if (found < 0) {

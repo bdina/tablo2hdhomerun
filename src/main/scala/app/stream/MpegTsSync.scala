@@ -124,12 +124,12 @@ object MpegTsSync {
     }
   }
 
-  def discontinuityPacket(pid: Int): ByteString = {
+  def discontinuityPacket(pid: Int, cc: Int = 0): ByteString = {
     val arr = Array.fill[Byte](PacketSize)(0xFF.toByte)
     arr(0) = 0x47.toByte
     arr(1) = ((pid >> 8) & 0x1F).toByte
     arr(2) = (pid & 0xFF).toByte
-    arr(3) = 0x20.toByte // adaptation field only, CC = 0
+    arr(3) = (0x20 | (cc & 0x0F)).toByte // adaptation field only, CC = cc
     arr(4) = 183.toByte  // adaptation field length (188 - 5)
     arr(5) = 0x80.toByte // discontinuity_indicator = 1
     ByteString(arr)

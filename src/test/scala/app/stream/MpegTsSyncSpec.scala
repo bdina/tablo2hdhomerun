@@ -572,7 +572,18 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = pid shouldBe 0x0105
       val _ = packet(3) shouldBe 0x20.toByte
       val _ = packet(4) shouldBe 183.toByte
-      (packet(5) & 0x80) should not be 0
+      val _ = (packet(5) & 0x80) should not be 0
+    }
+
+    "construct a valid 188-byte discontinuity packet for a custom PID with custom CC" in {
+      val packet = MpegTsSync.discontinuityPacket(0x0105, 11)
+      val _ = packet.length shouldBe 188
+      val _ = packet(0) shouldBe 0x47.toByte
+      val pid = ((packet(1) & 0x1F) << 8) | (packet(2) & 0xFF)
+      val _ = pid shouldBe 0x0105
+      val _ = packet(3) shouldBe 0x2B.toByte
+      val _ = packet(4) shouldBe 183.toByte
+      val _ = (packet(5) & 0x80) should not be 0
     }
 
     "extract PCR PID and Video PID from PMT packet in extractPmtStreamPids" in {
