@@ -159,53 +159,46 @@ The native Docker image includes Intel Media driver for QSV hardware acceleratio
 | `TABLO_PORT` | `8887` (4th gen) / `8885` (legacy) | Tablo device REST API port |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
-| `STREAM_MAX_GAP_SEC` | `15` | Maximum gap (in seconds) before a single HLS attempt is retuned |
 | `LOG_LEVEL` | (none) | Application log level (e.g. `DEBUG`, `INFO`) |
 | `PEKKO_LOG_LEVEL` | (same as `LOG_LEVEL`) | Pekko/Actor log level; falls back to `LOG_LEVEL` |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### Weak OTA / Plex recovery (default `hls` backend)
 
-Recovery retunes automatically on stalls, session end, unauthorized segment responses, range mismatches, or degraded MPEG-TS. Playback stays active while real video flows; null packets keep the HTTP connection alive during gaps. The stream ends when you stop it from the remote, or when `STREAM_RECOVERY_TIMEOUT_SEC` elapses with no real backend data (unattended TV on a dead channel).
+Recovery retunes automatically on stalls, session end, unauthorized segment responses, range mismatches, or stream completion. Playback stays active while real video flows; MPEG-TS null packets keep the HTTP connection alive during gaps. The stream ends when you stop it from the remote, or when `STREAM_RECOVERY_TIMEOUT_SEC` elapses with no real backend data (unattended TV on a dead channel).
 
 Transport data loss during severe OTA signal interruptions (such as antenna flutter or wind gusts) is expected and acceptable. Rather than trying to salvage corrupted slices from a failing signal—which risks leaking damaged macroblocks to downstream hardware decoders (e.g., Plex Intel GPU transcoder) and causing fatal player crashes—the proxy prioritizes hands-free playback continuity:
-1. Degraded or corrupted streams fast-fail immediately based on responsive health thresholds.
-2. `ResilientHlsSource` holds a clean **frozen video frame** by continuously emitting MPEG-TS null packets.
-3. Physical hardware is automatically retuned in the background via `/watch`.
-4. Playback resumes cleanly at the live broadcast edge without seen-content replay or player crashes.
+1. Reception drops are detected when no new bytes arrive for `STREAM_STALL_TIMEOUT_SEC` (default 8s), bounding the stall with a watchdog.
+2. `ResilientHlsSource` holds a clean **frozen video frame** by continuously emitting MPEG-TS null packets (PID 0x1FFF) every 40ms.
+3. The old Tablo session is cleanly released (DELETE), followed by a cold physical hardware retune (`POST /watch`, ~11s).
+4. Playback resumes cleanly from the fresh Tablo segment file with a single resume prefix (multi-PID discontinuity + cached PAT/PMT headers), without seen-content replay or player crashes.
 
 The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 
 - HLS v4 `#EXT-X-BYTERANGE` support with HTTP range requests
 - Adaptive playlist polling based on `#EXT-X-TARGETDURATION`
 - Conditional playlist requests when the Tablo device returns `ETag` or `Last-Modified`
-- Strict validation of ranged segment responses (`206` + `Content-Range`)
-- Distinct recovery errors for playlist stalls, segment-not-ready races, and auth failures
+- Short ranged segment reads accepted during reception drops; trailing partial packets cleanly dropped by `MpegTsSync.alignPackets`
+- Distinct recovery errors for session end, segment-not-ready races, and auth failures
 - 4th gen watch-session expiry awareness before recovery retune
 - 4th gen Tablo player-session keepalive (`POST /player/sessions/{token}/keepalive`) while client playback is active
 - 4th gen session teardown (`DELETE /player/sessions/{token}`) when the client disconnects and idle grace expires
 - Fast failure and immediate background recovery retune on fatal playlist HTTP status codes (`404`, `410`, `401`, `403`)
-- Retried ranged segment fetching with backoff to tolerate in-flight Tablo segment write races
-- PES-aligned elementary stream protection: suppresses corrupted mid-frame packet fragments on video/audio PIDs until the next payload unit start indicator (`PUSI`), preventing decoder syntax desynchronization and transcoder crashes (e.g. `slice below image`)
-- Standards-compliant MPEG-TS discontinuity signaling (ISO/IEC 13818-1): emits continuity-counter preserving adaptation-field discontinuity packets on elementary PIDs upon recovery
-- Live-edge recovery drain: cuts directly to the latest 2 segments (`recoveryLiveEdgeSegmentCount = 2`) on retunes and deduplicates via emitted keys to prevent repeating already-viewed broadcast content
+- Cold retune (release then watch) for fresh video after a dropout
+- Single resume prefix injection on retune: multi-PID discontinuity packet plus cached PAT/PMT tables so downstream decoders cleanly reset timelines
+
+> [!NOTE]
+> **Known limitation**: Marginal (not lost) RF reception can cause MPEG-2 slice corruption inside segments that the Tablo writes to the stream. These corrupted macroblocks pass through to Plex, where Plex transcoders may log non-fatal warnings (e.g. `mpeg2video` errors such as `slice below image` or `invalid cbp -1`). The proxy does not attempt to inspect or repair internal video slice data.
 
 MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session keepalive are separate mechanisms: the former keeps the HTTP chunked response alive during HLS gaps; the latter renews the Tablo watch session token on the device.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STREAM_RETRY_MIN_BACKOFF_SEC` | `2` | Minimum delay between retune attempts |
-| `STREAM_RETRY_MAX_BACKOFF_SEC` | `30` | Maximum delay between retune attempts |
-| `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | End stream after this many seconds without real backend data |
-| `STREAM_RESILIENT_GAP_THRESHOLD_SEC` | `15` | Minimum null-keepalive gap duration (in seconds) before injecting an MPEG-TS discontinuity packet and cached PAT/PMT on resumption |
-| `STREAM_HLS_STALL_POLLS` | `10` | Playlist polls with no media-sequence advance before retune (~10-12s) |
+| `STREAM_STALL_TIMEOUT_SEC` | `8` | Seconds without new bytes before cold retuning |
+| `STREAM_TUNE_TIMEOUT_SEC` | `20` | Max seconds to wait for initial or retuned data |
+| `STREAM_RETRY_DELAY_SEC` | `1` | Delay in seconds between retune attempts |
+| `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | Total outage duration before cleanly ending stream |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
-| `STREAM_HLS_HEALTH_WINDOW_SEC` | `10` | MPEG-TS health metric sliding window |
-| `STREAM_HLS_CC_ERROR_MAX` | `0` | Continuity-counter errors per window before degraded (0 for zero-tolerance fast-fail) |
-| `STREAM_HLS_SYNC_LOSS_MAX` | `0` | Sync-byte misalignments per window before degraded (0 for zero-tolerance fast-fail) |
-| `STREAM_HLS_TEI_ERROR_MAX` | `0` | Transport error indicator (TEI) corrupted packets per window before degraded (0 for zero-tolerance fast-fail) |
-| `STREAM_HLS_NULL_RATIO_MAX` | `0.6` | Null-packet fraction per window before degraded |
-| `STREAM_HLS_HEALTH_ENFORCE` | `true` | When `true`, degraded TS fails the stream and triggers retune |
 | `STREAM_HLS_POLL_FAILURES_MAX` | `4` | Consecutive playlist fetch failures before retune |
 
 ### 4th Generation Variables
@@ -230,9 +223,9 @@ MPEG-TS null-packet keepalive (in `ResilientHlsSource`) and Tablo player-session
 2. **Channel Lineup Cleanup**: In Plex Web (**Settings $\rightarrow$ Live TV & DVR $\rightarrow$ Channels**), disable any un-tunable or weak subchannels (for example, subchannels that return HTTP 503 "No available tuners" due to weak antenna reception). This prevents Plex from automatically attempting to route tuning requests to inactive or unreceivable frequencies.
 3. **Ideal End-User Experience & Failure Recovery**:
    - **Continuous Playback During Instability**: When OTA reception drops or the Tablo tuner hiccups, Plex clients (Apple TV, iOS, Android TV, Roku, Plex Web) remain in active playback state instead of exiting with fatal error dialogs ("Playback Error" or "Can't Play This: Format isn't supported").
-   - **Frozen Video Over Fatal Errors**: The proxy trickles MPEG-TS null packets every 40 ms to keep Plex client grabbers warm while re-tuning the Tablo tuner in the background. The viewer observes a momentary frozen picture while the signal recovers, requiring zero manual intervention.
+   - **Frozen Video Over Fatal Errors**: The proxy trickles MPEG-TS null packets every 40 ms to keep Plex client grabbers warm while re-tuning the Tablo tuner in the background. The viewer observes a momentary frozen picture (typically ~20s per dropout) while the signal recovers, requiring zero manual intervention.
    - **No Seen-Content Replay**: Upon tuner recovery, streaming reconnects strictly at the live edge. Video and audio segments already seen prior to the interruption are never re-sent, preventing disorienting loops or time-warps.
-   - **Graceful 60-Second Outage Cutoff**: If an antenna disconnection or transmission outage prevents re-tuning for more than 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`), the proxy terminates the stream, allowing the Plex client to exit cleanly rather than remaining frozen indefinitely.
+   - **Graceful 60-Second Outage Cutoff**: If an antenna disconnection or transmission outage prevents re-tuning for more than 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`), the proxy terminates the stream cleanly, allowing the Plex client to exit cleanly rather than remaining frozen indefinitely; the channel can be re-tuned immediately afterwards.
 
 ## Streaming a Channel
 

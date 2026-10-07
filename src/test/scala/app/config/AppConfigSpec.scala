@@ -30,19 +30,11 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.preRollIntervalMs shouldBe 100
     val _ = config.proxy.preRollPackets shouldBe 7
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
-    val _ = config.stream.resilient.maxGapSec shouldBe 15
-    val _ = config.stream.resilient.retryMinBackoffSec shouldBe 2
-    val _ = config.stream.resilient.retryMaxBackoffSec shouldBe 30
+    val _ = config.stream.resilient.stallTimeoutSec shouldBe 8
+    val _ = config.stream.resilient.tuneTimeoutSec shouldBe 20
+    val _ = config.stream.resilient.retryDelaySec shouldBe 1
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 60
-    val _ = config.stream.resilient.gapThresholdSec shouldBe 15
-    val _ = config.stream.hls.stallPolls shouldBe 10
     val _ = config.stream.hls.heartbeatSec shouldBe 60
-    val _ = config.stream.hls.health.windowSec shouldBe 10
-    val _ = config.stream.hls.health.ccMax shouldBe 0
-    val _ = config.stream.hls.health.syncMax shouldBe 0
-    val _ = config.stream.hls.health.nullRatioMax shouldBe 0.6
-    val _ = config.stream.hls.health.enforce shouldBe true
-    val _ = config.stream.hls.health.teiMax shouldBe 0
     val _ = config.stream.hls.pollFailuresMax shouldBe 4
     val _ = config.mediaRoot shouldBe None
     val _ = loaded.tabloAuth.email shouldBe None
@@ -54,35 +46,33 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
 
   it should "parse integer env vars and fall back on invalid values" in {
     val config = AppConfig.load(Map(
-      "STREAM_MAX_GAP_SEC" -> "120",
-      "STREAM_RETRY_MIN_BACKOFF_SEC" -> "bad",
+      "STREAM_STALL_TIMEOUT_SEC" -> "12",
+      "STREAM_TUNE_TIMEOUT_SEC" -> "30",
+      "STREAM_RETRY_DELAY_SEC" -> "2",
+      "STREAM_RECOVERY_TIMEOUT_SEC" -> "90",
       "SESSION_IDLE_GRACE_SEC" -> "60",
       "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
-      "STREAM_PRE_ROLL_PACKETS" -> "14",
-      "STREAM_RESILIENT_GAP_THRESHOLD_SEC" -> "20"
+      "STREAM_PRE_ROLL_PACKETS" -> "14"
     )).config
-    val _ = config.stream.resilient.maxGapSec shouldBe 120
+    val _ = config.stream.resilient.stallTimeoutSec shouldBe 12
+    val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
+    val _ = config.stream.resilient.retryDelaySec shouldBe 2
+    val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 90
     val _ = config.proxy.idleGraceSec shouldBe 60
     val _ = config.proxy.preRollIntervalMs shouldBe 50
-    val _ = config.proxy.preRollPackets shouldBe 14
-    val _ = config.stream.resilient.gapThresholdSec shouldBe 20
-    config.stream.resilient.retryMinBackoffSec shouldBe 2
+    config.proxy.preRollPackets shouldBe 14
+
+    val fallbackConfig = AppConfig.load(Map(
+      "STREAM_STALL_TIMEOUT_SEC" -> "bad"
+    )).config
+    fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 8
   }
 
-  it should "parse double and bool env vars" in {
+  it should "parse bool env vars" in {
     val config = AppConfig.load(Map(
-      "STREAM_HLS_NULL_RATIO_MAX" -> "0.8",
-      "STREAM_HLS_HEALTH_ENFORCE" -> "true",
-      "STREAM_HLS_TEI_ERROR_MAX" -> "25",
       "STREAM_PRE_ROLL_KEEP_ALIVE" -> "false"
     )).config
-    val _ = config.stream.hls.health.nullRatioMax shouldBe 0.8
-    val _ = config.stream.hls.health.enforce shouldBe true
-    val _ = config.stream.hls.health.teiMax shouldBe 25
-    val _ = config.proxy.enablePreRollKeepAlive shouldBe false
-
-    val notTrue = AppConfig.load(Map("STREAM_HLS_HEALTH_ENFORCE" -> "yes")).config
-    notTrue.stream.hls.health.enforce shouldBe false
+    config.proxy.enablePreRollKeepAlive shouldBe false
   }
 
   it should "resolve 4th-gen key aliases" in {

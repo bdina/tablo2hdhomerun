@@ -367,7 +367,105 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       mgr ! Request.Acquire("ch-drain-test", "client-2", probeB.ref)
       val attachedB = probeB.expectMessageType[Response.Attached]
       val clientBFut = attachedB.source.take(2).runWith(org.apache.pekko.stream.scaladsl.Sink.seq)
-      clientBFut.futureValue.length shouldBe 2
+      val _ = clientBFut.futureValue.length shouldBe 2
+    }
+
+    "tear down and remove a Live session on UpstreamEnded so the next Acquire starts a new runner" in {
+      val runnerCalls = new AtomicInteger(0)
+      val teardownCalls = new AtomicInteger(0)
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager({ (_, self) =>
+        val _ = runnerCalls.incrementAndGet()
+        selfRef.set(self)
+      }, idleGrace = 5.seconds)
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-up-ended", "client-1", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+      selfRef.get() ! Command.CheckIn("ch-up-ended", meta().copy(leaseId = "L1"), hubSource, () => {
+        val _ = teardownCalls.incrementAndGet()
+      })
+      val _ = probe.expectMessageType[Response.Attached]
+
+      // UpstreamEnded for lease L1 triggers immediate teardown and removal
+      mgr ! Command.UpstreamEnded("ch-up-ended", "L1")
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        teardownCalls.get() shouldBe 1
+      }
+
+      // Next acquire must call startRunner again
+      val probe2 = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-up-ended", "client-2", probe2.ref)
+      eventually(timeout(3.seconds), interval(50.millis)) {
+        runnerCalls.get() shouldBe 2
+      }
+    }
+
+    "ignore UpstreamEnded with a stale leaseId" in {
+      val runnerCalls = new AtomicInteger(0)
+      val teardownCalls = new AtomicInteger(0)
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager({ (_, self) =>
+        val _ = runnerCalls.incrementAndGet()
+        selfRef.set(self)
+      }, idleGrace = 5.seconds)
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-stale-lease", "client-1", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+      selfRef.get() ! Command.CheckIn("ch-stale-lease", meta().copy(leaseId = "L2"), hubSource, () => {
+        val _ = teardownCalls.incrementAndGet()
+      })
+      val _ = probe.expectMessageType[Response.Attached]
+
+      // UpstreamEnded with stale lease L1 should be ignored
+      mgr ! Command.UpstreamEnded("ch-stale-lease", "L1")
+      Thread.sleep(100)
+      val _ = teardownCalls.get() shouldBe 0
+
+      // Second acquire attaches to existing Live session without calling startRunner
+      val probe2 = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-stale-lease", "client-2", probe2.ref)
+      val _ = probe2.expectMessageType[Response.Attached]
+      runnerCalls.get() shouldBe 1
+    }
+
+    "tear down an IdleGrace session on UpstreamEnded without waiting for grace expiry" in {
+      val teardownCalls = new AtomicInteger(0)
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager({ (_, self) =>
+        selfRef.set(self)
+      }, idleGrace = 60.seconds)
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-idle-ended", "client-1", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+      selfRef.get() ! Command.CheckIn("ch-idle-ended", meta().copy(leaseId = "L1"), hubSource, () => {
+        val _ = teardownCalls.incrementAndGet()
+      })
+      val _ = probe.expectMessageType[Response.Attached]
+
+      // Client releases -> enters 60s IdleGrace
+      mgr ! Request.Release("ch-idle-ended", "client-1")
+      Thread.sleep(100)
+      val _ = teardownCalls.get() shouldBe 0
+
+      // UpstreamEnded arrives during IdleGrace -> teardown immediately
+      mgr ! Command.UpstreamEnded("ch-idle-ended", "L1")
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        teardownCalls.get() shouldBe 1
+      }
+
+      // Later GraceExpired should not invoke teardown again
+      mgr ! Command.GraceExpired("ch-idle-ended")
+      Thread.sleep(100)
+      teardownCalls.get() shouldBe 1
     }
   }
 }

@@ -940,6 +940,15 @@ object Tablo4thGen {
 
       def playlistChanged(before: Session, after: Session): Boolean =
         before.playlistUrl != after.playlistUrl
+
+      /** Release the previous Tablo session before re-watching so the device performs a cold tune
+        * (fresh tuner lock + new segment file) instead of re-attaching to a stalled pipeline.
+        * A failed release is ignored; the tune always runs. */
+      def releaseThenTune[A](
+        release: () => Future[Unit]
+      , tune: () => Future[A]
+      )(implicit ec: scala.concurrent.ExecutionContext): Future[A] =
+        Try(release()).fold(Future.failed, identity).recover { case _ => () }.flatMap(_ => tune())
     }
 
     object SessionManager {
@@ -990,6 +999,7 @@ object Tablo4thGen {
       , expires: Option[java.time.Instant]
       , keepalive: Option[Int]
       , playlistUrl: String
+      , leaseId: String = ""
       )
 
       sealed trait Command extends Request
@@ -1006,6 +1016,7 @@ object Tablo4thGen {
 
         case class AcquireFailed(channelId: String, cause: Throwable) extends Command
         case class GraceExpired(channelId: String) extends Command
+        case class UpstreamEnded(channelId: String, leaseId: String) extends Command
       }
 
       private sealed trait SessionState
@@ -1223,6 +1234,20 @@ object Tablo4thGen {
                 context.log.debug("[session] grace-expired ignored channelId={}", channelId)
             }
             Behaviors.same
+
+          case Command.UpstreamEnded(channelId, leaseId) =>
+            sessions.get(channelId) match {
+              case Some(live: SessionState.Live) if live.meta.leaseId == leaseId =>
+                context.log.warn("[session] upstream-ended channelId={} clients={}", channelId, live.clientIds.size)
+                teardownAndRemove(channelId, live.teardown)
+              case Some(idle: SessionState.IdleGrace) if idle.meta.leaseId == leaseId =>
+                val _ = idle.graceTimer.cancel()
+                context.log.warn("[session] upstream-ended channelId={} during idle-grace", channelId)
+                teardownAndRemove(channelId, idle.teardown)
+              case _ =>
+                context.log.debug("[session] upstream-ended ignored channelId={} leaseId={}", channelId, leaseId)
+            }
+            Behaviors.same
         }
       }
     }
@@ -1233,6 +1258,7 @@ object Tablo4thGen {
       , authContext: Auth.AuthContext
       , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit, AtomicReference[MpegTsSync.CachedHeaders]) => Unit
       , onFailed: Throwable => Unit
+      , onUpstreamEnded: String => Unit
       )(implicit system: ActorSystem[?]): Unit = {
         implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
         val HttpCtx = Http()
@@ -1459,14 +1485,16 @@ object Tablo4thGen {
               streamFromWatchSession(session, streamKillSwitch, lastSeqRef)
             } else {
               log.info("[4thgen-channel] recovery retune attempt={} channelId={}", attempt, channelId)
+              keepaliveTask.foreach(_.cancel())
+              val oldToken = currentSession.get().token
               Source.futureSource(
-                retuneWatchSession().map { newSession =>
-                  val oldToken = currentSession.get().token
+                WatchSession.releaseThenTune(
+                  release = () => oldToken.map(endSession).getOrElse(Future.successful(()))
+                , tune = () => retuneWatchSession()
+                ).map { newSession =>
                   currentSession.set(newSession)
-                  keepaliveTask.foreach(_.cancel())
                   scheduleKeepalive()
                   lastSeqRef.set(0)
-                  endSessionIfNeeded(oldToken, newSession.token)
                   streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true)
                 }(ec)
               )
@@ -1481,13 +1509,12 @@ object Tablo4thGen {
             val _ = headersReadyPromise.trySuccess(())
           }
 
-          val (outerKillSwitch, hubSource) =
+          val ((outerKillSwitch, upstreamDone), hubSource) =
             ResilientHlsSource(
               streamFactory = () => streamFactory()
             , streamName = s"4thgen-channel-$channelId"
             , resumePrefixSupplier = () => Some(cachedHeadersRef.get().syncPrefix)
             )
-              .via(MpegTsSync.dedupConsecutiveDiscontinuity)
               .via(MpegTsSync.cacheFlow(cachedHeadersRef, updated => {
                 SessionManager.setCachedHeaders(channelId, updated)
                 if (updated.pat.isDefined && updated.pmt.isDefined) {
@@ -1495,6 +1522,7 @@ object Tablo4thGen {
                 }
               }))
               .viaMat(KillSwitches.single)(Keep.right)
+              .watchTermination()(Keep.both)
               .toMat(BroadcastHub.sink[ByteString](SessionManager.BroadcastHubBufferSize))(Keep.both)
               .run()
 
@@ -1512,6 +1540,7 @@ object Tablo4thGen {
           , expires = firstSession.expires
           , keepalive = firstSession.keepalive
           , playlistUrl = firstSession.playlistUrl
+          , leaseId = leaseId
           )
 
           val teardown: () => Unit = () => {
@@ -1527,9 +1556,37 @@ object Tablo4thGen {
             val _ = headersReadyPromise.trySuccess(())
           }(ec)
 
+          // Serializes check-in vs upstream-ended so SessionManager always sees them in order.
+          val lifecycleLock = new Object
+          var checkedIn = false
+
           headersReadyPromise.future.onComplete { _ =>
-            if (!tornDown.get()) {
-              onCheckIn(meta, hubSource, teardown, cachedHeadersRef)
+            lifecycleLock.synchronized {
+              if (!tornDown.get() && !checkedIn) {
+                checkedIn = true
+                onCheckIn(meta, hubSource, teardown, cachedHeadersRef)
+              }
+            }
+          }(ec)
+
+          // Upstream ended on its own (recovery timeout or failure): release the Tablo session and
+          // remove the SessionManager entry so the channel is immediately re-tunable.
+          upstreamDone.onComplete { result =>
+            lifecycleLock.synchronized {
+              if (!tornDown.get()) {
+                log.warn("[channel] upstream ended leaseId={} channelId={} result={}", leaseId, channelId, result)
+                teardown()
+                if (checkedIn) {
+                  onUpstreamEnded(leaseId)
+                } else {
+                  checkedIn = true
+                  val cause = result match {
+                    case Failure(ex) => ex
+                    case Success(_) => Tablo4thGen.Error.WatchFailed("stream ended before check-in")
+                  }
+                  onFailed(cause)
+                }
+              }
             }
           }(ec)
         }

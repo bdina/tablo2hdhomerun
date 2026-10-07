@@ -53,6 +53,20 @@ object MpegTsSync {
     b.result()
   }
 
+  /** Emits only whole 188-byte packets. A trailing partial packet is dropped on completion
+    * (e.g. a short ranged read during a reception drop); missing data is acceptable. */
+  def alignPackets: Flow[ByteString, ByteString, NotUsed] =
+    Flow[ByteString]
+      .statefulMap(() => ByteString.empty)(
+        (carry, chunk) => {
+          val all = carry ++ chunk
+          val whole = (all.length / PacketSize) * PacketSize
+          (all.drop(whole), all.take(whole))
+        }
+      , _ => None
+      )
+      .filter(_.nonEmpty)
+
   def isValidPacketHeader(arr: Array[Byte], offset: Int, len: Int): Boolean =
     offset >= 0 &&
     offset + PacketSize <= len &&
@@ -118,9 +132,7 @@ object MpegTsSync {
 
         val delayedRealSource = Source.futureSource(realSourceFuture)
         preRollSource
-          .concat(Source.single(MPEGTS_DISCONTINUITY_PACKET))
           .concat(delayedRealSource)
-          .via(dedupConsecutiveDiscontinuity)
     }
   }
 
@@ -133,87 +145,6 @@ object MpegTsSync {
     arr(4) = 183.toByte  // adaptation field length (188 - 5)
     arr(5) = 0x80.toByte // discontinuity_indicator = 1
     ByteString(arr)
-  }
-
-  def dedupConsecutiveDiscontinuity: Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new DedupDiscontinuityStage)
-
-  private final class DedupDiscontinuityStage extends GraphStage[FlowShape[ByteString, ByteString]] {
-    val in: Inlet[ByteString] = Inlet("DedupDiscontinuity.in")
-    val out: Outlet[ByteString] = Outlet("DedupDiscontinuity.out")
-    override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
-
-    override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
-      private var carry: ByteString = ByteString.empty
-      private var lastDiscontinuityPid: Option[Int] = None
-
-      private def discontinuityPid(bs: ByteString, offset: Int): Option[Int] =
-        if (
-          bs.length >= offset + PacketSize &&
-          bs(offset) == 0x47.toByte &&
-          (bs(offset + 3) & 0x20) != 0 &&
-          (bs(offset + 4) & 0xFF) >= 1 &&
-          (bs(offset + 5) & 0x80) != 0
-        ) {
-          Some(((bs(offset + 1) & 0x1F) << 8) | (bs(offset + 2) & 0xFF))
-        } else None
-
-      setHandler(in, new InHandler {
-        override def onPush(): Unit = {
-          val incoming = grab(in)
-          val combined = carry ++ incoming
-          val fullLen = (combined.length / PacketSize) * PacketSize
-          if (fullLen == 0) {
-            carry = combined
-            pull(in)
-          } else {
-            carry = combined.drop(fullLen)
-            var pos = 0
-            val filtered = ByteString.newBuilder
-            var droppedAny = false
-
-            while (pos + PacketSize <= fullLen) {
-              discontinuityPid(combined, pos) match {
-                case Some(pid) =>
-                  if (lastDiscontinuityPid.contains(pid)) {
-                    droppedAny = true
-                  } else {
-                    lastDiscontinuityPid = Some(pid)
-                    filtered ++= combined.slice(pos, pos + PacketSize)
-                  }
-                case None =>
-                  lastDiscontinuityPid = None
-                  filtered ++= combined.slice(pos, pos + PacketSize)
-              }
-              pos += PacketSize
-            }
-
-            if (!droppedAny && carry.isEmpty) {
-              push(out, combined)
-            } else {
-              val result = filtered.result()
-              if (result.nonEmpty) {
-                push(out, result)
-              } else {
-                pull(in)
-              }
-            }
-          }
-        }
-
-        override def onUpstreamFinish(): Unit = {
-          val fullLen = (carry.length / PacketSize) * PacketSize
-          if (fullLen > 0) {
-            emit(out, carry.take(fullLen))
-          }
-          completeStage()
-        }
-      })
-
-      setHandler(out, new OutHandler {
-        override def onPull(): Unit = pull(in)
-      })
-    }
   }
 
   final case class PmtStreamPids(pcrPid: Option[Int], videoPid: Option[Int])

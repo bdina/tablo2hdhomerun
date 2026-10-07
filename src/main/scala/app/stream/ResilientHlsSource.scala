@@ -11,7 +11,6 @@ import org.slf4j.LoggerFactory
 
 import app.AppContext
 
-import scala.compiletime.uninitialized
 import scala.concurrent.duration._
 
 object ResilientHlsSource {
@@ -32,131 +31,135 @@ object ResilientHlsSource {
 
   val MPEGTS_DISCONTINUITY_PACKET: ByteString = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
 
+  final class StallTimeoutException(message: String) extends java.util.concurrent.TimeoutException(message)
+
   private sealed trait Elem
-  private final case class Real(data: ByteString, isResumed: Boolean = false) extends Elem
+  private final case class Real(data: ByteString) extends Elem
   private case object GapFill extends Elem
-
-  val defaultGapThreshold: FiniteDuration = 15.seconds
-
-  def defaultThreshold: FiniteDuration =
-    Option(AppContext.config).map(_.stream.resilient.gapThresholdSec.seconds).getOrElse(defaultGapThreshold)
 
   def apply(
     streamFactory: () => Source[ByteString, ?]
   , streamName: String
   , recoveryTimeout: FiniteDuration = AppContext.config.stream.resilient.recoveryTimeoutSec.seconds
-  , minBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMinBackoffSec.seconds
-  , maxBackoff: FiniteDuration = AppContext.config.stream.resilient.retryMaxBackoffSec.seconds
+  , stallTimeout: FiniteDuration = AppContext.config.stream.resilient.stallTimeoutSec.seconds
+  , tuneTimeout: FiniteDuration = AppContext.config.stream.resilient.tuneTimeoutSec.seconds
+  , retryDelay: FiniteDuration = AppContext.config.stream.resilient.retryDelaySec.seconds
   , resumePrefixSupplier: () => Option[ByteString] = () => None
-  , gapThreshold: FiniteDuration = defaultThreshold
   ): Source[ByteString, ?] = {
-    val maxGapSec = AppContext.config.stream.resilient.maxGapSec
-
-    val restartSettings = RestartSettings(
-      minBackoff = minBackoff
-    , maxBackoff = maxBackoff
-    , randomFactor = 0.2
-    )
+    // Fixed delay between retunes (min == max, no jitter): predictable freeze length.
+    val restartSettings = RestartSettings(minBackoff = retryDelay, maxBackoff = retryDelay, randomFactor = 0.0)
     val attempts = new java.util.concurrent.atomic.AtomicInteger(0)
     RestartSource.withBackoff(restartSettings) { () =>
       val n = attempts.incrementAndGet()
       if (n == 1) log.info(s"[$streamName] stream connect attempt=$n")
       else log.warn(s"[$streamName] stream recovery retune attempt=$n")
-      val inner = streamFactory().idleTimeout(maxGapSec.seconds)
-      if (n > 1) {
+      val inner = streamFactory().via(StallWatchdog.flow(tuneTimeout, stallTimeout, streamName))
+      if (n == 1) {
+        inner.map(data => Real(data))
+      } else {
+        // The single resume injection point: discontinuity + cached PAT/PMT before new live video.
         val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
         inner.statefulMapConcat { () =>
           var isFirst = true
           chunk =>
             if (isFirst) {
               isFirst = false
-              List(Real(prefix ++ chunk, isResumed = true))
+              List(Real(prefix ++ chunk))
             } else {
-              List(Real(chunk, isResumed = false))
+              List(Real(chunk))
             }
         }
-      } else {
-        inner.map(data => Real(data, isResumed = false))
       }
     }
     .keepAlive(nullPacketIntervalMs.millis, () => GapFill)
-    .via(RecoveryTimeout.flow(recoveryTimeout, streamName, resumePrefixSupplier, gapThreshold))
+    .via(RecoveryTimeout.flow(recoveryTimeout, streamName))
     .map {
-      case Real(data, _) => data
+      case Real(data) => data
       case GapFill => MPEGTS_NULL_PACKET
+    }
+  }
+
+  // Fails the inner (per-tune) stream when it stops making progress, which triggers a retune.
+  // Before the first element the longer tune timeout applies (cold /watch takes ~11s).
+  private object StallWatchdog {
+    def flow(tuneTimeout: FiniteDuration, stallTimeout: FiniteDuration, streamName: String): Flow[ByteString, ByteString, NotUsed] =
+      Flow.fromGraph(new Stage(tuneTimeout, stallTimeout, streamName))
+
+    private final class Stage(
+      tuneTimeout: FiniteDuration
+    , stallTimeout: FiniteDuration
+    , streamName: String
+    ) extends GraphStage[FlowShape[ByteString, ByteString]] {
+      val in: Inlet[ByteString] = Inlet("StallWatchdog.in")
+      val out: Outlet[ByteString] = Outlet("StallWatchdog.out")
+      override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
+
+      override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with InHandler with OutHandler {
+        private var started = false
+
+        override def preStart(): Unit = scheduleOnce("watchdog", tuneTimeout)
+
+        override def onPush(): Unit = {
+          started = true
+          scheduleOnce("watchdog", stallTimeout)
+          push(out, grab(in))
+        }
+
+        override def onPull(): Unit = pull(in)
+
+        override protected def onTimer(timerKey: Any): Unit = {
+          val detail =
+            if (started) s"no new data for ${stallTimeout.toSeconds}s"
+            else s"tune produced no data within ${tuneTimeout.toSeconds}s"
+          log.warn(s"[$streamName] $detail, retuning")
+          failStage(new StallTimeoutException(s"$streamName $detail"))
+        }
+
+        setHandlers(in, out, this)
+      }
     }
   }
 
   // After keepAlive: only Real backend bytes reset the timer; null keepalive does not.
   private object RecoveryTimeout {
-    def flow(
-      timeout: FiniteDuration
-    , streamName: String
-    , resumePrefixSupplier: () => Option[ByteString] = () => None
-    , gapThreshold: FiniteDuration = defaultThreshold
-    ): Flow[Elem, Elem, NotUsed] =
-      Flow.fromGraph(new Stage(timeout, streamName, resumePrefixSupplier, gapThreshold))
+    def flow(timeout: FiniteDuration, streamName: String): Flow[Elem, Elem, NotUsed] =
+      Flow.fromGraph(new Stage(timeout, streamName))
 
-    private final class Stage(
-      timeout: FiniteDuration
-    , streamName: String
-    , resumePrefixSupplier: () => Option[ByteString]
-    , gapThreshold: FiniteDuration
-    ) extends GraphStage[FlowShape[Elem, Elem]] {
+    private final class Stage(timeout: FiniteDuration, streamName: String) extends GraphStage[FlowShape[Elem, Elem]] {
       val in: Inlet[Elem] = Inlet("RecoveryTimeout.in")
       val out: Outlet[Elem] = Outlet("RecoveryTimeout.out")
       override val shape: FlowShape[Elem, Elem] = FlowShape(in, out)
 
-      override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) {
+      override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with InHandler with OutHandler {
         private var lastRealNanos = System.nanoTime()
         private var hadGap = false
         private val checkInterval = (timeout / 4).max(50.millis)
-        private var failAsync: org.apache.pekko.stream.stage.AsyncCallback[Throwable] = uninitialized
 
-        override def preStart(): Unit = {
-          failAsync = getAsyncCallback(failStage)
-          scheduleWithFixedDelay("recovery-check", checkInterval, checkInterval)
-        }
+        override def preStart(): Unit = scheduleWithFixedDelay("recovery-check", checkInterval, checkInterval)
 
-        override protected def onTimer(timerKey: Any): Unit = {
+        override protected def onTimer(timerKey: Any): Unit =
           if (System.nanoTime() - lastRealNanos > timeout.toNanos) {
-            log.error(s"[$streamName] recovery timeout ${timeout.toSeconds}s with no real data, ending stream")
-            failAsync.invoke(new java.util.concurrent.TimeoutException(s"$streamName recovery timeout"))
+            log.error(s"[$streamName] no real data for ${timeout.toSeconds}s, ending stream")
+            completeStage()
           }
+
+        override def onPush(): Unit = {
+          val elem = grab(in)
+          elem match {
+            case Real(_) =>
+              val now = System.nanoTime()
+              if (hadGap) log.info(s"[$streamName] real data resumed after ${(now - lastRealNanos) / 1000000}ms")
+              hadGap = false
+              lastRealNanos = now
+            case GapFill =>
+              hadGap = true
+          }
+          push(out, elem)
         }
 
-        setHandler(in, new InHandler {
-          override def onPush(): Unit = {
-            val elem = grab(in)
-            elem match {
-              case Real(data, isResumed) =>
-                val nowNanos = System.nanoTime()
-                val gapNanos = nowNanos - lastRealNanos
-                val isLongGap = !isResumed && hadGap && (gapNanos > gapThreshold.toNanos)
-                val toPush = if (isLongGap) {
-                  log.info(s"[$streamName] gap-fill ended after ${gapNanos / 1000000}ms, real data resumed with discontinuity marker")
-                  hadGap = false
-                  val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
-                  Real(prefix ++ data)
-                } else {
-                  if (isResumed) {
-                    log.info(s"[$streamName] stream retuned after ${gapNanos / 1000000}ms, real data resumed with discontinuity marker")
-                  }
-                  hadGap = false
-                  elem
-                }
-                lastRealNanos = nowNanos
-                push(out, toPush)
-              case GapFill =>
-                hadGap = true
-                push(out, elem)
-            }
-          }
-        })
+        override def onPull(): Unit = pull(in)
 
-        setHandler(out, new OutHandler {
-          override def onPull(): Unit = pull(in)
-        })
+        setHandlers(in, out, this)
       }
     }
   }

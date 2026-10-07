@@ -163,6 +163,8 @@ object Tablo2HDHomeRun {
                   self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.CheckIn(channelId, meta, hubSource, teardown, cachedHeaders)
               , onFailed = cause =>
                   self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.AcquireFailed(channelId, cause)
+              , onUpstreamEnded = endedLeaseId =>
+                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.UpstreamEnded(channelId, endedLeaseId)
               )
             }
           , totalTuners = tuners

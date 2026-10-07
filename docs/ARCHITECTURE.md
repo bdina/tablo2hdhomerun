@@ -11,21 +11,19 @@ The primary design goal of Tablo2HDHomeRun is to provide an **optimized, resilie
 Tablo2HDHomeRun is built to deliver a seamless, couch-friendly viewing experience governed by four core resilience pillars:
 
 1. **Uninterrupted Client Playback**: Plex client apps stay in an active playback state during RF glitches and temporary channel dropouts. The proxy absorbs stream degradations, preventing player termination and eliminating the need for manual viewer intervention.
-2. **Warm Client Keepalive with Frozen Video**: When an upstream Tablo stream stalls or fails, the proxy immediately initiates background hardware re-tuning while continuously streaming standards-compliant MPEG-TS null packets (PID `0x1FFF`) to the client every 40 ms. Downstream Plex grabbers and transcoders stay fed with valid transport stream packets without timing out. The viewer experiences a brief, clean video freeze rather than a crash or error modal.
-3. **Live-Edge Resumption (No Seen-Content Replay)**: When the Tablo tuner recovers and valid broadcast packets resume, playback cuts directly to the live edge. The session manager and HLS poller suppress segments already emitted prior to the dropout, while injecting ISO/IEC 13818-1 discontinuity markers and cached PAT/PMT headers. The viewer never experiences jarring rewind loops, time-warps, or replayed audio/video.
-4. **Deterministic Clean Outage Termination**: If an outage is persistent and the proxy cannot successfully recover the stream after 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`), the stream terminates cleanly. This gracefully ends playback on the Plex client rather than looping keepalive packets indefinitely for an abandoned television or dead channel.
+2. **Warm Client Keepalive with Frozen Video**: When an upstream Tablo stream stalls or fails, the proxy continuously streams standards-compliant MPEG-TS null packets (PID `0x1FFF`) to the client every 40 ms while releasing the old Tablo session and performing a cold tune (`/watch`). Downstream Plex grabbers and transcoders stay fed with valid transport stream packets without timing out. The viewer experiences a clean video freeze rather than a crash or error modal.
+3. **Live-Edge Resumption (No Seen-Content Replay)**: When the Tablo tuner recovers after a cold tune and valid broadcast packets resume from a fresh segment file, playback cuts directly to the live edge. A single resume prefix (multi-PID discontinuity + cached PAT/PMT headers) informs downstream decoders of the timeline reset without jarring rewind loops or replayed audio/video.
+4. **Deterministic Clean Outage Termination**: If an outage is persistent and the proxy cannot successfully recover the stream after 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`) without new bytes, the stream terminates cleanly. The session manager removes the entry immediately so the channel is re-tunable right away.
 
 ### Acceptable Data Loss & Resiliency Philosophy
 
 Over-the-air broadcast streams during antenna flutter, wind gusts, or fringe reception inevitably suffer transport data loss. The proxy's design deliberately prioritizes **uninterrupted client playback and zero human intervention over attempting to salvage corrupted slices from degraded streams**.
 
-Attempting to limp through severe bitstream errors by passing partial frames downstream poses a catastrophic risk to hardware-accelerated decoders (e.g., Plex's Intel GPU/QSV transcoder), which crash on corrupted macroblock patterns (such as `invalid cbp -1` or `Warning MVs not available`) and display fatal error dialogs ("Playback Error: Recording failed. Please check your tuner or antenna").
-Instead, Tablo2HDHomeRun treats missing broadcast data during recovery as entirely acceptable and expected:
-- The moment signal degradation, packet drops, or TEI errors occur, `MpegTsHealth` operates with zero-tolerance thresholds (`ccMax = 0`, `teiMax = 0`, `syncMax = 0`) and instantly fast-fails the inner stream rather than leaking damaged macroblocks or corrupted slices downstream (which trigger fatal decoder syntax aborts like `slice below image` or `Missing picture start code`).
-- `ResilientHlsSource` absorbs the outage by continuously emitting standards-compliant MPEG-TS null packets (PID `0x1FFF`) every 40 ms. This keeps the HTTP transfer and client grabbers fully active while presenting the viewer with a clean, stable **frozen video frame** during the reception drop.
-- In the background, the proxy re-tunes the physical hardware tuner (`/watch`) to re-acquire clean signal lock.
-- Once signal stability returns, the stream resumes cleanly at the live broadcast edge (`recoveryLiveEdgeSegmentCount = 2`). `ResilientHlsSource` and `MpegTsSync` prepend ISO/IEC 13818-1 multi-PID discontinuity markers and cached PAT/PMT tables so downstream decoders reset timelines and decode new live frames without choking on the missing gap.
-- The viewer experiences a brief frozen frame during the gust of wind and playback automatically resumes hands-free, completely eliminating playback aborts and error modals.
+- **Detect dropouts by lack of progress**: Dropouts are detected when no new bytes arrive for `STREAM_STALL_TIMEOUT_SEC` (default 8s), not by TS packet error counters. The Tablo 4th gen repackages broadcast MPEG-2 into clean TS framing even when RF reception drops, so CC/TEI checks do not detect ATSC signal loss.
+- **Cold retune with fixed delay**: When a stall occurs, the proxy explicitly sends a DELETE request to release the old Tablo session, then executes a cold `POST /watch` (~11s hardware tune) with a fixed `STREAM_RETRY_DELAY_SEC` (default 1s) between retune attempts. `STREAM_TUNE_TIMEOUT_SEC` (default 20s) bounds each tune attempt.
+- **Tolerant segment fetching**: Short ranged segment reads are accepted when the segment stops growing during a reception drop. Trailing partial packets are cleanly dropped by `MpegTsSync.alignPackets`. Missing data during recovery is expected and accepted.
+- **Predictable freeze duration**: A typical dropout recovery cycle takes approximately 8s (stall watchdog) + 1s (retry delay) + ~11s (cold `/watch` tune) ≈ 20s of frozen frame.
+- **Known limitation**: Marginal (not lost) RF reception can cause MPEG-2 slice corruption inside segments that the Tablo writes to the stream. These corrupted macroblocks pass through to Plex, where Plex transcoders may log non-fatal warnings (e.g. `mpeg2video` errors such as `slice below image` or `invalid cbp -1`). The proxy does not attempt to inspect or repair internal video slice data.
 
 ## Technology Stack
 
@@ -122,17 +120,19 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 
 The live channel stream can use one of two backends, selected by `STREAM_BACKEND`:
 
-- **hls** (default): Fetches M3U8 playlists and TS segments directly via HTTP; no external process. Optimized for HLS v4 byte-range playlists with adaptive polling, conditional playlist requests (`ETag` / `Last-Modified`), safe byte-range validation (filtering zero-length or negative sub-ranges to prevent range header errors), strict `206 Partial Content` validation for ranged segment fetches, and status-aware segment recovery. Wrapped by `ResilientHlsSource` for null-packet padding and retune backoff. On initial tune, the poller starts with 3 live-edge segments (`liveEdgeSegmentCount = 3`); upon recovery retunes, it cuts directly to the latest 2 segments (`recoveryLiveEdgeSegmentCount = 2`) and filters out any segment keys already emitted (`emittedKeys`) to guarantee zero seen-content replay.
+- **hls** (default): Fetches M3U8 playlists and TS segments directly via HTTP; no external process. Optimized for HLS v4 byte-range playlists with adaptive polling, conditional playlist requests (`ETag` / `Last-Modified`), safe byte-range validation (filtering zero-length or negative sub-ranges to prevent range header errors), tolerant `206 Partial Content` validation for ranged segment fetches (accepting short reads during reception drops), and per-segment packet alignment via `MpegTsSync.alignPackets` (cleanly dropping trailing partial packets).
 - **ffmpeg**: Spawns an FFmpeg subprocess to convert HLS to MPEG-TS. Requires FFmpeg on PATH. Includes reconnect and error-detect flags to survive transient stream drops.
 
-The resulting stream is monitored by `MpegTsHealth` and wrapped by `ResilientHlsSource`. `MpegTsHealth` sanitizes corrupt packets marked with the Transport Error Indicator (TEI) bit into MPEG-TS null packets (PID 0x1FFF) to protect downstream decoders (such as Plex's FFmpeg transcoder) from bitstream crashes. It checks for signaled discontinuities (`discontinuity_indicator = 1` in adaptation fields) to avoid false continuity counter penalties on resets, and evaluates health degradation inline during packet streaming (`onPush`) as well as across sliding time windows. When error thresholds (default `ccMax=10`, `syncMax=3`, `teiMax=3`) are breached, `MpegTsHealth` triggers instant stream degradation rather than allowing corrupt slices to overwhelm decoders. To prevent downstream decoder syntax crashes (such as FFmpeg `slice below image` or Apple VideoToolbox aborts), `MpegTsHealth` tracks elementary stream PIDs and suppresses corrupted mid-frame packet fragments (`PUSI = 0`) following TEI or continuity jumps until the next payload unit start indicator (`PUSI = 1`), while preserving continuity counters on injected discontinuity adaptation fields. If the stream backend fails, degrades, or connection to the Tablo drops, `ResilientHlsSource` automatically injects MPEG-TS null packets every 40ms to keep the HTTP chunked transfer alive, preventing downstream players like Plex from disconnecting. While bridging gaps with null packets for up to `STREAM_RECOVERY_TIMEOUT_SEC` (default 60s), the proxy actively retunes the physical Tablo hardware via `/watch` and cleans up old tuner leases on the device. When real data resumes after gap fill, `ResilientHlsSource` prepends cached PAT/PMT headers and multi-PID discontinuity marker packets (video PID, PCR PID, and null PID) to inform downstream decoders that frame state and timestamps reset. It also implements an `idleTimeout` and `RestartSource.withBackoff` to retry connection to the backend and enforce a maximum outage gap.
-Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.dedupConsecutiveDiscontinuity` and `MpegTsSync.cacheFlow`. `MpegTsSync.cacheFlow` enforces strict 188-byte packet framing starting with `0x47`, validates unscrambled broadcast transport streams and non-reserved PIDs, uses multi-packet sync lock confirmation in `findNextSync` to prevent locking onto compressed video payloads during OTA noise, sanitizes TEI-corrupted packets into MPEG-TS null packets, and continuously captures the latest PAT (Program Association Table) on PID 0, PMT (Program Map Table), PCR PID, and elementary video PID. Streams fan out to subscribers via a 1024-element `BroadcastHub` smoothing buffer (providing 4–8 seconds of absorption against transcoder backpressure). When new or reconnecting clients attach to the hub, `MpegTsSync.primeClientSource` prepends the cached PAT, PMT, and multi-PID discontinuity packets, guaranteeing that decoders (like FFmpeg in Plex) always receive valid stream parameters, recognize stream resets across retunes, and never encounter framing or decoder crashes.
+The inner per-tune stream is bounded by `StallWatchdog` and wrapped by `ResilientHlsSource`. `StallWatchdog` monitors byte progress using two thresholds: `STREAM_TUNE_TIMEOUT_SEC` (default 20s) for initial connection / hardware cold tuning, and `STREAM_STALL_TIMEOUT_SEC` (default 8s) once streaming. If the inner stream ceases producing data for 8 seconds, `StallWatchdog` fails the stage, triggering a retune via `RestartSource.withBackoff` after a fixed `STREAM_RETRY_DELAY_SEC` (default 1s). During retunes or silent gaps, `ResilientHlsSource` injects MPEG-TS null packets (PID 0x1FFF) every 40ms to keep the HTTP chunked transfer alive, providing the viewer with a stable frozen frame instead of an error dialog. When fresh broadcast bytes resume following a cold retune, `ResilientHlsSource` prepends a single resume prefix consisting of multi-PID discontinuity packets and cached PAT/PMT headers. `RecoveryTimeout` monitors end-to-end byte progress: if no real broadcast data arrives for `STREAM_RECOVERY_TIMEOUT_SEC` (default 60s), the stream completes cleanly.
+
+Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.cacheFlow`, `KillSwitches.single`, and `watchTermination`. `MpegTsSync.cacheFlow` continuously captures the latest PAT (PID 0) and PMT (PID 0x100) tables. Streams fan out to subscribers via a 1024-element `BroadcastHub` buffer. When new or reconnecting clients attach to the hub, `MpegTsSync.primeClientSource` prepends the cached PAT/PMT tables and multi-PID discontinuity markers, guaranteeing that decoders in Plex always receive valid stream parameters and never encounter decoder crashes. When upstream terminates, `watchTermination` notifies the runner, which tears down hardware leases and sends `UpstreamEnded` to `SessionManager`, immediately removing the channel entry so it is re-tunable without waiting for idle grace expiry.
 
 ```
 ┌──────────────────┐     ┌──────────────────┐     ┌────────────────────────┐
 │  Tablo Device    │────▶│  Stream Backend  │────▶│ ResilientHlsSource     │
-│  /watch endpoint │     │  (ffmpeg or hls) │     │ (Padding & Retry Flow) │
-└──────────────────┘     └──────────────────┘     └────────────────────────┘
+│  /watch endpoint │     │  (ffmpeg or hls) │     │ (Watchdog, Null Padding│
+└──────────────────┘     └──────────────────┘     │  & Cold Retune)        │
+                                                  └────────────────────────┘
                                                             │
                                                             ▼
                                                   ┌────────────────────────┐
@@ -183,17 +183,18 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.dedupCon
    c. SessionManager acquires tuner from Tablo hardware (/guide/channels/{id}/watch)
    d. Receive watch response with HLS playlist URL, expiry, and keepalive metadata
    e. Use selected stream backend (FFmpeg or HLS) to produce MPEG-TS from playlist URL
-   f. Pre-roll keepalive seamlessly switches over to real MPEG-TS data when ready, inserting
-      explicit multi-PID MPEG-TS discontinuity packets and prepending primed PAT/PMT headers
+   f. Pre-roll keepalive seamlessly switches directly over to real MPEG-TS data when ready, while
+      client attachment primes with cached PAT/PMT and discontinuity headers
 4. 4th gen session maintenance:
    a. Periodically POST /player/sessions/{token}/keepalive while the client stream is active
-   b. ResilientHlsSource retunes via `/watch` when the HLS session stalls, expires, or degrades
+   b. ResilientHlsSource releases the old session and cold-tunes via `/watch` when no new bytes arrive for 8s or the session ends
    c. MpegTsSync normalizes packet boundaries and caches PAT/PMT headers (persisted per channel
       in SessionManager.channelHeaderCache across session lifecycles for fast subsequent tunes)
 5. Client teardown:
    a. On client disconnect, tuner enters idle grace period (default 75s) for instant reconnect,
       actively draining the BroadcastHub via a background sink to avoid upstream backpressure stalls
    b. If idle grace expires without reconnection, DELETE /player/sessions/{token} to release hardware tuner
+   c. If upstream ends on its own (60s without progress), the runner tears down and SessionManager removes the entry immediately (no idle grace)
 6. If no tuners: return 503 Service Unavailable
 ```
 
@@ -235,6 +236,10 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.dedupCon
 | `TABLO_PORT` | `8887` (4th gen) / `8885` (legacy) | Tablo device API port |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
+| `STREAM_STALL_TIMEOUT_SEC` | `8` | Seconds without new data before a cold retune |
+| `STREAM_TUNE_TIMEOUT_SEC` | `20` | Max seconds to wait for tune / cold start data |
+| `STREAM_RETRY_DELAY_SEC` | `1` | Delay in seconds between retune attempts |
+| `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | Total outage duration before cleanly ending stream |
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit periodic null MPEG-TS packets during cold tune to prevent client timeouts |
 | `STREAM_PRE_ROLL_INTERVAL_MS`| `100` | Interval in ms between pre-roll keepalive chunks |
 | `STREAM_PRE_ROLL_PACKETS` | `7` | Number of 188-byte null packets per keepalive chunk (7 = 1316 bytes MTU) |

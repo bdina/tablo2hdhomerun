@@ -283,34 +283,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       stream.head shouldBe media
     }
 
-    "withPreRollKeepAlive should emit null packets while realSourceFuture is pending then switch to realSource" in {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-      val media = buildMediaPacket(0x0101)
-      val promise = Promise[Source[ByteString, NotUsed]]()
-
-      val compositeSource = MpegTsSync.withPreRollKeepAlive(promise.future, interval = 50.millis, chunkPackets = 1)
-      val streamFut = compositeSource.runWith(Sink.seq)
-
-      // Allow 2-3 ticks of null packets to emit, then complete the promise with real media
-      val _ = system.classicSystem.scheduler.scheduleOnce(140.millis, new Runnable {
-        override def run(): Unit = promise.success(Source.single(media))
-      })
-
-      val emitted = streamFut.futureValue
-      // Emitted chunks should have at least 1 null packet chunk, a discontinuity packet, and the last chunk should be media
-      val _ = emitted.length should be >= 3
-      val _ = emitted.last shouldBe media
-      val _ = emitted(emitted.length - 2) shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
-      // All earlier chunks should be null packets
-      emitted.dropRight(2).foreach { chunk =>
-        val _ = chunk.length shouldBe 188
-        val _ = chunk(0) shouldBe 0x47.toByte
-        val _ = chunk(1) shouldBe 0x1F.toByte
-        val _ = chunk(2) shouldBe 0xFF.toByte
-      }
-    }
-
-    "withPreRollKeepAlive should insert MPEGTS_DISCONTINUITY_PACKET at transition between preRoll keep-alive and realSource" in {
+    "withPreRollKeepAlive should switch from pre-roll null chunks directly to the real source" in {
       implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
       val media = buildMediaPacket(0x0101)
       val promise = Promise[Source[ByteString, NotUsed]]()
@@ -323,11 +296,57 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       })
 
       val emitted = streamFut.futureValue
-      val _ = emitted.length should be >= 3
+      val _ = emitted.length should be >= 2
       val _ = emitted.last shouldBe media
-      val discontinuity = emitted(emitted.length - 2)
-      val _ = discontinuity shouldBe MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
-      val _ = (discontinuity(5) & 0x80) should not be 0
+      val earlier = emitted.init
+      earlier.foreach { chunk =>
+        val _ = chunk shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      }
+    }
+
+    "alignPackets should emit only whole 188-byte packets and maintain alignment across chunk splits" in {
+      val packet1 = buildMediaPacket(0x0101)
+      val packet2 = buildMediaPacket(0x0102)
+      val packet3 = buildMediaPacket(0x0103)
+      val allThree = packet1 ++ packet2 ++ packet3
+
+      val c1 = allThree.take(100)
+      val c2 = allThree.slice(100, 400)
+      val c3 = allThree.drop(400)
+
+      val result = Source(List(c1, c2, c3))
+        .via(MpegTsSync.alignPackets)
+        .runWith(Sink.seq)
+        .futureValue
+
+      val combined = result.foldLeft(ByteString.empty)(_ ++ _)
+      val _ = combined.length shouldBe (188 * 3)
+      val _ = combined shouldBe allThree
+      result.foreach { chunk =>
+        val _ = (chunk.length % 188) shouldBe 0
+      }
+    }
+
+    "alignPackets should drop trailing partial packets on completion" in {
+      val packet = buildMediaPacket(0x0101)
+      val trailing = ByteString(Array.fill[Byte](50)(0xAA.toByte))
+
+      val result = Source(List(packet ++ trailing))
+        .via(MpegTsSync.alignPackets)
+        .runWith(Sink.seq)
+        .futureValue
+
+      val combined = result.foldLeft(ByteString.empty)(_ ++ _)
+      combined shouldBe packet
+    }
+
+    "alignPackets should produce no elements for empty chunks" in {
+      val result = Source(List(ByteString.empty, ByteString.empty))
+        .via(MpegTsSync.alignPackets)
+        .runWith(Sink.seq)
+        .futureValue
+
+      result shouldBe empty
     }
 
     "cacheFlow should invoke onHeadersUpdated callback when headers are detected" in {
@@ -365,56 +384,6 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       val failure = streamFut.failed.futureValue
       failure.getMessage shouldBe "Tuner failed to lock"
-    }
-
-    "dedupConsecutiveDiscontinuity should drop adjacent duplicate discontinuity packets" in {
-      val media = buildMediaPacket(0x0101)
-      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
-      val pat = buildPatPacket(0x0100)
-
-      val stream = Source(List(media, disc, disc, pat))
-        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
-        .runWith(Sink.seq)
-        .futureValue
-
-      val _ = stream.length shouldBe 3
-      val _ = stream(0) shouldBe media
-      val _ = stream(1) shouldBe disc
-      stream(2) shouldBe pat
-    }
-
-    "dedupConsecutiveDiscontinuity should drop duplicate discontinuity packet across multi-packet chunks (e.g. syncPrefix)" in {
-      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
-      val pat = buildPatPacket(0x0100)
-      val pmt = buildPmtPacket(0x0100)
-      val syncPrefix = disc ++ pat ++ pmt
-
-      // PreRoll emits disc (188 bytes), followed by syncPrefix (564 bytes starting with disc)
-      val stream = Source(List(disc, syncPrefix))
-        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
-        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
-        .futureValue
-
-      // Output should have exactly 1 disc + 1 pat + 1 pmt = 3 * 188 = 564 bytes
-      val _ = stream.length shouldBe (188 * 3)
-      val _ = stream.slice(0, 188) shouldBe disc
-      val _ = stream.slice(188, 376) shouldBe pat
-      stream.slice(376, 564) shouldBe pmt
-    }
-
-    "dedupConsecutiveDiscontinuity should drop adjacent duplicate discontinuity packets within the same chunk" in {
-      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
-      val pat = buildPatPacket(0x0100)
-      val combined = disc ++ disc ++ pat
-
-      val stream = Source.single(combined)
-        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
-        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
-        .futureValue
-
-      val _ = stream.length shouldBe (188 * 2)
-      val _ = stream.slice(0, 188) shouldBe disc
-      stream.slice(188, 376) shouldBe pat
     }
 
     "drop non-sync bytes in the middle of stream and maintain strict 188-byte packet alignment" in {
@@ -463,22 +432,6 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       stream.slice(188, 376) shouldBe media
     }
 
-    "dedupConsecutiveDiscontinuity should handle arbitrary non-aligned chunk splits" in {
-      val disc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
-      val pat = buildPatPacket(0x0100)
-      val combined = disc ++ disc ++ pat
-
-      // Split into 50-byte chunks that do not align to 188-byte boundaries
-      val chunks = combined.grouped(50).toList
-      val stream = Source(chunks)
-        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
-        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
-        .futureValue
-
-      val _ = stream.length shouldBe (188 * 2)
-      val _ = stream.slice(0, 188) shouldBe disc
-      stream.slice(188, 376) shouldBe pat
-    }
 
     "validate packet headers correctly in isValidPacketHeader" in {
       val validPacket = buildMediaPacket(0x0101).toArray
@@ -622,25 +575,6 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       prefix.slice(752, 940) shouldBe pmt
     }
 
-    "dedupConsecutiveDiscontinuity should preserve discontinuity across different PIDs but drop consecutive on same PID" in {
-      val videoDisc = MpegTsSync.discontinuityPacket(0x0101)
-      val pcrDisc = MpegTsSync.discontinuityPacket(0x0100)
-      val nullDisc = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
-      val media = buildMediaPacket(0x0101)
-
-      // videoDisc, pcrDisc, nullDisc should all be preserved because they are different PIDs
-      // an adjacent duplicate nullDisc should be dropped
-      val stream = Source(List(videoDisc, pcrDisc, nullDisc, nullDisc, media))
-        .via(MpegTsSync.dedupConsecutiveDiscontinuity)
-        .runWith(Sink.seq)
-        .futureValue
-
-      val _ = stream.length shouldBe 4
-      val _ = stream(0) shouldBe videoDisc
-      val _ = stream(1) shouldBe pcrDisc
-      val _ = stream(2) shouldBe nullDisc
-      stream(3) shouldBe media
-    }
 
     "cacheFlow should populate pcrPid and videoPid from full PMT packet" in {
       val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())

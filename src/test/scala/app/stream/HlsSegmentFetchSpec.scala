@@ -33,8 +33,14 @@ class HlsSegmentFetchSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "retry mismatched Content-Range when retries remain" in {
-    val headers = Seq(RawHeader("Content-Range", "bytes 1000-1200/5000"))
+    val headers = Seq(RawHeader("Content-Range", "bytes 2000-2499/5000"))
     HlsSegmentFetch.validateRangedResponse(StatusCodes.PartialContent, headers, rangeRequest, retriesLeft = 2) shouldBe a[HlsSegmentFetch.Retry]
+  }
+
+  it should "accept a short 206 whose start matches the requested offset" in {
+    val headers = Seq(RawHeader("Content-Range", "bytes 1000-1200/5000"))
+    HlsSegmentFetch.validateRangedResponse(StatusCodes.PartialContent, headers, rangeRequest, retriesLeft = 0) shouldBe
+      HlsSegmentFetch.Accept
   }
 
   it should "reject 416 for ranged requests when retries exhausted" in {

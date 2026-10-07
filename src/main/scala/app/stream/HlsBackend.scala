@@ -38,9 +38,7 @@ object HlsBackend extends StreamBackend {
     case class Unauthorized(status: StatusCode) extends RuntimeException(s"segment unauthorized: ${status}") with HlsError
     case object SegmentNotReady extends RuntimeException("newest segment not ready") with HlsError
     case object SessionEnded extends RuntimeException("playlist ended (EXT-X-ENDLIST)") with HlsError
-    case object PlaylistStall extends RuntimeException("playlist media-sequence stalled") with HlsError
     case object PollExhausted extends RuntimeException("playlist poll failures exhausted") with HlsError
-    final case class TsHealthDegraded(detail: String) extends RuntimeException(s"ts health degraded: $detail") with HlsError
   }
 
   private[stream] def pollOutcomeToFuture(
@@ -53,8 +51,6 @@ object HlsBackend extends StreamBackend {
 
   type SegmentInfo = HlsPlaylistPoller.SegmentInfo
   type PollState = HlsPlaylistPoller.PollState
-
-  private def healthSettings: MpegTsHealth.Settings = AppContext.config.stream.hls.health
 
   override def stream(
     playlistUrl: String
@@ -216,7 +212,7 @@ object HlsBackend extends StreamBackend {
             bodyOpt match {
               case None =>
                 log.debug("[stream:hls] playlist not-modified lastSeq={}", fetchedState.lastSeq)
-                HlsPlaylistPoller.onPlaylistNotModified(fetchedState, hlsConfig.stallPolls)
+                HlsPlaylistPoller.onPlaylistNotModified(fetchedState)
               case Some(body) =>
                 val playlist = M3U8.parse(body)
                 log.debug(
@@ -230,7 +226,6 @@ object HlsBackend extends StreamBackend {
                 HlsPlaylistPoller.onPlaylist(
                   fetchedState
                 , playlist
-                , hlsConfig.stallPolls
                 , defaultPollSec
                 )
             }
@@ -301,13 +296,8 @@ object HlsBackend extends StreamBackend {
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
-              val raw = fetchSegmentSource(seg.url, seg.byteRange)
-              val source = if (seg.isDiscontinuity) {
-                Source.single(MpegTsSync.MPEGTS_DISCONTINUITY_PACKET).concat(raw)
-              } else {
-                raw
-              }
-              source
+              fetchSegmentSource(seg.url, seg.byteRange)
+                .via(MpegTsSync.alignPackets)
                 .map { chunk =>
                   val _ = bytesOut.addAndGet(chunk.size)
                   chunk
@@ -321,7 +311,6 @@ object HlsBackend extends StreamBackend {
                   }(ec)
                 }
             }
-            .via(MpegTsHealth.monitor(healthSettings))
         }
       ).watchTermination() { (_, done) =>
         done.onComplete {

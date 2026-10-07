@@ -48,7 +48,7 @@ class HlsPlaylistFetchSpec extends AnyFlatSpec with Matchers {
     , loggedFirstSegment = true
     , etag = Some("etag-1")
     )
-    HlsPlaylistPoller.onPlaylistNotModified(state, maxStallPolls = 3) match {
+    HlsPlaylistPoller.onPlaylistNotModified(state) match {
       case HlsPlaylistPoller.Emit(next, segments) =>
         val _ = next.stallPolls shouldBe 1
         val _ = next.lastAdvanced shouldBe false
@@ -57,7 +57,7 @@ class HlsPlaylistFetchSpec extends AnyFlatSpec with Matchers {
     }
   }
 
-  it should "fail after repeated not-modified polls" in {
+  it should "continue emitting on repeated not-modified polls (stall handled by watchdog)" in {
     val state = HlsPlaylistPoller.PollState(
       "http://host/pl.m3u8"
     , lastSeq = 12
@@ -66,8 +66,12 @@ class HlsPlaylistFetchSpec extends AnyFlatSpec with Matchers {
     , fetchFailures = 0
     , loggedFirstSegment = true
     )
-    HlsPlaylistPoller.onPlaylistNotModified(state, maxStallPolls = 3) shouldBe
-      HlsPlaylistPoller.Fail(HlsBackend.HlsError.PlaylistStall)
+    HlsPlaylistPoller.onPlaylistNotModified(state) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = next.stallPolls shouldBe 3
+        segments shouldBe empty
+      case _ => fail("expected emit")
+    }
   }
 
   it should "not re-emit after not-modified then unchanged playlist body" in {
@@ -81,7 +85,7 @@ class HlsPlaylistFetchSpec extends AnyFlatSpec with Matchers {
     , emittedKeys = Set("10|http://host/a.ts", "11|http://host/b.ts")
     , etag = Some("etag-1")
     )
-    HlsPlaylistPoller.onPlaylistNotModified(state, maxStallPolls = 3) match {
+    HlsPlaylistPoller.onPlaylistNotModified(state) match {
       case HlsPlaylistPoller.Emit(next, segments) =>
         val _ = segments shouldBe empty
         state = next
@@ -93,7 +97,7 @@ class HlsPlaylistFetchSpec extends AnyFlatSpec with Matchers {
     , segments = Seq(M3U8.Segment("a.ts", 6.0, None, None), M3U8.Segment("b.ts", 6.0, None, None))
     , isEndList = false
     )
-    HlsPlaylistPoller.onPlaylist(state, p, maxStallPolls = 3, defaultPollSec = 2) match {
+    HlsPlaylistPoller.onPlaylist(state, p, defaultPollSec = 2) match {
       case HlsPlaylistPoller.Emit(_, segments) => segments shouldBe empty
       case _ => fail("expected unchanged playlist emit")
     }

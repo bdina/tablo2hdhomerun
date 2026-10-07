@@ -67,7 +67,9 @@ object HlsSegmentFetch {
       headerValue(headers, "Content-Range") match {
         case Some(value) =>
           parseContentRange(value) match {
-            case Some((start, end)) if start == request.offset && end == request.endInclusive => Accept
+            // A short read (segment stopped growing during a reception drop) is accepted;
+            // the missing tail is dropped downstream and the poller moves on.
+            case Some((start, end)) if start == request.offset && end <= request.endInclusive => Accept
             case Some((start, end)) =>
               if (retriesLeft > 0) Retry(s"range mismatch: expected ${request.offset}-${request.endInclusive}, got $start-$end")
               else Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"expected ${request.offset}-${request.endInclusive}, got $start-$end"))

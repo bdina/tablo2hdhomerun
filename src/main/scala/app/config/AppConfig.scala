@@ -1,7 +1,5 @@
 package app.config
 
-import app.stream.MpegTsHealth
-
 import ConfigTypes.{HostAddress, HttpProtocol, Port}
 
 import EnvReaders._
@@ -54,17 +52,14 @@ final case class ProxyConfig(
 }
 
 final case class ResilientHlsConfig(
-  maxGapSec: Int
-, retryMinBackoffSec: Int
-, retryMaxBackoffSec: Int
+  stallTimeoutSec: Int
+, tuneTimeoutSec: Int
+, retryDelaySec: Int
 , recoveryTimeoutSec: Int
-, gapThresholdSec: Int = 15
 )
 
 final case class HlsStreamConfig(
-  stallPolls: Int
-, heartbeatSec: Int
-, health: MpegTsHealth.Settings
+  heartbeatSec: Int
 , pollFailuresMax: Int
 )
 
@@ -124,23 +119,13 @@ object AppConfig {
     , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)
     )
     val resilient = ResilientHlsConfig(
-      maxGapSec = getInt(get, "STREAM_MAX_GAP_SEC", 15)
-    , retryMinBackoffSec = getInt(get, "STREAM_RETRY_MIN_BACKOFF_SEC", 2)
-    , retryMaxBackoffSec = getInt(get, "STREAM_RETRY_MAX_BACKOFF_SEC", 30)
+      stallTimeoutSec = getInt(get, "STREAM_STALL_TIMEOUT_SEC", 8)
+    , tuneTimeoutSec = getInt(get, "STREAM_TUNE_TIMEOUT_SEC", 20)
+    , retryDelaySec = getInt(get, "STREAM_RETRY_DELAY_SEC", 1)
     , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
-    , gapThresholdSec = getInt(get, "STREAM_RESILIENT_GAP_THRESHOLD_SEC", 15)
     )
     val hls = HlsStreamConfig(
-      stallPolls = getInt(get, "STREAM_HLS_STALL_POLLS", 10)
-    , heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
-    , health = MpegTsHealth.Settings(
-        windowSec = getInt(get, "STREAM_HLS_HEALTH_WINDOW_SEC", 10)
-      , ccMax = getInt(get, "STREAM_HLS_CC_ERROR_MAX", 0)
-      , syncMax = getInt(get, "STREAM_HLS_SYNC_LOSS_MAX", 0)
-      , nullRatioMax = getDouble(get, "STREAM_HLS_NULL_RATIO_MAX", 0.6)
-      , enforce = getBoolTrue(get, "STREAM_HLS_HEALTH_ENFORCE", true)
-      , teiMax = getInt(get, "STREAM_HLS_TEI_ERROR_MAX", 0)
-      )
+      heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
     , pollFailuresMax = getInt(get, "STREAM_HLS_POLL_FAILURES_MAX", 4)
     )
     val stream = StreamConfig(

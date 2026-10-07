@@ -9,7 +9,6 @@ object HlsPlaylistPoller {
   , byteRange: Option[(Long, Long)]
   , sequence: Int
   , duration: Double
-  , isDiscontinuity: Boolean = false
   )
 
   final case class PollState(
@@ -75,7 +74,6 @@ object HlsPlaylistPoller {
   def onPlaylist(
     state: PollState
   , playlist: M3U8.Playlist
-  , maxStallPolls: Int
   , defaultPollSec: Int
   ): Outcome = {
     if (playlist.isEndList) {
@@ -95,37 +93,26 @@ object HlsPlaylistPoller {
       } else {
         allSegments.filter(_.sequence >= effectiveLastSeq)
       }
-      val rawSegments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
-      val hasSequenceGap = state.lastSeq > 0 && rawSegments.nonEmpty && rawSegments.head.sequence > state.lastSeq
-      val isDiscontinuous = isReset || hasSequenceGap
-      val segments = if (isDiscontinuous && rawSegments.nonEmpty) {
-        val head = rawSegments.head.copy(isDiscontinuity = true)
-        head +: rawSegments.tail
-      } else {
-        rawSegments
-      }
+      val segments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
       val advanced = isFirstPoll || segments.nonEmpty || (newLastSeq > effectiveLastSeq)
+      // stall handling lives in ResilientHlsSource's StallWatchdog
       val nextStall = if (advanced) 0 else state.stallPolls + 1
-      if (!advanced && nextStall >= maxStallPolls) {
-        Fail(HlsBackend.HlsError.PlaylistStall)
-      } else {
-        val nextTarget = if (playlist.targetDuration > 0) playlist.targetDuration else defaultPollSec
-        val playlistKeys = allSegments.map(segmentKey).toSet
-        val newEmittedKeys = (state.emittedKeys ++ segments.map(segmentKey)).intersect(playlistKeys)
-        val nextLastSeq = if (isReset) newLastSeq else math.max(state.lastSeq, newLastSeq)
-        Emit(
-          state.copy(
-            lastSeq = nextLastSeq
-          , lastTargetDuration = nextTarget
-          , stallPolls = nextStall
-          , fetchFailures = 0
-          , loggedFirstSegment = state.loggedFirstSegment || segments.nonEmpty
-          , emittedKeys = newEmittedKeys
-          , lastAdvanced = advanced
-          )
-        , segments
+      val nextTarget = if (playlist.targetDuration > 0) playlist.targetDuration else defaultPollSec
+      val playlistKeys = allSegments.map(segmentKey).toSet
+      val newEmittedKeys = (state.emittedKeys ++ segments.map(segmentKey)).intersect(playlistKeys)
+      val nextLastSeq = if (isReset) newLastSeq else math.max(state.lastSeq, newLastSeq)
+      Emit(
+        state.copy(
+          lastSeq = nextLastSeq
+        , lastTargetDuration = nextTarget
+        , stallPolls = nextStall
+        , fetchFailures = 0
+        , loggedFirstSegment = state.loggedFirstSegment || segments.nonEmpty
+        , emittedKeys = newEmittedKeys
+        , lastAdvanced = advanced
         )
-      }
+      , segments
+      )
     }
   }
 
@@ -155,19 +142,13 @@ object HlsPlaylistPoller {
   def onFetchError(state: PollState, maxFetchFailures: Int): Outcome =
     onFetchError(state, maxFetchFailures, HlsBackend.HlsError.PollExhausted)
 
-  def onPlaylistNotModified(state: PollState, maxStallPolls: Int): Outcome = {
-    val nextStall = state.stallPolls + 1
-    if (nextStall >= maxStallPolls) {
-      Fail(HlsBackend.HlsError.PlaylistStall)
-    } else {
-      Emit(
-        state.copy(
-          stallPolls = nextStall
-        , fetchFailures = 0
-        , lastAdvanced = false
-        )
-      , Seq.empty
+  def onPlaylistNotModified(state: PollState): Outcome =
+    Emit(
+      state.copy(
+        stallPolls = state.stallPolls + 1
+      , fetchFailures = 0
+      , lastAdvanced = false
       )
-    }
-  }
+    , Seq.empty
+    )
 }

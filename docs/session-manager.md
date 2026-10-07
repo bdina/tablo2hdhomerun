@@ -7,8 +7,8 @@ The Session Manager keeps track of Tablo tuner/channel leases for the 4th-gen pr
 session per HTTP client.
 
 A mapping is maintained of `channelId` → Tablo session metadata and a Pekko Streams `BroadcastHub` source. The first
-request for a channel establishes the upstream MPEG-TS pipeline; subsequent clients attach to the same hub. Slow clients
-that fall too far behind the hub buffer are dropped and should re-open the stream.
+request for a channel establishes the upstream MPEG-TS pipeline; subsequent clients attach to the same hub. `BroadcastHub`
+backpressures the producer when the slowest subscriber is 1024 elements behind.
 
 ```text
 Tablo4thGen.Channel.SessionRunner  --->  SessionManager  --->  N proxy clients
@@ -24,10 +24,9 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 
 ### Playback Resilience & End-User Experience
 - **Uninterrupted Plex Playback**: Keep Plex clients playing during periods of OTA channel and tuner instability without crashing or requiring manual viewer intervention.
-- **Warm Client Keepalive with Frozen Video**: Keep Plex client grabbers warm with MPEG-TS null packets during upstream recovery retunes, presenting frozen video rather than fatal playback errors.
-- **Acceptable Data Loss During Recovery**: Prioritize stream continuity and frozen-frame keepalive over capturing corrupted slices from dying signals; fast-fail degraded streams immediately, bridge outages with MPEG-TS null packets, and recover cleanly at the live edge.
-- **Live-Edge Resumption (No Content Replay)**: Recover stream playback at the live edge without replaying video or audio segments the client has already seen.
-- **Deterministic 60-Second Teardown**: Terminate the stream cleanly when a channel is unrecoverable for more than 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`).
+- **Warm Client Keepalive with Frozen Video**: Continuously stream MPEG-TS null packets every 40ms while the proxy releases the old Tablo session and performs a cold tune (`/watch`), presenting a clean frozen frame rather than fatal playback errors.
+- **Live-Edge Resumption (No Seen-Content Replay)**: Fresh segments arrive from a new Tablo segment file after a cold tune; a single resume prefix (multi-PID discontinuity + cached PAT/PMT) resets decoder timelines without rewind loops or replayed video.
+- **Deterministic 60-Second Teardown**: Cleanly terminate the stream after 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`) without new bytes; the session manager removes the entry immediately so the channel is re-tunable right away.
 
 ### Tuner & Session Management
 - One Tablo player session per channel while any proxy client (or idle grace) holds it
@@ -40,7 +39,6 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 - Legacy Tablo SessionManager integration
 - SessionManager calling Tablo HTTP itself
 - Per-channel typed actors for the session runner
-- Explicit `UpstreamDead` protocol message
 - Long warm pools beyond idle grace
 - Per-client resilience after the hub
 
@@ -49,15 +47,15 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Topic | Choice |
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
-| Retune | Seamless: restart inner producer under `ResilientHlsSource`; hub stays up |
+| Retune | Release old Tablo session, then cold `/watch`, inside `ResilientHlsSource` restart; hub stays up |
 | Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
 | Idle grace | 75s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
-| Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` with explicit multi-PID discontinuity transition markers |
+| Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` with primed PAT/PMT headers |
 | BroadcastHub buffer | 1024 elements |
 | Session runner | Functions/object inside `Tablo4thGen.Channel` (not a typed actor) |
-| Upstream failure | Hub completes → client `watchTermination` → `Release`; teardown is idempotent |
+| Upstream failure | Runner `watchTermination` → teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately; clients' streams complete |
 
 ## Topology
 
@@ -73,33 +71,34 @@ Tablo4thGen.Channel.SessionRunner
   POST /watch
        │
        ▼
-  StreamBackend → ResilientHlsSource → MpegTsSync.dedupConsecutiveDiscontinuity → MpegTsSync.cacheFlow → KillSwitch → BroadcastHub.sink(1024)
+  StreamBackend → StallWatchdog → ResilientHlsSource → MpegTsSync.cacheFlow → KillSwitch → watchTermination → BroadcastHub.sink(1024)
                          ▲
                          │
               keepalive / playlist change / near-expiry retune
 ```
 
 Retune and keepalive run inside the single session runner for that channel. They restart the inner `streamFactory`
-without shutting the outer KillSwitch or the hub. Clients keep reading MPEG-TS (null packets during gaps via
-`ResilientHlsSource`, followed by a discontinuity marker and cached PAT/PMT upon resumption when the gap exceeds
-`STREAM_RESILIENT_GAP_THRESHOLD_SEC` [default 15s]; consecutive duplicate discontinuity markers are deduplicated via
-`MpegTsSync.dedupConsecutiveDiscontinuity`). When clients attach, `MpegTsSync` primes the stream with cached PAT, PMT,
-and discontinuity packets so late joiners never stall or fail format probing. Known channel PAT/PMT tables are
-persisted in `SessionManager.channelHeaderCache` across session lifecycles so that subsequent tunes (even after idle
-grace expires) immediately have format tables ready. On brand new cold starts, `SessionRunner` coordinates check-in
-until the first segment's headers are parsed (or up to 1.5s fallback), guaranteeing clients receive stream metadata
-before format probing timeouts fire. The KillSwitch is used only for final teardown (refcount 0 and idle grace expired).
+without shutting the outer KillSwitch or the hub. During retunes and silent gaps, `ResilientHlsSource` emits MPEG-TS
+null packets, followed by a single resume prefix (multi-PID discontinuity + cached PAT/PMT) when new live video resumes.
+When clients attach, `MpegTsSync.primeClientSource` primes the stream with cached PAT, PMT, and discontinuity packets so
+late joiners never stall or fail format probing. Known channel PAT/PMT tables are persisted in
+`SessionManager.channelHeaderCache` across session lifecycles so that subsequent tunes (even after idle grace expires)
+immediately have format tables ready. On brand new cold starts, `SessionRunner` coordinates check-in until the first
+segment's headers are parsed (or up to 1.5s fallback), guaranteeing clients receive stream metadata before format
+probing timeouts fire. The KillSwitch and upstream `watchTermination` are used for teardown (refcount 0 and idle grace
+expired, or upstream ended after recovery timeout).
 
 ## State machine
 
 ```text
 (absent) --Acquire--> Opening --CheckIn--> Live --last Release--> IdleGrace
-              │                      ▲                │
-              │                      │                │ Acquire (cancel timer)
-              └--AcquireFailed--> (absent)            │
-                                                      └--75s--> teardown → (absent)
-
-Live --hub completes--> clients Release → IdleGrace → teardown → (absent)
+              │                      ▲        │                       │
+              │                      │        │ UpstreamEnded         │ UpstreamEnded / 75s
+              └--AcquireFailed--> (absent)    ▼                       ▼
+                                           teardown                teardown
+                                              │                       │
+                                              ▼                       ▼
+                                           (absent)                (absent)
 ```
 
 | State | Behavior |
@@ -165,6 +164,7 @@ object SessionManager {
   , expires: Option[java.time.Instant]
   , keepalive: Option[Int]
   , playlistUrl: String
+  , leaseId: String = ""
   )
 
   /** Internal + runner callbacks. Extends Request so one Behavior handles all messages. */
@@ -185,12 +185,16 @@ object SessionManager {
 
     /** Fired by scheduleOnce when IdleGrace expires. */
     case class GraceExpired(channelId: String) extends Command
+
+    /** Fired when upstream completes or fails, triggering immediate teardown and removal. */
+    case class UpstreamEnded(channelId: String, leaseId: String) extends Command
   }
 }
 ```
 
-No `UpstreamDead` in v1. If the outer graph completes or fails, the hub completes for subscribers; each client
-`watchTermination` fires `Release`. Teardown remains safe to call more than once.
+When upstream terminates (recovery timeout or failure), SessionRunner tears down and sends `UpstreamEnded(channelId, leaseId)`.
+SessionManager immediately tears down and removes the entry, making the channel immediately re-tunable without waiting for
+idle grace expiry.
 
 ### Internal session state
 
@@ -389,6 +393,20 @@ object SessionManager {
             context.log.debug("[session] grace-expired ignored channelId={}", channelId)
         }
         Behaviors.same
+
+      case Command.UpstreamEnded(channelId, leaseId) =>
+        sessions.get(channelId) match {
+          case Some(live: SessionState.Live) if live.meta.leaseId == leaseId =>
+            context.log.warn("[session] upstream-ended channelId={} clients={}", channelId, live.clientIds.size)
+            teardownAndRemove(channelId, live.teardown)
+          case Some(idle: SessionState.IdleGrace) if idle.meta.leaseId == leaseId =>
+            val _ = idle.graceTimer.cancel()
+            context.log.warn("[session] upstream-ended channelId={} during idle-grace", channelId)
+            teardownAndRemove(channelId, idle.teardown)
+          case _ =>
+            context.log.debug("[session] upstream-ended ignored channelId={} leaseId={}", channelId, leaseId)
+        }
+        Behaviors.same
     }
   }
 }
@@ -397,7 +415,7 @@ object SessionManager {
 ### `startRunner` wiring
 
 SessionManager does not import HTTP details. The parent (route setup / `Channel` object) supplies a function that starts
-`SessionRunner` and posts back `CheckIn` / `AcquireFailed`:
+`SessionRunner` and posts back `CheckIn` / `AcquireFailed` / `UpstreamEnded`:
 
 ```scala
 val sessionManager: ActorRef[SessionManager.Request] =
@@ -411,6 +429,8 @@ val sessionManager: ActorRef[SessionManager.Request] =
             self ! SessionManager.Command.CheckIn(channelId, meta, hubSource, teardown)
         , onFailed = cause =>
             self ! SessionManager.Command.AcquireFailed(channelId, cause)
+        , onUpstreamEnded = endedLeaseId =>
+            self ! SessionManager.Command.UpstreamEnded(channelId, endedLeaseId)
         )
       }
     )
@@ -429,6 +449,7 @@ object SessionRunner {
   , authContext: Auth.AuthContext
   , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit) => Unit
   , onFailed: Throwable => Unit
+  , onUpstreamEnded: String => Unit
   )(implicit system: ActorSystem[?]): Unit
 
   // Materialization sketch inside start after successful watch:
@@ -472,6 +493,7 @@ onComplete(acquireFut) {
 - `startRunner` is invoked only when transitioning `absent → Opening`
 - `CheckIn` / `AcquireFailed` are only meaningful in `Opening`; unexpected delivery tears down the hub if needed
 - `GraceExpired` for a channel that left `IdleGrace` (Acquire cancelled the timer) is ignored
+- `UpstreamEnded` with a non-matching `leaseId` is ignored
 - `Release` for an unknown `clientId` is ignored
 - `teardown` is idempotent; SessionManager may call it once on grace expiry, and runner must tolerate a second call
 
@@ -500,13 +522,14 @@ See [Scala ADT / Behavior sketch](#scala-adt--behavior-sketch) for the full mess
 Prefer extracting today's nested watch/keepalive/stream logic into a named object for readability, without introducing
 a per-channel typed actor (smaller diff, one new actor total: SessionManager).
 
-`start(channelId, authContext, onCheckIn, onFailed)`:
+`start(channelId, authContext, onCheckIn, onFailed, onUpstreamEnded)`:
 
 1. `POST /guide/channels/{id}/watch` (existing 503 retry behavior)
 2. Materialize roughly:
-   `ResilientHlsSource(streamFactory) → KillSwitches.single → BroadcastHub.sink(bufferSize = 1024)`
+   `ResilientHlsSource(streamFactory) → MpegTsSync.cacheFlow → KillSwitches.single → watchTermination → BroadcastHub.sink(bufferSize = 1024)`
 3. Start the keepalive loop (moved out of per-request `streamWithTunerTracking`)
 4. Invoke `onCheckIn(meta, hubSource, teardown)` (caller turns this into `Command.CheckIn`)
+5. On `watchTermination`, invoke `teardown()` and `onUpstreamEnded(leaseId)`
 
 `streamFactory`, keepalive failure retry, playlist-URL change restart, and near-expiry retune keep the same behavior as
 the current per-request path, but as **one instance per channel lease**.
@@ -527,16 +550,16 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Signal degradation / fringe corruption | `MpegTsHealth` sanitizes TEI packets into nulls, respects `discontinuity_indicator`, and enforces health inline in `onPush`; on threshold breach (`ccMax=10`, `syncMax=3`, `teiMax=3`), inner producer fast-fails immediately rather than leaking damaged macroblocks; `ResilientHlsSource` bridges with null packets (clean frozen frame) while `streamFactory` actively retunes via `/watch` (cleaning up prior tuner token) to resume at the live edge |
-| Outer resilient exhaustion / hub complete | Subscribers complete → `Release` drain → IdleGrace → teardown |
+| Reception drop (no new bytes for 8s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (8s) → 1s retry delay → DELETE old session → cold `POST /watch` (~11s) → resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
+| 60s without new bytes (recovery timeout) | Stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately; channel is immediately re-tunable |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
-| Slow client (lags past 1024 buffer) | That subscriber fails; others continue; that client `Release` |
+| Slow client (lags past 1024 buffer) | BroadcastHub backpressures the producer when slowest subscriber is 1024 elements behind |
 | Acquire during IdleGrace | Cancel timer; attach; no new `/watch` |
 | Teardown after Tablo session already gone | Log and ignore DELETE errors |
 
 ## Idle grace and BroadcastHub backpressure
 
-When zero subscribers remain during IdleGrace, `BroadcastHub` buffers fill, which halts upstream pulls. In practice, this caused upstream pipelines under `ResilientHlsSource` to trip with `StreamIdleTimeoutException: No elements passed in the last 10 seconds`, forcing spurious `/watch` retunes to the Tablo hardware every 10–12 seconds while in grace.
+When zero subscribers remain during IdleGrace, `BroadcastHub` buffers fill, which halts upstream pulls. In practice, this caused upstream pipelines under `StallWatchdog` to trip with no new data within the stall timeout, forcing spurious `/watch` retunes to the Tablo hardware while in grace.
 
 To prevent upstream backpressure stalls, `SessionManager` attaches an active `Sink.ignore` drain managed by a `UniqueKillSwitch` upon entering `IdleGrace`. This maintains live stream flow and keepalives without stalls. When a new client connects (`Acquire` grace-cancel) or when `GraceExpired` fires, the drain kill switch is immediately shut down.
 

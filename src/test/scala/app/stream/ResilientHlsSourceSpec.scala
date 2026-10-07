@@ -10,7 +10,7 @@ import org.scalatest.wordspec.AnyWordSpecLike
 import org.scalatestplus.junit.JUnitRunner
 
 import scala.concurrent.duration._
-import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
 
 import app.config.AppConfig
 import app.AppContext
@@ -50,102 +50,8 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = (packet(5) & 0x80) should not be 0
     }
 
-    "resolve defaultThreshold from AppContext configuration" in {
-      ResilientHlsSource.defaultThreshold shouldBe 15.seconds
-    }
-
-    "inject discontinuity packet when real data resumes after gap fill" in {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
-      val realData = ByteString("real-payload")
-      val factory = () =>
-        Source.future(org.apache.pekko.pattern.after(150.millis, classicSystemProvider.classicSystem.scheduler)(scala.concurrent.Future.successful(realData)))
-
-      val wrappedSource = ResilientHlsSource(
-        factory
-      , "test-gap-discontinuity"
-      , recoveryTimeout = 5.seconds
-      , minBackoff = 100.millis
-      , maxBackoff = 200.millis
-      , gapThreshold = 100.millis
-      )
-
-      val probe = wrappedSource.runWith(TestSink[ByteString]())
-      val _ = probe.ensureSubscription()
-      val first = probe.requestNext(2.seconds)
-      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
-
-      var next = probe.requestNext(2.seconds)
-      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
-        next = probe.requestNext(2.seconds)
-      }
-      val _ = next shouldBe (ResilientHlsSource.MPEGTS_DISCONTINUITY_PACKET ++ realData)
-      probe.cancel()
-    }
-
-    "inject custom resume prefix when real data resumes after gap fill" in {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
-      val realData = ByteString("real-payload-resumed")
-      val customPrefix = ByteString("custom-pat-pmt-prefix")
-      val factory = () =>
-        Source.future(org.apache.pekko.pattern.after(150.millis, classicSystemProvider.classicSystem.scheduler)(scala.concurrent.Future.successful(realData)))
-
-      val wrappedSource = ResilientHlsSource(
-        factory
-      , "test-custom-resume-prefix"
-      , recoveryTimeout = 5.seconds
-      , minBackoff = 100.millis
-      , maxBackoff = 200.millis
-      , resumePrefixSupplier = () => Some(customPrefix)
-      , gapThreshold = 100.millis
-      )
-
-      val probe = wrappedSource.runWith(TestSink[ByteString]())
-      val _ = probe.ensureSubscription()
-      val first = probe.requestNext(2.seconds)
-      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
-
-      var next = probe.requestNext(2.seconds)
-      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
-        next = probe.requestNext(2.seconds)
-      }
-      val _ = next shouldBe (customPrefix ++ realData)
-      probe.cancel()
-    }
-
-    "not inject discontinuity packet when gap is shorter than gapThreshold" in {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
-      val realData = ByteString("real-payload-short-gap")
-      val factory = () =>
-        Source.future(org.apache.pekko.pattern.after(100.millis, classicSystemProvider.classicSystem.scheduler)(scala.concurrent.Future.successful(realData)))
-
-      val wrappedSource = ResilientHlsSource(
-        factory
-      , "test-short-gap-no-discontinuity"
-      , recoveryTimeout = 5.seconds
-      , minBackoff = 100.millis
-      , maxBackoff = 200.millis
-      , gapThreshold = 500.millis
-      )
-
-      val probe = wrappedSource.runWith(TestSink[ByteString]())
-      val _ = probe.ensureSubscription()
-      val first = probe.requestNext(2.seconds)
-      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
-
-      var next = probe.requestNext(2.seconds)
-      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
-        next = probe.requestNext(2.seconds)
-      }
-      val _ = next shouldBe realData
-      probe.cancel()
-    }
-
-    "inject resume prefix when stream restarts after failure even if gap is short" in {
-      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
-      val attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
+    "inject resume prefix when stream restarts after failure" in {
+      val attemptCount = new AtomicInteger(0)
       val customPrefix = ByteString("retune-prefix-")
       val stream1 = ByteString("stream-1")
       val stream2 = ByteString("stream-2")
@@ -164,10 +70,8 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
         factory
       , "test-retune-prefix"
       , recoveryTimeout = 5.seconds
-      , minBackoff = 50.millis
-      , maxBackoff = 50.millis
+      , retryDelay = 50.millis
       , resumePrefixSupplier = () => Some(customPrefix)
-      , gapThreshold = 30.seconds
       )
 
       val probe = wrappedSource.runWith(TestSink[ByteString]())
@@ -181,6 +85,115 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
         next = probe.requestNext(2.seconds)
       }
       val _ = next shouldBe (customPrefix ++ stream2)
+      probe.cancel()
+    }
+
+    "retune when the inner stream goes silent after data (stall watchdog)" in {
+      val attempts = new AtomicInteger(0)
+      val data1 = ByteString("data-one")
+      val data2 = ByteString("data-two")
+      val customPrefix = ByteString("resume-prefix-")
+
+      val factory = () => {
+        val a = attempts.incrementAndGet()
+        if (a == 1) {
+          Source.single(data1).concat(Source.never)
+        } else {
+          Source.single(data2)
+        }
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-stall-watchdog"
+      , stallTimeout = 300.millis
+      , tuneTimeout = 600.millis
+      , retryDelay = 100.millis
+      , recoveryTimeout = 5.seconds
+      , resumePrefixSupplier = () => Some(customPrefix)
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      val _ = probe.requestNext(2.seconds) shouldBe data1
+
+      var next = probe.requestNext(3.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(3.seconds)
+      }
+      val _ = next shouldBe (customPrefix ++ data2)
+      val _ = attempts.get() shouldBe 2
+      probe.cancel()
+    }
+
+    "retune when a tune produces no data within tuneTimeout" in {
+      val attempts = new AtomicInteger(0)
+      val data = ByteString("data-after-tune-timeout")
+      val customPrefix = ByteString("prefix-")
+
+      val factory = () => {
+        val a = attempts.incrementAndGet()
+        if (a == 1) {
+          Source.never
+        } else {
+          Source.single(data)
+        }
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-tune-timeout"
+      , stallTimeout = 200.millis
+      , tuneTimeout = 400.millis
+      , retryDelay = 100.millis
+      , recoveryTimeout = 5.seconds
+      , resumePrefixSupplier = () => Some(customPrefix)
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+
+      var next = probe.requestNext(3.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(3.seconds)
+      }
+      val _ = next shouldBe (customPrefix ++ data)
+      val _ = attempts.get() shouldBe 2
+      probe.cancel()
+    }
+
+    "not stall-fail a slow first element that arrives before tuneTimeout" in {
+      val attempts = new AtomicInteger(0)
+      val data = ByteString("slow-first-data")
+
+      val factory = () => {
+        val _ = attempts.incrementAndGet()
+        Source.future(
+          org.apache.pekko.pattern.after(
+            300.millis
+          , system.classicSystem.scheduler
+          )(scala.concurrent.Future.successful(data))(system.executionContext)
+        )
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-slow-first-element"
+      , stallTimeout = 150.millis
+      , tuneTimeout = 800.millis
+      , retryDelay = 100.millis
+      , recoveryTimeout = 5.seconds
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+
+      var next = probe.requestNext(3.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(3.seconds)
+      }
+      val _ = next shouldBe data
+      val _ = attempts.get() shouldBe 1
       probe.cancel()
     }
 
@@ -200,13 +213,11 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val factory = () => Source.failed(new RuntimeException("always fails"))
       val wrappedSource = ResilientHlsSource(
         factory
-        , "test-null-keepalive"
-        , recoveryTimeout = 30.seconds
-        , minBackoff = 1.second
-        , maxBackoff = 1.second
+      , "test-null-keepalive"
+      , recoveryTimeout = 30.seconds
+      , retryDelay = 1.second
       )
       // While the inner source is down, keepAlive should emit MPEG-TS null packets.
-      implicit val classicSystemProvider: org.apache.pekko.actor.ClassicActorSystemProvider = system.classicSystem
       val probe = wrappedSource.runWith(TestSink[ByteString]())
       val _ = probe.ensureSubscription()
       val first = probe.requestNext(2.seconds)
@@ -214,17 +225,16 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       probe.cancel()
     }
 
-    "end stream after recovery timeout with no real data" in {
+    "end stream cleanly after recovery timeout with no real data" in {
       val factory = () => Source.failed(new RuntimeException("always fails"))
       val wrappedSource = ResilientHlsSource(
         factory
-        , "test-timeout"
-        , recoveryTimeout = 300.millis
-        , minBackoff = 50.millis
-        , maxBackoff = 50.millis
+      , "test-timeout"
+      , recoveryTimeout = 300.millis
+      , retryDelay = 50.millis
       )
-      val failed = wrappedSource.runWith(Sink.ignore).failed.futureValue
-      failed shouldBe a[java.util.concurrent.TimeoutException]
+      val result = wrappedSource.runWith(Sink.ignore).futureValue
+      result shouldBe org.apache.pekko.Done
     }
 
     "stay alive when real data arrives faster than recovery timeout" in {
@@ -233,8 +243,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
         factory
       , "test-timer-reset"
       , recoveryTimeout = 400.millis
-      , minBackoff = 1.second
-      , maxBackoff = 1.second
+      , retryDelay = 1.second
       )
       val result = wrappedSource.takeWithin(600.millis).runWith(Sink.seq).futureValue
       result.size should be > 3
@@ -251,11 +260,10 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
         factory
       , "test-null-no-reset"
       , recoveryTimeout = 300.millis
-      , minBackoff = 1.second
-      , maxBackoff = 1.second
+      , retryDelay = 50.millis
       )
-      val failed = wrappedSource.runWith(Sink.ignore).failed.futureValue
-      failed shouldBe a[java.util.concurrent.TimeoutException]
+      val result = wrappedSource.runWith(Sink.ignore).futureValue
+      result shouldBe org.apache.pekko.Done
     }
   }
 }

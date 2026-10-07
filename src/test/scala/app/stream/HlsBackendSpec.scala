@@ -34,12 +34,10 @@ class HlsBackendSpec extends AnyFlatSpec with Matchers with ScalaFutures {
 
   "HlsBackend.HlsError" should "include recovery error types" in {
     val _ = HlsBackend.HlsError.SessionEnded shouldBe a[HlsBackend.HlsError]
-    val _ = HlsBackend.HlsError.PlaylistStall shouldBe a[HlsBackend.HlsError]
     val _ = HlsBackend.HlsError.PollExhausted shouldBe a[HlsBackend.HlsError]
     val _ = HlsBackend.HlsError.SegmentNotReady shouldBe a[HlsBackend.HlsError]
     val _ = HlsBackend.HlsError.SegmentRangeMismatch("x") shouldBe a[HlsBackend.HlsError]
-    val _ = HlsBackend.HlsError.Unauthorized(org.apache.pekko.http.scaladsl.model.StatusCodes.Unauthorized) shouldBe a[HlsBackend.HlsError]
-    HlsBackend.HlsError.TsHealthDegraded("x") shouldBe a[HlsBackend.HlsError]
+    HlsBackend.HlsError.Unauthorized(org.apache.pekko.http.scaladsl.model.StatusCodes.Unauthorized) shouldBe a[HlsBackend.HlsError]
   }
 
   "HlsBackend.pollOutcomeToFuture" should "propagate SessionEnded as failure" in {
@@ -50,31 +48,15 @@ class HlsBackendSpec extends AnyFlatSpec with Matchers with ScalaFutures {
     , segments = Seq(M3U8.Segment("a.ts", 6.0, None, None))
     , isEndList = true
     )
-    val outcome = HlsPlaylistPoller.onPlaylist(state, playlist, maxStallPolls = 3, defaultPollSec = 2)
+    val outcome = HlsPlaylistPoller.onPlaylist(state, playlist, defaultPollSec = 2)
     val failed = HlsBackend.pollOutcomeToFuture(outcome).failed.futureValue
     failed shouldBe HlsBackend.HlsError.SessionEnded
   }
 
-  it should "propagate PlaylistStall as failure" in {
-    var state = HlsPlaylistPoller.initial("http://host/pl.m3u8")
-    val playlist = M3U8.Playlist(
-      targetDuration = 6
-    , mediaSequence = 5
-    , segments = Seq(M3U8.Segment("a.ts", 6.0, None, None))
-    , isEndList = false
-    )
-    val first = HlsPlaylistPoller.onPlaylist(state, playlist, maxStallPolls = 2, defaultPollSec = 2)
-    first match {
-      case HlsPlaylistPoller.Emit(next, _) => state = next
-      case _ => fail("expected first emit")
-    }
-    val second = HlsPlaylistPoller.onPlaylist(state, playlist, maxStallPolls = 2, defaultPollSec = 2)
-    second match {
-      case HlsPlaylistPoller.Emit(next, _) => state = next
-      case _ => fail("expected second emit")
-    }
-    val outcome = HlsPlaylistPoller.onPlaylist(state, playlist, maxStallPolls = 2, defaultPollSec = 2)
+  it should "propagate PollExhausted as failure" in {
+    val state = HlsPlaylistPoller.PollState("http://host/pl.m3u8", 0, 0, 0, 1, false)
+    val outcome = HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 2)
     val failed = HlsBackend.pollOutcomeToFuture(outcome).failed.futureValue
-    failed shouldBe HlsBackend.HlsError.PlaylistStall
+    failed shouldBe HlsBackend.HlsError.PollExhausted
   }
 }

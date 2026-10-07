@@ -7,8 +7,14 @@ import org.scalatestplus.junit.JUnitRunner
 
 import java.time.Instant
 
+import org.scalatest.concurrent.ScalaFutures
+import scala.concurrent.{Future, Promise}
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.duration._
+
 @RunWith(classOf[JUnitRunner])
-class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers {
+class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFutures {
+  implicit override val patienceConfig: PatienceConfig = PatienceConfig(timeout = 5.seconds)
 
   private def response(
     token: Option[String] = Some("watch-token")
@@ -141,5 +147,37 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers {
     val after = before.copy(playlistUrl = "http://example.com/pl.m3u8?a=2")
     val _ = Tablo4thGen.Channel.WatchSession.playlistChanged(before, after) shouldBe true
     val _ = Tablo4thGen.Channel.WatchSession.playlistChanged(before, before) shouldBe false
+  }
+
+  "WatchSession.releaseThenTune" should "not tune until release completes" in {
+    val releaseP = Promise[Unit]()
+    var tuneCalls = 0
+    val tuneF = () => {
+      tuneCalls += 1
+      Future.successful("tuned-session")
+    }
+
+    val resF = Tablo4thGen.Channel.WatchSession.releaseThenTune(() => releaseP.future, tuneF)
+    tuneCalls shouldBe 0
+
+    releaseP.success(())
+    resF.futureValue shouldBe "tuned-session"
+    tuneCalls shouldBe 1
+  }
+
+  it should "still tune when release fails" in {
+    val resF = Tablo4thGen.Channel.WatchSession.releaseThenTune(
+      () => Future.failed(new RuntimeException("release failed")),
+      () => Future.successful("tuned-after-failed-release")
+    )
+    resF.futureValue shouldBe "tuned-after-failed-release"
+  }
+
+  it should "still tune when release throws synchronously" in {
+    val resF = Tablo4thGen.Channel.WatchSession.releaseThenTune(
+      () => throw new RuntimeException("release boom"),
+      () => Future.successful("tuned-after-throw")
+    )
+    resF.futureValue shouldBe "tuned-after-throw"
   }
 }
