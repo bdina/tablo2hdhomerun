@@ -60,12 +60,12 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 90
     val _ = config.proxy.idleGraceSec shouldBe 60
     val _ = config.proxy.preRollIntervalMs shouldBe 50
-    config.proxy.preRollPackets shouldBe 14
+    val _ = config.proxy.preRollPackets shouldBe 14
 
     val fallbackConfig = AppConfig.load(Map(
       "STREAM_STALL_TIMEOUT_SEC" -> "bad"
     )).config
-    fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 8
+    val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 8
   }
 
   it should "parse bool env vars" in {

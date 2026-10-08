@@ -225,7 +225,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       probe.cancel()
     }
 
-    "end stream cleanly after recovery timeout with no real data" in {
+    "fail stream terminally after recovery timeout with no real data" in {
       val factory = () => Source.failed(new RuntimeException("always fails"))
       val wrappedSource = ResilientHlsSource(
         factory
@@ -233,8 +233,8 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       , recoveryTimeout = 300.millis
       , retryDelay = 50.millis
       )
-      val result = wrappedSource.runWith(Sink.ignore).futureValue
-      result shouldBe org.apache.pekko.Done
+      val ex = wrappedSource.runWith(Sink.ignore).failed.futureValue
+      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
     }
 
     "stay alive when real data arrives faster than recovery timeout" in {
@@ -249,7 +249,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       result.size should be > 3
     }
 
-    "timeout when only null keepalive follows initial real data" in {
+    "fail stream terminally when only null keepalive follows initial real data" in {
       val sentReal = new AtomicBoolean(false)
       val factory = () =>
         if (sentReal.compareAndSet(false, true))
@@ -262,8 +262,29 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       , recoveryTimeout = 300.millis
       , retryDelay = 50.millis
       )
-      val result = wrappedSource.runWith(Sink.ignore).futureValue
-      result shouldBe org.apache.pekko.Done
+      val ex = wrappedSource.runWith(Sink.ignore).failed.futureValue
+      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
+    }
+
+    "fail stream when too many micro-stalls occur within window" in {
+      val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
+        tuneTimeout = 5.seconds
+      , stallTimeout = 5.seconds
+      , streamName = "test-micro-stalls"
+      , microStallGap = 20.millis
+      , microStallWindow = 5.seconds
+      , maxMicroStalls = 2
+      )
+
+      val source = Source(List(1, 2, 3, 4, 5, 6))
+        .map { x =>
+          Thread.sleep(50)
+          ByteString(x.toString)
+        }
+        .via(watchdogFlow)
+
+      val ex = source.runWith(Sink.ignore).failed.futureValue
+      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
     }
   }
 }

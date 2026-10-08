@@ -62,8 +62,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     }
     HlsPlaylistPoller.onPlaylist(state, p, defaultPollSec = 2) match {
       case HlsPlaylistPoller.Emit(next, segments) =>
-        next.stallPolls shouldBe 2
-        segments shouldBe empty
+        val _ = next.stallPolls shouldBe 2
+        val _ = segments shouldBe empty
       case _ => fail("expected emit with incremented stallPolls")
     }
   }
@@ -302,8 +302,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
       case HlsPlaylistPoller.Fail(_) => fail("expected emit with empty segments")
     }
-    segsStalled shouldBe empty
-    stateAfterStall.lastSeq shouldBe 105
+    val _ = segsStalled shouldBe empty
+    val _ = stateAfterStall.lastSeq shouldBe 105
 
     // When reception recovers and new segment 105 is published
     val pRecovered = playlist(103, Seq("seg103.ts", "seg104.ts", "seg105.ts"))
@@ -311,7 +311,7 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
       case HlsPlaylistPoller.Fail(_) => fail("expected emit with new segment")
     }
-    segsRecovered.map(_.sequence) shouldBe Seq(105)
+    val _ = segsRecovered.map(_.sequence) shouldBe Seq(105)
   }
 }
 

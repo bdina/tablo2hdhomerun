@@ -158,11 +158,11 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     }
 
     val resF = Tablo4thGen.Channel.WatchSession.releaseThenTune(() => releaseP.future, tuneF)
-    tuneCalls shouldBe 0
+    val _ = tuneCalls shouldBe 0
 
     releaseP.success(())
-    resF.futureValue shouldBe "tuned-session"
-    tuneCalls shouldBe 1
+    val _ = resF.futureValue shouldBe "tuned-session"
+    val _ = tuneCalls shouldBe 1
   }
 
   it should "still tune when release fails" in {
