@@ -940,9 +940,8 @@ object TabloLegacy {
                           StreamBackend().stream(
                             data.playlist_url.toString
                           , streamId
-                          , initialSeq = 0
+                          , initialSeq = lastSeqRef.get()
                           , onSeqAdvanced = seq => lastSeqRef.set(seq)
-                          , liveEdgeCount = 1
                           )
                         }
                       )

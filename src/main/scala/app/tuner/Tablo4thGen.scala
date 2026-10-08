@@ -1396,7 +1396,7 @@ object Tablo4thGen {
           , LogConfig.truncate(session.playlistUrl)
           )
           val liveEdgeCount = if (isRecovery) HlsPlaylistPoller.recoveryLiveEdgeSegmentCount else HlsPlaylistPoller.liveEdgeSegmentCount
-          val startingSeq = if (isRecovery) 0 else lastSeqRef.get()
+          val startingSeq = lastSeqRef.get()
           StreamBackend()
             .stream(
               session.playlistUrl
