@@ -96,11 +96,29 @@ object ResilientHlsSource {
 
       override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with InHandler with OutHandler {
         private var started = false
+        private var lastPushNanos = System.nanoTime()
+        private val microStalls = scala.collection.mutable.Queue.empty[Long]
 
         override def preStart(): Unit = scheduleOnce("watchdog", tuneTimeout)
 
         override def onPush(): Unit = {
+          val now = System.nanoTime()
+          if (started) {
+            val gap = now - lastPushNanos
+            if (gap > 1000000000L) { // 1s
+              microStalls.enqueue(now)
+              while (microStalls.nonEmpty && (now - microStalls.front) > 60000000000L) { // 60s
+                microStalls.dequeue()
+              }
+              if (microStalls.size > 5) {
+                log.warn(s"[$streamName] too many micro-stalls (> 5 in 60s), retuning")
+                failStage(new StallTimeoutException(s"$streamName too many micro-stalls"))
+                return
+              }
+            }
+          }
           started = true
+          lastPushNanos = now
           scheduleOnce("watchdog", stallTimeout)
           push(out, grab(in))
         }
@@ -139,8 +157,8 @@ object ResilientHlsSource {
 
         override protected def onTimer(timerKey: Any): Unit =
           if (System.nanoTime() - lastRealNanos > timeout.toNanos) {
-            log.error(s"[$streamName] no real data for ${timeout.toSeconds}s, ending stream")
-            completeStage()
+            log.error(s"[$streamName] no real data for ${timeout.toSeconds}s, ending stream terminally")
+            failStage(new StallTimeoutException(s"$streamName no real data for ${timeout.toSeconds}s"))
           }
 
         override def onPush(): Unit = {

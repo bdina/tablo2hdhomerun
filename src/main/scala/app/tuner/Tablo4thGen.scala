@@ -1396,11 +1396,12 @@ object Tablo4thGen {
           , LogConfig.truncate(session.playlistUrl)
           )
           val liveEdgeCount = if (isRecovery) HlsPlaylistPoller.recoveryLiveEdgeSegmentCount else HlsPlaylistPoller.liveEdgeSegmentCount
+          val startingSeq = if (isRecovery) 0 else lastSeqRef.get()
           StreamBackend()
             .stream(
               session.playlistUrl
             , leaseId
-            , initialSeq = lastSeqRef.get()
+            , initialSeq = startingSeq
             , onSeqAdvanced = seq => lastSeqRef.set(seq)
             , liveEdgeCount = liveEdgeCount
             )
@@ -1494,7 +1495,6 @@ object Tablo4thGen {
                 ).map { newSession =>
                   currentSession.set(newSession)
                   scheduleKeepalive()
-                  lastSeqRef.set(0)
                   streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true)
                 }(ec)
               )

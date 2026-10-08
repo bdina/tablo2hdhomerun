@@ -292,4 +292,26 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     // Only the new segment 608 must be emitted, picking up seamlessly from freeze frame
     val _ = segs3.map(_.sequence) shouldBe Seq(608)
   }
+
+  it should "not re-emit segments on recovery when initialized with prior lastSeq matching a stalled playlist" in {
+    // Say stream stalled after playing segment 104 (lastSeq = 105)
+    // On recovery retune, the playlist returned by Tablo is the same stalled playlist (mediaSequence 102, segments 102, 103, 104)
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105, liveEdgeCount = 1)
+    val pStalled = playlist(102, Seq("seg102.ts", "seg103.ts", "seg104.ts"))
+    val (stateAfterStall, segsStalled) = HlsPlaylistPoller.onPlaylist(state, pStalled, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit with empty segments")
+    }
+    segsStalled shouldBe empty
+    stateAfterStall.lastSeq shouldBe 105
+
+    // When reception recovers and new segment 105 is published
+    val pRecovered = playlist(103, Seq("seg103.ts", "seg104.ts", "seg105.ts"))
+    val (_, segsRecovered) = HlsPlaylistPoller.onPlaylist(stateAfterStall, pRecovered, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) => (next, segments)
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit with new segment")
+    }
+    segsRecovered.map(_.sequence) shouldBe Seq(105)
+  }
 }
+

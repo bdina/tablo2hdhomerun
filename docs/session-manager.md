@@ -78,7 +78,7 @@ Tablo4thGen.Channel.SessionRunner
 ```
 
 Retune and keepalive run inside the single session runner for that channel. They restart the inner `streamFactory`
-without shutting the outer KillSwitch or the hub. During retunes and silent gaps, `ResilientHlsSource` emits MPEG-TS
+without shutting the outer KillSwitch or the hub. HLS media sequence numbers are preserved across retunes to prevent duplicate segment playback when reception is lost. During retunes and silent gaps, `ResilientHlsSource` emits MPEG-TS
 null packets, followed by a single resume prefix (multi-PID discontinuity + cached PAT/PMT) when new live video resumes.
 When clients attach, `MpegTsSync.primeClientSource` primes the stream with cached PAT, PMT, and discontinuity packets so
 late joiners never stall or fail format probing. Known channel PAT/PMT tables are persisted in
