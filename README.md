@@ -4,6 +4,12 @@ A HDHomeRun-compatible proxy for TabloTV DVR devices.
 
 Tablo2HDHomeRun exposes a TabloTV DVR as an HDHomeRun tuner, enabling compatibility with media applications like Plex, Jellyfin, Channels DVR, and any software that supports HDHomeRun devices.
 
+## Project Vision
+
+The primary vision for Tablo2HDHomeRun is to make your network TV viewing experience feel like a **traditional standard TV set**: you tune into a station, and it just plays until you turn it off. Just like a standard TV, poor reception or periodic atmospheric events might cause the broadcast to drop or corrupt temporarily. However, as long as you keep the TV tuned to that station, it recovers on its own and continues playing. 
+
+Our goal is to allow you to leave a fringe channel playing all day in Plex completely uninterrupted, while the `tablo2hdhomerun` service seamlessly manages the complexity of re-tuning and keeping the stream active behind the scenes.
+
 ## Features
 
 - HDHomeRun device emulation for TabloTV
