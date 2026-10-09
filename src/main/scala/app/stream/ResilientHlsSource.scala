@@ -100,23 +100,37 @@ object ResilientHlsSource {
 
       override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with InHandler with OutHandler {
         private var started = false
+        private var lastPushNanos = System.nanoTime()
+        private val checkInterval = {
+          val minTimeout = if (stallTimeout < tuneTimeout) stallTimeout else tuneTimeout
+          (minTimeout / 4).max(50.millis)
+        }
 
-        override def preStart(): Unit = scheduleOnce("watchdog", tuneTimeout)
+        override def preStart(): Unit = scheduleWithFixedDelay("watchdog", checkInterval, checkInterval)
 
         override def onPush(): Unit = {
           started = true
-          scheduleOnce("watchdog", stallTimeout)
+          lastPushNanos = System.nanoTime()
           push(out, grab(in))
         }
 
         override def onPull(): Unit = pull(in)
 
         override protected def onTimer(timerKey: Any): Unit = {
-          val detail =
-            if (started) s"no new data for ${stallTimeout.toSeconds}s"
-            else s"tune produced no data within ${tuneTimeout.toSeconds}s"
-          log.warn(s"[$streamName] $detail, retuning")
-          failStage(new StallTimeoutException(s"$streamName $detail"))
+          val elapsedNanos = System.nanoTime() - lastPushNanos
+          if (started) {
+            if (elapsedNanos > stallTimeout.toNanos) {
+              val detail = s"no new data for ${stallTimeout.toSeconds}s"
+              log.warn(s"[$streamName] $detail, retuning")
+              failStage(new StallTimeoutException(s"$streamName $detail"))
+            }
+          } else {
+            if (elapsedNanos > tuneTimeout.toNanos) {
+              val detail = s"tune produced no data within ${tuneTimeout.toSeconds}s"
+              log.warn(s"[$streamName] $detail, retuning")
+              failStage(new StallTimeoutException(s"$streamName $detail"))
+            }
+          }
         }
 
         setHandlers(in, out, this)
