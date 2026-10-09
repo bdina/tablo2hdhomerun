@@ -266,25 +266,22 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
     }
 
-    "fail stream when too many micro-stalls occur within window" in {
+    "not fail stream on pauses between chunks within stallTimeout" in {
       val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
         tuneTimeout = 5.seconds
-      , stallTimeout = 5.seconds
-      , streamName = "test-micro-stalls"
-      , microStallGap = 20.millis
-      , microStallWindow = 5.seconds
-      , maxMicroStalls = 2
+      , stallTimeout = 1.second
+      , streamName = "test-no-micro-stalls"
       )
 
-      val source = Source(List(1, 2, 3, 4, 5, 6))
+      val source = Source(List(1, 2, 3, 4))
         .map { x =>
           Thread.sleep(50)
           ByteString(x.toString)
         }
         .via(watchdogFlow)
 
-      val ex = source.runWith(Sink.ignore).failed.futureValue
-      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
+      val result = source.runWith(Sink.seq).futureValue
+      result.size shouldBe 4
     }
   }
 }

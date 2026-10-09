@@ -86,19 +86,13 @@ object ResilientHlsSource {
       tuneTimeout: FiniteDuration
     , stallTimeout: FiniteDuration
     , streamName: String
-    , microStallGap: FiniteDuration = 1.second
-    , microStallWindow: FiniteDuration = 60.seconds
-    , maxMicroStalls: Int = 5
     ): Flow[ByteString, ByteString, NotUsed] =
-      Flow.fromGraph(new Stage(tuneTimeout, stallTimeout, streamName, microStallGap, microStallWindow, maxMicroStalls))
+      Flow.fromGraph(new Stage(tuneTimeout, stallTimeout, streamName))
 
     private final class Stage(
       tuneTimeout: FiniteDuration
     , stallTimeout: FiniteDuration
     , streamName: String
-    , microStallGap: FiniteDuration
-    , microStallWindow: FiniteDuration
-    , maxMicroStalls: Int
     ) extends GraphStage[FlowShape[ByteString, ByteString]] {
       val in: Inlet[ByteString] = Inlet("StallWatchdog.in")
       val out: Outlet[ByteString] = Outlet("StallWatchdog.out")
@@ -106,34 +100,13 @@ object ResilientHlsSource {
 
       override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with InHandler with OutHandler {
         private var started = false
-        private var lastPushNanos = System.nanoTime()
-        private var microStallTimestamps = List.empty[Long]
-        private val microStallGapNanos = microStallGap.toNanos
-        private val microStallWindowNanos = microStallWindow.toNanos
 
         override def preStart(): Unit = scheduleOnce("watchdog", tuneTimeout)
 
         override def onPush(): Unit = {
-          val now = System.nanoTime()
-          var shouldFail = false
-          if (started) {
-            val gap = now - lastPushNanos
-            if (gap > microStallGapNanos) {
-              val cutoff = now - microStallWindowNanos
-              microStallTimestamps = (now :: microStallTimestamps).filter(_ >= cutoff)
-              if (microStallTimestamps.size > maxMicroStalls) {
-                shouldFail = true
-                log.warn(s"[$streamName] too many micro-stalls (> $maxMicroStalls in ${microStallWindow.toSeconds}s), retuning")
-                failStage(new StallTimeoutException(s"$streamName too many micro-stalls"))
-              }
-            }
-          }
-          if (!shouldFail) {
-            started = true
-            lastPushNanos = now
-            scheduleOnce("watchdog", stallTimeout)
-            push(out, grab(in))
-          }
+          started = true
+          scheduleOnce("watchdog", stallTimeout)
+          push(out, grab(in))
         }
 
         override def onPull(): Unit = pull(in)
