@@ -45,7 +45,8 @@ object ResilientHlsSource {
   , tuneTimeout: FiniteDuration = AppContext.config.stream.resilient.tuneTimeoutSec.seconds
   , retryDelay: FiniteDuration = AppContext.config.stream.resilient.retryDelaySec.seconds
   , maxRetryDelay: FiniteDuration = AppContext.config.stream.resilient.maxRetryDelaySec.seconds
-  , slateThreshold: FiniteDuration = 3.seconds
+  , slateThreshold: FiniteDuration = AppContext.config.stream.resilient.stallTimeoutSec.seconds
+  , enableSlateVideo: Boolean = AppContext.config.stream.resilient.enableSlateVideo
   , resumePrefixSupplier: () => Option[ByteString] = () => None
   , videoPidSupplier: () => Option[Int] = () => None
   ): Source[ByteString, ?] = {
@@ -75,7 +76,7 @@ object ResilientHlsSource {
       }
     }
     .keepAlive(nullPacketIntervalMs.millis, () => GapFill)
-    .via(RecoveryTimeout.flow(recoveryTimeout, streamName, slateThreshold))
+    .via(RecoveryTimeout.flow(recoveryTimeout, streamName, slateThreshold, enableSlateVideo))
   }
 
   // Fails the inner (per-tune) stream when it stops making progress, which triggers a retune.
@@ -143,13 +144,15 @@ object ResilientHlsSource {
       timeout: FiniteDuration
     , streamName: String
     , slateThreshold: FiniteDuration
+    , enableSlateVideo: Boolean
     ): Flow[Elem, ByteString, NotUsed] =
-      Flow.fromGraph(new Stage(timeout, streamName, slateThreshold))
+      Flow.fromGraph(new Stage(timeout, streamName, slateThreshold, enableSlateVideo))
 
     private final class Stage(
       timeout: FiniteDuration
     , streamName: String
     , slateThreshold: FiniteDuration
+    , enableSlateVideo: Boolean
     ) extends GraphStage[FlowShape[Elem, ByteString]] {
       val in: Inlet[Elem] = Inlet("RecoveryTimeout.in")
       val out: Outlet[ByteString] = Outlet("RecoveryTimeout.out")
@@ -177,15 +180,20 @@ object ResilientHlsSource {
           elem match {
             case Real(data) =>
               val now = System.nanoTime()
-              if (hadGap) log.info(s"[$streamName] real data resumed after ${(now - lastRealNanos) / 1000000}ms")
+              if (hadGap && (now - lastRealNanos) >= 4000000000L) log.info(s"[$streamName] real data resumed after ${(now - lastRealNanos) / 1000000}ms")
               hadGap = false
+
+              val outData = if (slateActive) {
+                ByteString(MPEGTS_DISCONTINUITY_PACKET) ++ data
+              } else data
+
               slateActive = false
               lastRealNanos = now
-              push(out, data)
+              push(out, outData)
             case GapFill =>
               hadGap = true
               val elapsed = System.nanoTime() - lastRealNanos
-              if (elapsed >= slateThreshold.toNanos) {
+              if (enableSlateVideo && elapsed >= slateThreshold.toNanos) {
                 if (!slateActive) {
                   slateActive = true
                 }

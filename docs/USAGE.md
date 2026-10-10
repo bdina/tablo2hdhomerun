@@ -169,7 +169,7 @@ Recovery retunes automatically on stalls, session end, unauthorized segment resp
 
 Transport data loss during severe OTA signal interruptions (such as antenna flutter or wind gusts) is expected and acceptable. Rather than trying to salvage corrupted slices from a failing signal—which risks leaking damaged macroblocks to downstream hardware decoders (e.g., Plex Intel GPU transcoder) and causing fatal player crashes—the proxy prioritizes hands-free playback continuity:
 1. Reception drops are detected when no new bytes arrive for `STREAM_STALL_TIMEOUT_SEC` (default 5s), bounding the stall with a watchdog.
-2. During brief inter-segment gaps, `ResilientHlsSource` holds the connection by continuously emitting MPEG-TS null packets (PID 0x1FFF) every 40ms. If the dropout exceeds 3 seconds, it switches to a looping "Please Stand By" MPEG-TS slate video (`slate.ts`) so downstream video decoders and transcoders stay active without timing out.
+2. During brief inter-segment gaps and retunes, `ResilientHlsSource` holds the connection by continuously emitting MPEG-TS null packets (PID 0x1FFF) every 40ms, providing a clean freeze-frame experience (default: `STREAM_ENABLE_SLATE_VIDEO=false`). Optionally, `STREAM_ENABLE_SLATE_VIDEO=true` can be enabled to emit a looping "Please Stand By" MPEG-TS slate video (`slate.ts`) after a stall.
 3. The old Tablo session is cleanly released (DELETE), followed by an automatic hardware retune (`POST /watch`, ~11s) with exponential backoff up to `STREAM_MAX_RETRY_DELAY_SEC` (default 300s) to prevent overloading the hardware tuner.
 4. Playback resumes cleanly from the fresh Tablo stream: `MpegTsSync.alignToIFrame` drops any leading mid-GOP video slices until a valid MPEG-2 Sequence Header or H.264 IDR boundary is encountered, followed by a single resume prefix (multi-PID discontinuity + cached PAT/PMT headers), completely eliminating `Missing picture start code` transcoder crashes.
 
@@ -200,6 +200,7 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 | `STREAM_RETRY_DELAY_SEC` | `1` | Initial delay in seconds between retune attempts |
 | `STREAM_MAX_RETRY_DELAY_SEC` | `300` | Maximum backoff delay in seconds for prolonged outages |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | Total outage duration before ending stream (set to `0` for infinite recovery) |
+| `STREAM_ENABLE_SLATE_VIDEO` | `false` | Enable looping "Please Stand By" slate video during dropouts. Default `false` uses a freeze-frame experience with null packets. |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
 | `STREAM_HLS_POLL_FAILURES_MAX` | `4` | Consecutive playlist fetch failures before retune |
 

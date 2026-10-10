@@ -301,7 +301,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       probe.cancel()
     }
 
-    "emit slate video when gap exceeds slateThreshold" in {
+    "emit slate video when gap exceeds slateThreshold and enableSlateVideo is true" in {
       val factory = () => Source.failed(new RuntimeException("always fails"))
       val wrappedSource = ResilientHlsSource(
         factory
@@ -309,6 +309,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       , recoveryTimeout = 10.seconds
       , retryDelay = 50.millis
       , slateThreshold = 100.millis
+      , enableSlateVideo = true
       )
       val probe = wrappedSource.runWith(TestSink[ByteString]())
       val _ = probe.ensureSubscription()
@@ -325,6 +326,26 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
         i += 1
       }
       val _ = foundSlate shouldBe true
+      probe.cancel()
+    }
+
+    "emit null packets instead of slate video when enableSlateVideo is false" in {
+      val factory = () => Source.failed(new RuntimeException("always fails"))
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-freeze-frame"
+      , recoveryTimeout = 10.seconds
+      , retryDelay = 50.millis
+      , slateThreshold = 100.millis
+      , enableSlateVideo = false
+      )
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      Thread.sleep(150)
+      for (_ <- 0 until 10) {
+        val chunk = probe.requestNext(2.seconds)
+        val _ = chunk shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
+      }
       probe.cancel()
     }
 

@@ -57,6 +57,7 @@ final case class ResilientHlsConfig(
 , retryDelaySec: Int
 , maxRetryDelaySec: Int
 , recoveryTimeoutSec: Int
+, enableSlateVideo: Boolean
 )
 
 final case class HlsStreamConfig(
@@ -125,6 +126,7 @@ object AppConfig {
     , retryDelaySec = getInt(get, "STREAM_RETRY_DELAY_SEC", 1)
     , maxRetryDelaySec = getInt(get, "STREAM_MAX_RETRY_DELAY_SEC", 300)
     , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
+    , enableSlateVideo = getBoolTrue(get, "STREAM_ENABLE_SLATE_VIDEO", false)
     )
     val hls = HlsStreamConfig(
       heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
