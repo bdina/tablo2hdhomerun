@@ -63,9 +63,10 @@ object SlateVideoSource {
     def nextChunk(): ByteString =
       if (chunks.isEmpty) MpegTsSync.MPEGTS_NULL_PACKET
       else {
+        val wrapped = idx == 0
         val chunk = chunks(idx)
         idx = (idx + 1) % chunks.size
-        chunk
+        if (wrapped) MpegTsSync.MPEGTS_DISCONTINUITY_PACKET ++ chunk else chunk
       }
   }
 }

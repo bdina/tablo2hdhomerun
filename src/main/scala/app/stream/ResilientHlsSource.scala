@@ -188,10 +188,8 @@ object ResilientHlsSource {
               if (elapsed >= slateThreshold.toNanos) {
                 if (!slateActive) {
                   slateActive = true
-                  push(out, MPEGTS_DISCONTINUITY_PACKET ++ slateLoop.nextChunk())
-                } else {
-                  push(out, slateLoop.nextChunk())
                 }
+                push(out, slateLoop.nextChunk())
               } else {
                 push(out, MPEGTS_NULL_PACKET)
               }
