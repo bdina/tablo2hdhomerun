@@ -1877,6 +1877,9 @@
       "glob": "simplelogger.properties"
     },
     {
+      "glob": "slate.ts"
+    },
+    {
       "glob": "version.conf"
     },
     {

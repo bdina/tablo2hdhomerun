@@ -283,5 +283,97 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val result = source.runWith(Sink.seq).futureValue
       result.size shouldBe 4
     }
+
+    "stay alive indefinitely when recoveryTimeout is 0" in {
+      val factory = () => Source.failed(new RuntimeException("always fails"))
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-infinite-recovery"
+      , recoveryTimeout = 0.seconds
+      , retryDelay = 50.millis
+      )
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      val first = probe.requestNext(2.seconds)
+      val _ = first shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
+      val second = probe.requestNext(2.seconds)
+      val _ = second should not be null
+      probe.cancel()
+    }
+
+    "emit slate video when gap exceeds slateThreshold" in {
+      val factory = () => Source.failed(new RuntimeException("always fails"))
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-slate-gap"
+      , recoveryTimeout = 10.seconds
+      , retryDelay = 50.millis
+      , slateThreshold = 100.millis
+      )
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      Thread.sleep(150)
+      var foundSlate = false
+      var i = 0
+      while (i < 10 && !foundSlate) {
+        val chunk = probe.requestNext(2.seconds)
+        if (chunk != ResilientHlsSource.MPEGTS_NULL_PACKET && chunk.length > 188) {
+          foundSlate = true
+          val _ = (chunk.length % 188) shouldBe 0
+          val _ = chunk(0) shouldBe 0x47.toByte
+        }
+        i += 1
+      }
+      val _ = foundSlate shouldBe true
+      probe.cancel()
+    }
+
+    "align to I-Frame when stream resumes after retune" in {
+      val attempts = new AtomicInteger(0)
+      val videoPid = 0x0101
+      val pat = MpegTsSyncSpec.buildPatPacket(0x0100)
+      val pmt = MpegTsSyncSpec.buildFullPmtPacket(0x0100, 0x0100, videoPid)
+      val nonKeyArr = MpegTsSyncSpec.buildMediaPacket(videoPid).toArray
+      nonKeyArr(10) = 0x55.toByte
+      val nonKey = ByteString(nonKeyArr)
+      val key = MpegTsSyncSpec.buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+      val postKey = MpegTsSyncSpec.buildMediaPacket(videoPid)
+      val failPromise = scala.concurrent.Promise[ByteString]()
+
+      val factory = () => {
+        val a = attempts.incrementAndGet()
+        if (a == 1) {
+          Source.single(pat ++ pmt).concat(Source.future(failPromise.future))
+        } else {
+          Source.single(nonKey ++ key ++ postKey)
+        }
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-iframe-resume"
+      , recoveryTimeout = 5.seconds
+      , retryDelay = 50.millis
+      , videoPidSupplier = () => Some(videoPid)
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      var first = probe.requestNext(2.seconds)
+      while (first == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        first = probe.requestNext(2.seconds)
+      }
+      val _ = first shouldBe (pat ++ pmt)
+
+      failPromise.failure(new RuntimeException("stall"))
+
+      var next = probe.requestNext(3.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(3.seconds)
+      }
+      val _ = next.containsSlice(key) shouldBe true
+      val _ = next.containsSlice(nonKey) shouldBe false
+      probe.cancel()
+    }
   }
 }

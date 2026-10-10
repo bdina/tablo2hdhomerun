@@ -44,10 +44,13 @@ object ResilientHlsSource {
   , stallTimeout: FiniteDuration = AppContext.config.stream.resilient.stallTimeoutSec.seconds
   , tuneTimeout: FiniteDuration = AppContext.config.stream.resilient.tuneTimeoutSec.seconds
   , retryDelay: FiniteDuration = AppContext.config.stream.resilient.retryDelaySec.seconds
+  , maxRetryDelay: FiniteDuration = AppContext.config.stream.resilient.maxRetryDelaySec.seconds
+  , slateThreshold: FiniteDuration = 3.seconds
   , resumePrefixSupplier: () => Option[ByteString] = () => None
+  , videoPidSupplier: () => Option[Int] = () => None
   ): Source[ByteString, ?] = {
-    // Fixed delay between retunes (min == max, no jitter): predictable freeze length.
-    val restartSettings = RestartSettings(minBackoff = retryDelay, maxBackoff = retryDelay, randomFactor = 0.0)
+    val effectiveMax = if (maxRetryDelay < retryDelay) retryDelay else maxRetryDelay
+    val restartSettings = RestartSettings(minBackoff = retryDelay, maxBackoff = effectiveMax, randomFactor = 0.2)
     val attempts = new java.util.concurrent.atomic.AtomicInteger(0)
     RestartSource.withBackoff(restartSettings) { () =>
       val n = attempts.incrementAndGet()
@@ -57,9 +60,9 @@ object ResilientHlsSource {
       if (n == 1) {
         inner.map(data => Real(data))
       } else {
-        // The single resume injection point: discontinuity + cached PAT/PMT before new live video.
+        val aligned = inner.via(MpegTsSync.alignToIFrame(videoPidSupplier()))
         val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
-        inner.statefulMapConcat { () =>
+        aligned.statefulMapConcat { () =>
           var isFirst = true
           chunk =>
             if (isFirst) {
@@ -72,11 +75,7 @@ object ResilientHlsSource {
       }
     }
     .keepAlive(nullPacketIntervalMs.millis, () => GapFill)
-    .via(RecoveryTimeout.flow(recoveryTimeout, streamName))
-    .map {
-      case Real(data) => data
-      case GapFill => MPEGTS_NULL_PACKET
-    }
+    .via(RecoveryTimeout.flow(recoveryTimeout, streamName, slateThreshold))
   }
 
   // Fails the inner (per-tune) stream when it stops making progress, which triggers a retune.
@@ -140,23 +139,35 @@ object ResilientHlsSource {
 
   // After keepAlive: only Real backend bytes reset the timer; null keepalive does not.
   private object RecoveryTimeout {
-    def flow(timeout: FiniteDuration, streamName: String): Flow[Elem, Elem, NotUsed] =
-      Flow.fromGraph(new Stage(timeout, streamName))
+    def flow(
+      timeout: FiniteDuration
+    , streamName: String
+    , slateThreshold: FiniteDuration
+    ): Flow[Elem, ByteString, NotUsed] =
+      Flow.fromGraph(new Stage(timeout, streamName, slateThreshold))
 
-    private final class Stage(timeout: FiniteDuration, streamName: String) extends GraphStage[FlowShape[Elem, Elem]] {
+    private final class Stage(
+      timeout: FiniteDuration
+    , streamName: String
+    , slateThreshold: FiniteDuration
+    ) extends GraphStage[FlowShape[Elem, ByteString]] {
       val in: Inlet[Elem] = Inlet("RecoveryTimeout.in")
-      val out: Outlet[Elem] = Outlet("RecoveryTimeout.out")
-      override val shape: FlowShape[Elem, Elem] = FlowShape(in, out)
+      val out: Outlet[ByteString] = Outlet("RecoveryTimeout.out")
+      override val shape: FlowShape[Elem, ByteString] = FlowShape(in, out)
 
       override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with InHandler with OutHandler {
         private var lastRealNanos = System.nanoTime()
         private var hadGap = false
-        private val checkInterval = (timeout / 4).max(50.millis)
+        private var slateActive = false
+        private val slateLoop = new SlateVideoSource.Loop(chunkPackets = 24)
+        private val checkInterval =
+          if (timeout.toNanos <= 0) 5.seconds
+          else (timeout / 4).max(50.millis)
 
         override def preStart(): Unit = scheduleWithFixedDelay("recovery-check", checkInterval, checkInterval)
 
         override protected def onTimer(timerKey: Any): Unit =
-          if (System.nanoTime() - lastRealNanos > timeout.toNanos) {
+          if (timeout.toNanos > 0 && System.nanoTime() - lastRealNanos > timeout.toNanos) {
             log.error(s"[$streamName] no real data for ${timeout.toSeconds}s, ending stream terminally")
             failStage(new StallTimeoutException(s"$streamName no real data for ${timeout.toSeconds}s"))
           }
@@ -164,15 +175,27 @@ object ResilientHlsSource {
         override def onPush(): Unit = {
           val elem = grab(in)
           elem match {
-            case Real(_) =>
+            case Real(data) =>
               val now = System.nanoTime()
               if (hadGap) log.info(s"[$streamName] real data resumed after ${(now - lastRealNanos) / 1000000}ms")
               hadGap = false
+              slateActive = false
               lastRealNanos = now
+              push(out, data)
             case GapFill =>
               hadGap = true
+              val elapsed = System.nanoTime() - lastRealNanos
+              if (elapsed >= slateThreshold.toNanos) {
+                if (!slateActive) {
+                  slateActive = true
+                  push(out, MPEGTS_DISCONTINUITY_PACKET ++ slateLoop.nextChunk())
+                } else {
+                  push(out, slateLoop.nextChunk())
+                }
+              } else {
+                push(out, MPEGTS_NULL_PACKET)
+              }
           }
-          push(out, elem)
         }
 
         override def onPull(): Unit = pull(in)

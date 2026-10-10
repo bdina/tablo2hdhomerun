@@ -13,10 +13,8 @@ import java.util.concurrent.atomic.AtomicReference
 import scala.concurrent.{Future, Promise}
 import scala.concurrent.duration._
 
-@RunWith(classOf[JUnitRunner])
-class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with Matchers {
-
-  private def buildPatPacket(pmtPid: Int): ByteString = {
+object MpegTsSyncSpec {
+  def buildPatPacket(pmtPid: Int): ByteString = {
     val arr = Array.fill[Byte](188)(0xFF.toByte)
     arr(0) = 0x47.toByte
     arr(1) = 0x40.toByte // PUSI = 1, PID = 0
@@ -45,7 +43,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
     ByteString(arr)
   }
 
-  private def buildPmtPacket(pmtPid: Int): ByteString = {
+  def buildPmtPacket(pmtPid: Int): ByteString = {
     val arr = Array.fill[Byte](188)(0xFF.toByte)
     arr(0) = 0x47.toByte
     arr(1) = (0x40 | ((pmtPid >> 8) & 0x1F)).toByte // PUSI = 1
@@ -56,7 +54,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
     ByteString(arr)
   }
 
-  private def buildFullPmtPacket(pmtPid: Int, pcrPid: Int, videoPid: Int): ByteString = {
+  def buildFullPmtPacket(pmtPid: Int, pcrPid: Int, videoPid: Int): ByteString = {
     val arr = Array.fill[Byte](188)(0xFF.toByte)
     arr(0) = 0x47.toByte
     arr(1) = (0x40 | ((pmtPid >> 8) & 0x1F)).toByte // PUSI = 1
@@ -93,7 +91,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
     ByteString(arr)
   }
 
-  private def buildMediaPacket(pid: Int): ByteString = {
+  def buildMediaPacket(pid: Int): ByteString = {
     val arr = Array.fill[Byte](188)(0xAA.toByte)
     arr(0) = 0x47.toByte
     arr(1) = ((pid >> 8) & 0x1F).toByte
@@ -101,6 +99,30 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
     arr(3) = 0x10.toByte
     ByteString(arr)
   }
+
+  def buildKeyframePacket(pid: Int, isH264: Boolean = false, isGop: Boolean = false): ByteString = {
+    val arr = Array.fill[Byte](188)(0xAA.toByte)
+    arr(0) = 0x47.toByte
+    arr(1) = ((pid >> 8) & 0x1F).toByte
+    arr(2) = (pid & 0xFF).toByte
+    arr(3) = 0x10.toByte // payload only
+    arr(4) = 0x00.toByte
+    arr(5) = 0x00.toByte
+    arr(6) = 0x01.toByte
+    if (isH264) {
+      arr(7) = 0x05.toByte // NAL unit type 5 (IDR slice)
+    } else if (isGop) {
+      arr(7) = 0xB8.toByte // MPEG-2 GOP Header (0xB8)
+    } else {
+      arr(7) = 0xB3.toByte // MPEG-2 Sequence Header (0xB3)
+    }
+    ByteString(arr)
+  }
+}
+
+@RunWith(classOf[JUnitRunner])
+class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with Matchers {
+  import MpegTsSyncSpec._
 
   "MpegTsSync" should {
 
@@ -592,6 +614,80 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = cached.pmt shouldBe Some(pmt)
       val _ = cached.pcrPid shouldBe Some(0x0100)
       cached.videoPid shouldBe Some(0x0101)
+    }
+
+    "hasKeyframeHeader should detect MPEG-2 sequence and GOP headers as well as H.264 IDR and SPS" in {
+      val mpeg2Seq = Array[Byte](0x00, 0x00, 0x01, 0xB3.toByte, 0x10, 0x20)
+      val _ = MpegTsSync.hasKeyframeHeader(mpeg2Seq, 0, mpeg2Seq.length) shouldBe true
+
+      val mpeg2Gop = Array[Byte](0x00, 0x00, 0x01, 0xB8.toByte, 0x00, 0x08)
+      val _ = MpegTsSync.hasKeyframeHeader(mpeg2Gop, 0, mpeg2Gop.length) shouldBe true
+
+      val h264Idr = Array[Byte](0x00, 0x00, 0x01, 0x05, 0x88.toByte)
+      val _ = MpegTsSync.hasKeyframeHeader(h264Idr, 0, h264Idr.length) shouldBe true
+
+      val h264Sps = Array[Byte](0x00, 0x00, 0x01, 0x07, 0x4D.toByte)
+      val _ = MpegTsSync.hasKeyframeHeader(h264Sps, 0, h264Sps.length) shouldBe true
+
+      val nonKey = Array[Byte](0x00, 0x00, 0x01, 0x01, 0x99.toByte)
+      MpegTsSync.hasKeyframeHeader(nonKey, 0, nonKey.length) shouldBe false
+    }
+
+    "alignToIFrame should drop video packets until MPEG-2 sequence header arrives" in {
+      val videoPid = 0x0101
+      val nonKey1 = buildMediaPacket(videoPid)
+      val nonKey2 = buildMediaPacket(videoPid)
+      val key = buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+      val postKey = buildMediaPacket(videoPid)
+
+      val result = Source(List(nonKey1, nonKey2, key, postKey))
+        .via(MpegTsSync.alignToIFrame(Some(videoPid)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      result shouldBe Seq(key, postKey)
+    }
+
+    "alignToIFrame should drop video packets until MPEG-2 GOP header arrives" in {
+      val videoPid = 0x0101
+      val nonKey = buildMediaPacket(videoPid)
+      val key = buildKeyframePacket(videoPid, isH264 = false, isGop = true)
+      val postKey = buildMediaPacket(videoPid)
+
+      val result = Source(List(nonKey, key, postKey))
+        .via(MpegTsSync.alignToIFrame(Some(videoPid)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      result shouldBe Seq(key, postKey)
+    }
+
+    "alignToIFrame should drop video packets until H.264 IDR slice arrives" in {
+      val videoPid = 0x0102
+      val nonKey = buildMediaPacket(videoPid)
+      val key = buildKeyframePacket(videoPid, isH264 = true)
+      val postKey = buildMediaPacket(videoPid)
+
+      val result = Source(List(nonKey, key, postKey))
+        .via(MpegTsSync.alignToIFrame(Some(videoPid)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      result shouldBe Seq(key, postKey)
+    }
+
+    "alignToIFrame should preserve PAT and PMT packets and detect videoPid dynamically" in {
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0100, videoPid = 0x0101)
+      val nonKey = buildMediaPacket(0x0101)
+      val key = buildKeyframePacket(0x0101, isH264 = false)
+
+      val result = Source(List(pat, pmt, nonKey, key))
+        .via(MpegTsSync.alignToIFrame(None))
+        .runWith(Sink.seq)
+        .futureValue
+
+      result shouldBe Seq(pat, pmt, key)
     }
   }
 }

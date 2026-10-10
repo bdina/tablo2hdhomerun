@@ -30,9 +30,10 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.preRollIntervalMs shouldBe 100
     val _ = config.proxy.preRollPackets shouldBe 7
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
-    val _ = config.stream.resilient.stallTimeoutSec shouldBe 8
+    val _ = config.stream.resilient.stallTimeoutSec shouldBe 5
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 20
     val _ = config.stream.resilient.retryDelaySec shouldBe 1
+    val _ = config.stream.resilient.maxRetryDelaySec shouldBe 300
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 60
     val _ = config.stream.hls.heartbeatSec shouldBe 60
     val _ = config.stream.hls.pollFailuresMax shouldBe 4
@@ -49,7 +50,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "STREAM_STALL_TIMEOUT_SEC" -> "12",
       "STREAM_TUNE_TIMEOUT_SEC" -> "30",
       "STREAM_RETRY_DELAY_SEC" -> "2",
-      "STREAM_RECOVERY_TIMEOUT_SEC" -> "90",
+      "STREAM_MAX_RETRY_DELAY_SEC" -> "120",
+      "STREAM_RECOVERY_TIMEOUT_SEC" -> "0",
       "SESSION_IDLE_GRACE_SEC" -> "60",
       "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
       "STREAM_PRE_ROLL_PACKETS" -> "14"
@@ -57,7 +59,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 12
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
     val _ = config.stream.resilient.retryDelaySec shouldBe 2
-    val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 90
+    val _ = config.stream.resilient.maxRetryDelaySec shouldBe 120
+    val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 0
     val _ = config.proxy.idleGraceSec shouldBe 60
     val _ = config.proxy.preRollIntervalMs shouldBe 50
     val _ = config.proxy.preRollPackets shouldBe 14
@@ -65,7 +68,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val fallbackConfig = AppConfig.load(Map(
       "STREAM_STALL_TIMEOUT_SEC" -> "bad"
     )).config
-    val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 8
+    val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 5
   }
 
   it should "parse bool env vars" in {

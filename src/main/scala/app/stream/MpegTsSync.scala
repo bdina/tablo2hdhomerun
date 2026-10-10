@@ -6,6 +6,8 @@ import org.apache.pekko.stream.scaladsl.{Flow, Source}
 import org.apache.pekko.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
 import org.apache.pekko.util.ByteString
 
+import org.slf4j.LoggerFactory
+
 import java.util.concurrent.atomic.AtomicReference
 
 import scala.concurrent.Future
@@ -13,6 +15,7 @@ import scala.concurrent.duration._
 import scala.util.{Failure, Success}
 
 object MpegTsSync {
+  private val log = LoggerFactory.getLogger(getClass)
   val PacketSize: Int = 188
   val NullPid: Int = 0x1FFF
   val PatPid: Int = 0x0000
@@ -357,6 +360,155 @@ object MpegTsSync {
             if (result.nonEmpty) {
               emit(out, result)
             }
+          }
+          completeStage()
+        }
+      })
+
+      setHandler(out, new OutHandler {
+        override def onPull(): Unit = pull(in)
+      })
+    }
+  }
+
+  def hasKeyframeHeader(arr: Array[Byte], offset: Int, len: Int): Boolean = {
+    var i = offset
+    val end = offset + len - 4
+    var found = false
+    while (i <= end && !found) {
+      if (arr(i) == 0x00.toByte && arr(i + 1) == 0x00.toByte && arr(i + 2) == 0x01.toByte) {
+        val code = arr(i + 3) & 0xFF
+        if (code == 0xB3 || code == 0xB8) {
+          found = true
+        } else {
+          val nalType = code & 0x1F
+          if (nalType == 5 || nalType == 7) {
+            found = true
+          } else if (code == 0x00 && i + 5 < offset + len) {
+            val pictureCodingType = (arr(i + 5) >> 3) & 0x07
+            if (pictureCodingType == 1) {
+              found = true
+            } else {
+              i += 1
+            }
+          } else {
+            i += 1
+          }
+        }
+      } else {
+        i += 1
+      }
+    }
+    found
+  }
+
+  def alignToIFrame(videoPid: Option[Int] = None): Flow[ByteString, ByteString, NotUsed] =
+    Flow.fromGraph(new AlignToIFrameStage(videoPid))
+
+  private final class AlignToIFrameStage(videoPid: Option[Int]) extends GraphStage[FlowShape[ByteString, ByteString]] {
+    val in: Inlet[ByteString] = Inlet("MpegTsSync.alignToIFrame.in")
+    val out: Outlet[ByteString] = Outlet("MpegTsSync.alignToIFrame.out")
+    override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
+
+    override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
+      private var carry: ByteString = ByteString.empty
+      private var isAligned = false
+      private var currentVideoPid: Option[Int] = videoPid
+      private var detectedPmtPid: Option[Int] = None
+      private var droppedPackets = 0
+
+      setHandler(in, new InHandler {
+        override def onPush(): Unit = {
+          val incoming = grab(in)
+          if (isAligned) {
+            if (carry.nonEmpty) {
+              val combined = carry ++ incoming
+              carry = ByteString.empty
+              push(out, combined)
+            } else {
+              push(out, incoming)
+            }
+          } else {
+            val combined = carry ++ incoming
+            val len = combined.length
+            val arr = combined.toArray
+            var pos = 0
+            val outputBuilder = ByteString.newBuilder
+
+            while (pos + PacketSize <= len) {
+              if (arr(pos) == 0x47.toByte) {
+                if (isAligned) {
+                  outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                } else {
+                  val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
+                  if (pid == PatPid) {
+                    extractPmtPid(arr, pos).foreach { pmtPid =>
+                      detectedPmtPid = Some(pmtPid)
+                    }
+                    outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                  } else if (detectedPmtPid.contains(pid)) {
+                    if (currentVideoPid.isEmpty) {
+                      extractPmtStreamPids(arr, pos).flatMap(_.videoPid).foreach { vpid =>
+                        currentVideoPid = Some(vpid)
+                      }
+                    }
+                    outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                  } else {
+                    val afc = (arr(pos + 3) & 0x30) >> 4
+                    val payloadOffset =
+                      if (afc == 1) pos + 4
+                      else if (afc == 3) pos + 5 + (arr(pos + 4) & 0xFF)
+                      else pos + PacketSize
+                    val payloadLen = (pos + PacketSize) - payloadOffset
+
+                    val isTargetVideo = currentVideoPid.contains(pid)
+                    val isCandidateVideo = currentVideoPid.isEmpty && pid != NullPid && pid > 0
+
+                    if ((isTargetVideo || isCandidateVideo) && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen)) {
+                      if (currentVideoPid.isEmpty) currentVideoPid = Some(pid)
+                      isAligned = true
+                      log.info(s"Aligned to I-Frame on PID ${currentVideoPid.getOrElse(pid)} (dropped $droppedPackets leading packets)")
+                      outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                    } else {
+                      droppedPackets += 1
+                      if (droppedPackets > 1500) {
+                        log.warn(s"Max dropped packets ($droppedPackets) exceeded while waiting for I-Frame; forcing alignment")
+                        isAligned = true
+                        outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                      }
+                    }
+                  }
+                }
+                pos += PacketSize
+              } else {
+                val nextSync = findNextSync(arr, pos + 1, len)
+                if (nextSync >= 0) {
+                  pos = nextSync
+                } else {
+                  pos = len - PacketSize + 1
+                }
+              }
+            }
+
+            if (!isAligned && pos == 0 && len >= PacketSize && findNextSync(arr, 0, len) < 0) {
+              isAligned = true
+              outputBuilder ++= combined
+              pos = len
+            }
+
+            carry = combined.drop(pos)
+            val result = outputBuilder.result()
+            if (result.nonEmpty) {
+              push(out, result)
+            } else {
+              pull(in)
+            }
+          }
+        }
+
+        override def onUpstreamFinish(): Unit = {
+          if (carry.nonEmpty) {
+            emit(out, carry)
           }
           completeStage()
         }

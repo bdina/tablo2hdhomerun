@@ -55,6 +55,7 @@ final case class ResilientHlsConfig(
   stallTimeoutSec: Int
 , tuneTimeoutSec: Int
 , retryDelaySec: Int
+, maxRetryDelaySec: Int
 , recoveryTimeoutSec: Int
 )
 
@@ -119,9 +120,10 @@ object AppConfig {
     , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)
     )
     val resilient = ResilientHlsConfig(
-      stallTimeoutSec = getInt(get, "STREAM_STALL_TIMEOUT_SEC", 8)
+      stallTimeoutSec = getInt(get, "STREAM_STALL_TIMEOUT_SEC", 5)
     , tuneTimeoutSec = getInt(get, "STREAM_TUNE_TIMEOUT_SEC", 20)
     , retryDelaySec = getInt(get, "STREAM_RETRY_DELAY_SEC", 1)
+    , maxRetryDelaySec = getInt(get, "STREAM_MAX_RETRY_DELAY_SEC", 300)
     , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
     )
     val hls = HlsStreamConfig(

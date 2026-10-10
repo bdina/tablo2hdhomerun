@@ -1514,6 +1514,7 @@ object Tablo4thGen {
               streamFactory = () => streamFactory()
             , streamName = s"4thgen-channel-$channelId"
             , resumePrefixSupplier = () => Some(cachedHeadersRef.get().syncPrefix)
+            , videoPidSupplier = () => cachedHeadersRef.get().videoPid
             )
               .via(MpegTsSync.cacheFlow(cachedHeadersRef, updated => {
                 SessionManager.setCachedHeaders(channelId, updated)
