@@ -21,10 +21,10 @@ Tablo2HDHomeRun is built to deliver this seamless, couch-friendly viewing experi
 
 Over-the-air broadcast streams during antenna flutter, wind gusts, or fringe reception inevitably suffer transport data loss. The proxy's design deliberately prioritizes **uninterrupted client playback and zero human intervention over attempting to salvage corrupted slices from degraded streams**.
 
-- **Detect dropouts by lack of progress**: Dropouts are detected when no new bytes arrive for `STREAM_STALL_TIMEOUT_SEC` (default 8s), not by TS packet error counters. The Tablo 4th gen repackages broadcast MPEG-2 into clean TS framing even when RF reception drops, so CC/TEI checks do not detect ATSC signal loss.
-- **Cold retune with fixed delay**: When a stall occurs, the proxy explicitly sends a DELETE request to release the old Tablo session, then executes a cold `POST /watch` (~11s hardware tune) with a fixed `STREAM_RETRY_DELAY_SEC` (default 1s) between retune attempts. `STREAM_TUNE_TIMEOUT_SEC` (default 20s) bounds each tune attempt.
+- **Detect dropouts by lack of progress**: Dropouts are detected when no new bytes arrive for `STREAM_STALL_TIMEOUT_SEC` (default 5s), not by TS packet error counters. The Tablo 4th gen repackages broadcast MPEG-2 into clean TS framing even when RF reception drops, so CC/TEI checks do not detect ATSC signal loss.
+- **Cold retune with fixed delay**: When a stall occurs, the proxy explicitly sends a DELETE request to release the old Tablo session, then executes a cold `POST /watch` with a fixed `STREAM_RETRY_DELAY_SEC` (default 1s) between retune attempts. `STREAM_TUNE_TIMEOUT_SEC` (default 20s) bounds each tune attempt.
 - **Tolerant segment fetching**: Short ranged segment reads are accepted when the segment stops growing during a reception drop. Trailing partial packets are cleanly dropped by `MpegTsSync.alignPackets`. Missing data during recovery is expected and accepted.
-- **Predictable freeze duration**: A typical dropout recovery cycle takes approximately 8s (stall watchdog) + 1s (retry delay) + ~11s (cold `/watch` tune) ≈ 20s of frozen frame.
+- **Predictable freeze duration**: A typical dropout recovery cycle takes approximately 5s (stall watchdog) + 1s (retry delay) + ~2.5s (cold `/watch` tune) ≈ 8.5s total freeze duration before real data resumes.
 - **Known limitation**: Marginal (not lost) RF reception can cause MPEG-2 slice corruption inside segments that the Tablo writes to the stream. These corrupted macroblocks pass through to Plex, where Plex transcoders may log non-fatal warnings (e.g. `mpeg2video` errors such as `slice below image` or `invalid cbp -1`). The proxy does not attempt to inspect or repair internal video slice data.
 
 ## Technology Stack
@@ -68,7 +68,7 @@ Over-the-air broadcast streams during antenna flutter, wind gusts, or fringe rec
                                        ▼
 ┌─────────────────────────────────────────────────────────────────────────────┐
 │                            TabloTV DVR Device                               │
-│                              (Port 8885)                                    │
+│                    (Port 8887 4th gen / 8885 legacy)                        │
 │  ┌──────────────────────────────────────────────────────────────────────┐   │
 │  │  /guide/channels  │  /batch  │  /guide/channels/{id}/watch           │   │
 │  └──────────────────────────────────────────────────────────────────────┘   │
@@ -189,7 +189,7 @@ Before fanning out via `BroadcastHub`, streams pass through `MpegTsSync.cacheFlo
       client attachment primes with cached PAT/PMT and discontinuity headers
 4. 4th gen session maintenance:
    a. Periodically POST /player/sessions/{token}/keepalive while the client stream is active
-   b. ResilientHlsSource releases the old session and cold-tunes via `/watch` when no new bytes arrive for 8s or the session ends
+   b. ResilientHlsSource releases the old session and cold-tunes via `/watch` when no new bytes arrive for 5s or the session ends
    c. MpegTsSync normalizes packet boundaries and caches PAT/PMT headers (persisted per channel
       in SessionManager.channelHeaderCache across session lifecycles for fast subsequent tunes)
 5. Client teardown:

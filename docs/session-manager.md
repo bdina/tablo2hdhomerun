@@ -124,7 +124,7 @@ Style matches existing 4th-gen actors (`LineupActor`): nested `Request` / `Respo
 
 ```scala
 object SessionManager {
-  val IdleGrace: FiniteDuration = 15.seconds
+  val IdleGrace: FiniteDuration = 75.seconds
   val BroadcastHubBufferSize: Int = 1024
 
   sealed trait Request
@@ -550,7 +550,7 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Reception drop (no new bytes for 8s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (8s) → 1s retry delay → DELETE old session → cold `POST /watch` (~11s) → resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
+| Reception drop (no new bytes for 5s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (5s) → 1s retry delay → DELETE old session → cold `POST /watch` (~2.5s) → resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
 | 60s without new bytes (recovery timeout) | Stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately; channel is immediately re-tunable |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 1024 buffer) | BroadcastHub backpressures the producer when slowest subscriber is 1024 elements behind |
