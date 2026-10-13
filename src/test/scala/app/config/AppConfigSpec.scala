@@ -38,6 +38,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.enableSlateVideo shouldBe false
     val _ = config.stream.hls.heartbeatSec shouldBe 60
     val _ = config.stream.hls.pollFailuresMax shouldBe 4
+    val _ = config.stream.hls.recoveryLiveEdgeSegments shouldBe 3
     val _ = config.mediaRoot shouldBe None
     val _ = loaded.tabloAuth.email shouldBe None
     val _ = loaded.tabloAuth.password shouldBe None
@@ -56,7 +57,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "STREAM_ENABLE_SLATE_VIDEO" -> "true",
       "SESSION_IDLE_GRACE_SEC" -> "60",
       "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
-      "STREAM_PRE_ROLL_PACKETS" -> "14"
+      "STREAM_PRE_ROLL_PACKETS" -> "14",
+      "STREAM_RECOVERY_LIVE_EDGE_SEGMENTS" -> "5"
     )).config
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 12
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
@@ -64,6 +66,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.maxRetryDelaySec shouldBe 120
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 0
     val _ = config.stream.resilient.enableSlateVideo shouldBe true
+    val _ = config.stream.hls.recoveryLiveEdgeSegments shouldBe 5
     val _ = config.proxy.idleGraceSec shouldBe 60
     val _ = config.proxy.preRollIntervalMs shouldBe 50
     val _ = config.proxy.preRollPackets shouldBe 14
@@ -72,6 +75,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "STREAM_STALL_TIMEOUT_SEC" -> "bad"
     )).config
     val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 5
+    val _ = fallbackConfig.stream.hls.recoveryLiveEdgeSegments shouldBe 3
   }
 
   it should "parse bool env vars" in {

@@ -2,7 +2,9 @@ package app.stream
 
 object HlsPlaylistPoller {
   val liveEdgeSegmentCount: Int = 3
-  val recoveryLiveEdgeSegmentCount: Int = 2
+  val defaultRecoveryLiveEdgeSegmentCount: Int = 3
+  def recoveryLiveEdgeSegmentCount: Int =
+    scala.util.Try(app.AppContext.config.stream.hls.recoveryLiveEdgeSegments).getOrElse(defaultRecoveryLiveEdgeSegmentCount)
 
   final case class SegmentInfo(
     url: String
