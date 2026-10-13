@@ -47,7 +47,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Topic | Choice |
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
-| Retune | Release old Tablo session, then cold `/watch`, inside `ResilientHlsSource` restart; hub stays up |
+| Retune | Two-tier recovery: Tier 1 soft recovery (polling existing session up to 15s), escalating to Tier 2 cold retune (DELETE + POST /watch) with exponential backoff on flapping (<30s); hub stays up |
 | Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
@@ -550,7 +550,7 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Reception drop (no new bytes for 5s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (5s) → 1s retry delay → DELETE old session → cold `POST /watch` (~2.5s) → resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
+| Reception drop (no new bytes for 5s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (5s) → Tier 1 soft recovery attempts to poll existing session for up to 15s; escalates to Tier 2 cold retune (DELETE old session, POST /watch) with flap dampening backoff (up to 30s) if stalls recur within 30s; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
 | 60s without new bytes (recovery timeout) | Stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately; channel is immediately re-tunable |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 1024 buffer) | BroadcastHub backpressures the producer when slowest subscriber is 1024 elements behind |
@@ -577,7 +577,7 @@ Today `activeStreams` counts HTTP clients. With SessionManager, a tuner slot is 
 |---------|----------|
 | Idle grace | 75 seconds (configurable via `SESSION_IDLE_GRACE_SEC`) |
 | BroadcastHub buffer | 1024 elements |
-| Recovery live edge | 2 segments (~4s cushion, via `HlsPlaylistPoller.recoveryLiveEdgeSegmentCount`) |
+| Recovery live edge | 3 segments (~7.5s cushion, configurable via `STREAM_RECOVERY_LIVE_EDGE_SEGMENTS`, default 3) |
 
 Hardcoded for v1 is fine; promote to config later if needed.
 

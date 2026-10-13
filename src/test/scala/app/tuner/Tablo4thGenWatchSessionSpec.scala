@@ -180,4 +180,27 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     )
     resF.futureValue shouldBe "tuned-after-throw"
   }
+
+  "WatchSession.computeFlapDelayMillis" should "return zero for non-positive flap counts" in {
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(0) shouldBe 0L
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(-1) shouldBe 0L
+  }
+
+  it should "escalate exponentially up to thirty seconds cap" in {
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(1) shouldBe 2000L
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(2) shouldBe 4000L
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(3) shouldBe 8000L
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(4) shouldBe 16000L
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(5) shouldBe 30000L
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(10) shouldBe 30000L
+  }
+
+  "WatchSession.isFlapping" should "detect stalls occurring within thirty seconds of data resumption" in {
+    val resumeNanos = 10000000000L
+    val flapNanos = resumeNanos + 15.seconds.toNanos
+    val stableNanos = resumeNanos + 35.seconds.toNanos
+
+    Tablo4thGen.Channel.WatchSession.isFlapping(resumeNanos, flapNanos) shouldBe true
+    Tablo4thGen.Channel.WatchSession.isFlapping(resumeNanos, stableNanos) shouldBe false
+  }
 }
