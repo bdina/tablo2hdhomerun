@@ -161,7 +161,25 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
     val delayedManager = system.spawn(delayedBehavior, s"stub-delayed-mgr-${java.util.UUID.randomUUID()}")
     Get("/channel/cold-chan") ~> routesWithManager(delayedManager) ~> check {
       val _ = status shouldBe StatusCodes.OK
+    }
+  }
+
+  "GET /auto/v4.1" should "return 200 OK with video/mp2t when channel is found in lineup" in {
+    Get("/auto/v4.1") ~> routes() ~> check {
+      val _ = status shouldBe StatusCodes.OK
       contentType.mediaType.subType shouldBe "mp2t"
+    }
+  }
+
+  "GET /auto/v99.9" should "return 404 Not Found when channel is not in lineup" in {
+    Get("/auto/v99.9") ~> routes() ~> check {
+      status shouldBe StatusCodes.NotFound
+    }
+  }
+
+  "GET /auto/v4.1" should "return 503 Service Unavailable when tuners are exhausted" in {
+    Get("/auto/v4.1") ~> routes(rejectNoTuners = true) ~> check {
+      status shouldBe StatusCodes.ServiceUnavailable
     }
   }
 }
