@@ -1696,7 +1696,7 @@ object Tablo4thGen {
         }
 
         def handleTuneFailure(attempt: Int, ex: Throwable): Unit = {
-          if (System.nanoTime() >= deadline) {
+          if (recoveryTimeout.toNanos > 0 && System.nanoTime() >= deadline) {
             log.warn("[4thgen-channel] initial tune failed after {}s recovery timeout channelId={}", recoveryTimeout.toSeconds, channelId, ex)
             onFailed(ex)
           } else {
@@ -1713,10 +1713,25 @@ object Tablo4thGen {
 
     def route(
       sessionManager: ActorRef[SessionManager.Request]
-    )(implicit system: ActorSystem[?]) = {
+    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
+      route(sessionManager, None)
+
+    def route(
+      sessionManager: ActorRef[SessionManager.Request]
+    , lineupActor: ActorRef[Lineup.LineupActor.Request]
+    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
+      route(sessionManager, Some(lineupActor))
+
+    def route(
+      sessionManager: ActorRef[SessionManager.Request]
+    , lineupActorOpt: Option[ActorRef[Lineup.LineupActor.Request]]
+    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route = {
       import pekko.http.scaladsl.unmarshalling.Unmarshal
       implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-      val askTimeout = Option(AppContext.config).map(_.stream.resilient.recoveryTimeoutSec.seconds + 10.seconds).getOrElse(70.seconds)
+      val askTimeout = Option(AppContext.config).map { c =>
+        if (c.stream.resilient.recoveryTimeoutSec <= 0) 365.days
+        else c.stream.resilient.recoveryTimeoutSec.seconds + 10.seconds
+      }.getOrElse(70.seconds)
       implicit val timeout: Timeout = Timeout(askTimeout)
       val HttpCtx = Http()
       @volatile var cachedTuners: Option[Int] = None
@@ -1803,6 +1818,98 @@ object Tablo4thGen {
         }
       }
 
+      def streamChannel(channelId: String): pekko.http.scaladsl.server.Route = {
+        val clientId = java.util.UUID.randomUUID.toString
+        val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
+        val contentType = pekko.http.scaladsl.model.ContentType(`video/mp2t`)
+
+        val acquireFut = getOrFetchTotalTuners().flatMap { tuners =>
+          sessionManager ! SessionManager.Request.SetTotalTuners(tuners)
+          sessionManager.ask[SessionManager.Response.Acquire](replyTo =>
+            SessionManager.Request.Acquire(channelId, clientId, replyTo)
+          )
+        }
+
+        val preRollEnabled = Option(AppContext.config).forall(_.proxy.enablePreRollKeepAlive)
+        if (!preRollEnabled) {
+          onComplete(acquireFut) {
+            case Success(SessionManager.Response.Attached(source)) =>
+              log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
+              val tracked = source.watchTermination() { (_, done) =>
+                done.onComplete { _ =>
+                  sessionManager ! SessionManager.Request.Release(channelId, clientId)
+                }(ec)
+              }
+              respondWithHeaders(streamingHeaders) {
+                complete(HttpEntity.Chunked.fromData(contentType, tracked))
+              }
+            case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners)) =>
+              log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+              complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
+            case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex))) =>
+              log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+            case Failure(ex) =>
+              log.warn("[channel] acquire ask failed channelId={} clientId={}", channelId, clientId, ex)
+              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+          }
+        } else {
+          import org.apache.pekko.actor.typed.scaladsl.adapter._
+          val fastWindow = 50.millis
+          val fastTimer = after(fastWindow, system.toClassic.scheduler)(Future.successful(None))(ec)
+          val acquireAttempt = acquireFut.map(resp => Some(resp))(ec)
+          val initialDecision = Future.firstCompletedOf(Seq(acquireAttempt, fastTimer))(ec)
+
+          onComplete(initialDecision) {
+            case Success(Some(SessionManager.Response.Attached(source))) =>
+              log.info("[channel] fast-attached channelId={} clientId={}", channelId, clientId)
+              val tracked = source.watchTermination() { (_, done) =>
+                done.onComplete { _ =>
+                  sessionManager ! SessionManager.Request.Release(channelId, clientId)
+                }(ec)
+              }
+              respondWithHeaders(streamingHeaders) {
+                complete(HttpEntity.Chunked.fromData(contentType, tracked))
+              }
+            case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners))) =>
+              log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+              complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
+            case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)))) =>
+              log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+            case Success(None) =>
+              log.info("[channel] pre-roll keepalive active channelId={} clientId={}", channelId, clientId)
+              val realSourceFut: Future[Source[ByteString, NotUsed]] = acquireFut.flatMap {
+                case SessionManager.Response.Attached(source) =>
+                  log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
+                  Future.successful(source)
+                case SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners) =>
+                  log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+                  Future.failed(new RuntimeException("No available tuners"))
+                case SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)) =>
+                  log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+                  Future.failed(ex)
+              }(ec)
+
+              val interval = Option(AppContext.config).map(_.proxy.preRollIntervalMs.millis).getOrElse(100.millis)
+              val packets = Option(AppContext.config).map(_.proxy.preRollPackets).getOrElse(7)
+
+              val compositeSource = MpegTsSync.withPreRollKeepAlive(realSourceFut, interval, packets)
+              val tracked = compositeSource.watchTermination() { (_, done) =>
+                done.onComplete { _ =>
+                  sessionManager ! SessionManager.Request.Release(channelId, clientId)
+                }(ec)
+              }
+              respondWithHeaders(streamingHeaders) {
+                complete(HttpEntity.Chunked.fromData(contentType, tracked))
+              }
+            case Failure(ex) =>
+              log.warn("[channel] initialDecision failed channelId={} clientId={}", channelId, clientId, ex)
+              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+          }
+        }
+      }
+
       path("channel" / Segment / "segment" / Remaining) { (channelId, encodedSegment) =>
         options {
           respondWithHeaders(corsHeaders) {
@@ -1852,96 +1959,49 @@ object Tablo4thGen {
             val channelId = rawId.stripSuffix(".m3u8")
             complete(fetchHlsPlaylist(channelId))
           } else {
-            val channelId = rawId
-            val clientId = java.util.UUID.randomUUID.toString
-            val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-            val contentType = pekko.http.scaladsl.model.ContentType(`video/mp2t`)
+            streamChannel(rawId)
+          }
+        }
+      } ~
+      path("auto" / ("v" ~ Segment)) { guideNumber =>
+        options {
+          respondWithHeaders(corsHeaders) {
+            complete(StatusCodes.OK)
+          }
+        } ~
+        get {
+          lineupActorOpt match {
+            case Some(lineupActor) =>
+              implicit val timeout: Timeout = Timeout(3.seconds)
+              val fetchF: Future[Lineup.LineupActor.Response.Fetch] =
+                lineupActor.ask(replyTo => Lineup.LineupActor.Request.Fetch(replyTo))
+              onComplete(fetchF) {
+                case Success(Lineup.LineupActor.Response.Fetch(channels, _)) =>
+                  val matchedChannelId = channels.iterator.flatMap { ch =>
+                    val obj = ch.asJsObject.fields
+                    val gn = obj.get("GuideNumber").collect { case JsString(s) => s }
+                    if (gn.contains(guideNumber)) {
+                      obj.get("URL").collect { case JsString(u) =>
+                        val clean = u.stripSuffix(".m3u8")
+                        val idx = clean.lastIndexOf('/')
+                        if (idx >= 0 && idx < clean.length - 1) clean.substring(idx + 1)
+                        else clean
+                      }
+                    } else None
+                  }.nextOption()
 
-            val acquireFut = getOrFetchTotalTuners().flatMap { tuners =>
-              sessionManager ! SessionManager.Request.SetTotalTuners(tuners)
-              sessionManager.ask[SessionManager.Response.Acquire](replyTo =>
-                SessionManager.Request.Acquire(channelId, clientId, replyTo)
-              )
-            }
-
-            val preRollEnabled = Option(AppContext.config).forall(_.proxy.enablePreRollKeepAlive)
-            if (!preRollEnabled) {
-              onComplete(acquireFut) {
-                case Success(SessionManager.Response.Attached(source)) =>
-                  log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
-                  val tracked = source.watchTermination() { (_, done) =>
-                    done.onComplete { _ =>
-                      sessionManager ! SessionManager.Request.Release(channelId, clientId)
-                    }(ec)
-                  }
-                  respondWithHeaders(streamingHeaders) {
-                    complete(HttpEntity.Chunked.fromData(contentType, tracked))
-                  }
-                case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners)) =>
-                  log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
-                  complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
-                case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex))) =>
-                  log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
-                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
-                case Failure(ex) =>
-                  log.warn("[channel] acquire ask failed channelId={} clientId={}", channelId, clientId, ex)
-                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
-              }
-            } else {
-              import org.apache.pekko.actor.typed.scaladsl.adapter._
-              val fastWindow = 50.millis
-              val fastTimer = after(fastWindow, system.toClassic.scheduler)(Future.successful(None))(ec)
-              val acquireAttempt = acquireFut.map(resp => Some(resp))(ec)
-              val initialDecision = Future.firstCompletedOf(Seq(acquireAttempt, fastTimer))(ec)
-
-              onComplete(initialDecision) {
-                case Success(Some(SessionManager.Response.Attached(source))) =>
-                  log.info("[channel] fast-attached channelId={} clientId={}", channelId, clientId)
-                  val tracked = source.watchTermination() { (_, done) =>
-                    done.onComplete { _ =>
-                      sessionManager ! SessionManager.Request.Release(channelId, clientId)
-                    }(ec)
-                  }
-                  respondWithHeaders(streamingHeaders) {
-                    complete(HttpEntity.Chunked.fromData(contentType, tracked))
-                  }
-                case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners))) =>
-                  log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
-                  complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
-                case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)))) =>
-                  log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
-                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
-                case Success(None) =>
-                  log.info("[channel] pre-roll keepalive active channelId={} clientId={}", channelId, clientId)
-                  val realSourceFut: Future[Source[ByteString, NotUsed]] = acquireFut.flatMap {
-                    case SessionManager.Response.Attached(source) =>
-                      log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
-                      Future.successful(source)
-                    case SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners) =>
-                      log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
-                      Future.failed(new RuntimeException("No available tuners"))
-                    case SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)) =>
-                      log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
-                      Future.failed(ex)
-                  }(ec)
-
-                  val interval = Option(AppContext.config).map(_.proxy.preRollIntervalMs.millis).getOrElse(100.millis)
-                  val packets = Option(AppContext.config).map(_.proxy.preRollPackets).getOrElse(7)
-
-                  val compositeSource = MpegTsSync.withPreRollKeepAlive(realSourceFut, interval, packets)
-                  val tracked = compositeSource.watchTermination() { (_, done) =>
-                    done.onComplete { _ =>
-                      sessionManager ! SessionManager.Request.Release(channelId, clientId)
-                    }(ec)
-                  }
-                  respondWithHeaders(streamingHeaders) {
-                    complete(HttpEntity.Chunked.fromData(contentType, tracked))
+                  matchedChannelId match {
+                    case Some(channelId) =>
+                      streamChannel(channelId)
+                    case None =>
+                      complete(HttpResponse(StatusCodes.NotFound, entity = s"Channel v$guideNumber not found"))
                   }
                 case Failure(ex) =>
-                  log.warn("[channel] initialDecision failed channelId={} clientId={}", channelId, clientId, ex)
-                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+                  log.warn("[auto] failed to resolve guideNumber={} from lineup", guideNumber, ex)
+                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to resolve channel lineup"))
               }
-            }
+            case None =>
+              complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "Channel lineup not available"))
           }
         }
       }
@@ -1996,6 +2056,6 @@ object Tablo4thGen {
     Tablo2HDHomeRun.Response.Discover.route ~
       Lineup.route(lineupActor) ~
       Guide.route(authContext) ~
-      Channel.route(sessionManager) ~
+      Channel.route(sessionManager, lineupActor) ~
       Tablo2HDHomeRun.Favicon.route
 }

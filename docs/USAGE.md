@@ -201,6 +201,7 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 | `STREAM_MAX_RETRY_DELAY_SEC` | `300` | Maximum backoff delay in seconds for prolonged outages |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `60` | Total outage duration before ending stream (set to `0` for infinite recovery) |
 | `STREAM_ENABLE_SLATE_VIDEO` | `false` | Enable looping "Please Stand By" slate video during dropouts. Default `false` uses a freeze-frame experience with null packets. |
+| `STREAM_RECOVERY_LIVE_EDGE_SEGMENTS` | `3` | Number of live-edge segments (~7.5s cushion) fetched upon stream recovery to prime player/transcoder buffers |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat INFO logs |
 | `STREAM_HLS_POLL_FAILURES_MAX` | `4` | Consecutive playlist fetch failures before retune |
 
@@ -227,8 +228,8 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 3. **Ideal End-User Experience & Failure Recovery**:
    - **Continuous Playback During Instability**: When OTA reception drops or the Tablo tuner hiccups, Plex clients (Apple TV, iOS, Android TV, Roku, Plex Web) remain in active playback state instead of exiting with fatal error dialogs ("Playback Error" or "Can't Play This: Format isn't supported").
    - **Frozen Video Over Fatal Errors**: The proxy trickles MPEG-TS null packets every 40 ms to keep Plex client grabbers warm while re-tuning the Tablo tuner in the background. The viewer observes a momentary frozen picture (typically ~20s per dropout) while the signal recovers, requiring zero manual intervention.
-   - **No Seen-Content Replay**: Upon tuner recovery, streaming reconnects strictly at the live edge. Video and audio segments already seen prior to the interruption are never re-sent, preventing disorienting loops or time-warps.
-   - **Graceful 60-Second Outage Cutoff**: If an antenna disconnection or transmission outage prevents re-tuning for more than 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`), the proxy terminates the stream cleanly, allowing the Plex client to exit cleanly rather than remaining frozen indefinitely; the channel can be re-tuned immediately afterwards.
+   - **No Seen-Content Replay**: Upon tuner recovery, streaming reconnects strictly at the live edge with a 3-segment (~7.5s) cushion (via `STREAM_RECOVERY_LIVE_EDGE_SEGMENTS`, default 3). Video and audio segments already seen prior to the interruption are never re-sent, preventing disorienting loops or time-warps while immediately rebuilding downstream transcode buffers.
+   - **Graceful Outage Cutoff**: If an antenna disconnection or transmission outage prevents re-tuning for more than `STREAM_RECOVERY_TIMEOUT_SEC` (default 60s, or `0` for indefinite recovery with continuous null keepalives for unattended all-day viewing), the proxy terminates the stream cleanly, allowing the Plex client to exit cleanly rather than remaining frozen indefinitely; the channel can be re-tuned immediately afterwards.
 
 ## Streaming a Channel
 
@@ -237,6 +238,9 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 ```bash
 # Stream channel 12345 to VLC
 vlc http://localhost:8080/channel/12345
+
+# Stream virtual channel (SiliconDust HDHomeRun compatible route)
+vlc http://localhost:8080/auto/v4.1
 
 # Stream to file
 curl http://localhost:8080/channel/12345 -o recording.ts

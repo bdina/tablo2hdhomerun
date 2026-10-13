@@ -14,8 +14,8 @@ Tablo2HDHomeRun is built to deliver this seamless, couch-friendly viewing experi
 
 1. **Uninterrupted Client Playback**: Plex client apps stay in an active playback state during RF glitches and temporary channel dropouts. The proxy absorbs stream degradations, preventing player termination and eliminating the need for manual viewer intervention.
 2. **Warm Client Keepalive with Frozen Video**: When an upstream Tablo stream stalls or fails, the proxy continuously streams standards-compliant MPEG-TS null packets (PID `0x1FFF`) to the client every 40 ms while releasing the old Tablo session and performing a cold tune (`/watch`). Downstream Plex grabbers and transcoders stay fed with valid transport stream packets without timing out. The viewer experiences a clean video freeze rather than a crash or error modal.
-3. **Live-Edge Resumption (No Seen-Content Replay)**: When the Tablo tuner recovers after a cold tune and valid broadcast packets resume from a fresh segment file, playback cuts directly to the live edge. A single resume prefix (multi-PID discontinuity + cached PAT/PMT headers) informs downstream decoders of the timeline reset without jarring rewind loops or replayed audio/video.
-4. **Deterministic Clean Outage Termination**: If an outage is persistent and the proxy cannot successfully recover the stream after 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`) without new bytes, the stream terminates cleanly. The session manager removes the entry immediately so the channel is re-tunable right away.
+3. **Live-Edge Resumption (No Seen-Content Replay)**: When the Tablo tuner recovers after a cold tune and valid broadcast packets resume from a fresh segment file, playback cuts directly to the live edge with a 3-segment (~7.5s) cushion (configurable via `STREAM_RECOVERY_LIVE_EDGE_SEGMENTS`, default 3) to immediately replenish downstream transcoder/player buffers. A single resume prefix (multi-PID discontinuity + cached PAT/PMT headers) informs downstream decoders of the timeline reset without jarring rewind loops or replayed audio/video.
+4. **Deterministic Clean Outage Termination**: If an outage is persistent and the proxy cannot successfully recover the stream after `STREAM_RECOVERY_TIMEOUT_SEC` (default 60s, or `0` for indefinite recovery with continuous null keepalives) without new bytes, the stream terminates cleanly. The session manager removes the entry immediately so the channel is re-tunable right away.
 
 ### Acceptable Data Loss & Resiliency Philosophy
 
@@ -60,7 +60,8 @@ Over-the-air broadcast streams during antenna flutter, wind gusts, or fringe rec
 │  │  /lineup.json   │  │  GuideActor      │  │  (STREAM_BACKEND env)       │ │
 │  │  /lineup_status │  │  FsMonitor       │  │  Chunked HTTP streaming     │ │
 │  │  /channel/{id}  │  │  FsNotify        │  │                             │ │
-│  │  /guide.xml     │  │  FFMpegDelegate  │  │                             │ │
+│  │  /auto/v{chan}  │  │  FFMpegDelegate  │  │                             │ │
+│  │  /guide.xml     │  │                  │  │                             │ │
 │  └─────────────────┘  └──────────────────┘  └─────────────────────────────┘ │
 └─────────────────────────────────────────────────────────────────────────────┘
                                        │
@@ -87,6 +88,7 @@ The server exposes HDHomeRun-compatible REST endpoints:
 | `/lineup.json` | GET | Channel lineup in HDHomeRun format |
 | `/lineup_status.json` | GET | Scan status (ScanInProgress, ScanPossible) |
 | `/channel/{id}` | GET | Live MPEG-TS stream for a channel |
+| `/auto/v{channel}` | GET | Live MPEG-TS stream by virtual channel number (e.g. `/auto/v4.1`) |
 | `/guide.xml` | GET | XMLTV-format electronic program guide |
 
 ### Actor System
