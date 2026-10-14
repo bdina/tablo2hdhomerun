@@ -942,8 +942,62 @@ object Tablo4thGen {
         before.playlistUrl != after.playlistUrl
 
       val softRecoveryThresholdSec: Int = 15
+      val softRecoveryTimeoutSec: Int = 4
+      def softRecoveryTimeout: FiniteDuration = softRecoveryTimeoutSec.seconds
       val flapWindowSec: Int = 30
-      val maxFlapDelaySec: Int = 30
+      val maxFlapDelaySec: Int = 4
+
+      final case class FlapState(
+        dataResumedNanos: Long
+      , consecutiveFlaps: Int = 0
+      , isStalling: Boolean = false
+      , stallStartTimeNanos: Long = 0L
+      ) {
+        def onStall(nowNanos: Long): FlapState =
+          if (isStalling) this
+          else {
+            val flapping = isFlapping(dataResumedNanos, nowNanos)
+            val nextFlaps = if (flapping) consecutiveFlaps + 1 else 0
+            copy(
+              consecutiveFlaps = nextFlaps
+            , isStalling = true
+            , stallStartTimeNanos = nowNanos
+            )
+          }
+
+        def onSegmentReceived(nowNanos: Long): FlapState =
+          if (isStalling) {
+            copy(
+              dataResumedNanos = nowNanos
+            , isStalling = false
+            , stallStartTimeNanos = 0L
+            )
+          } else this
+      }
+
+      sealed trait RecoveryDecision
+      object RecoveryDecision {
+        final case class Soft(timeout: FiniteDuration) extends RecoveryDecision
+        final case class Cold(flapDelayMs: Long) extends RecoveryDecision
+      }
+
+      def decideRecovery(
+        flapState: FlapState
+      , attempt: Int
+      , softRetryAttempted: Boolean
+      , nowNanos: Long
+      , shouldRefreshSession: Boolean
+      ): RecoveryDecision = {
+        val stallElapsedNanos = nowNanos - flapState.stallStartTimeNanos
+        val canSoftRetry =
+          attempt > 1 &&
+          !softRetryAttempted &&
+          stallElapsedNanos <= softRecoveryThresholdSec.seconds.toNanos &&
+          !shouldRefreshSession
+
+        if (canSoftRetry) RecoveryDecision.Soft(softRecoveryTimeout)
+        else RecoveryDecision.Cold(computeFlapDelayMillis(flapState.consecutiveFlaps))
+      }
 
       def computeFlapDelayMillis(consecutiveFlaps: Int, baseRetryDelayMs: Long = 1000L): Long =
         if (consecutiveFlaps <= 0) 0L
@@ -1496,16 +1550,20 @@ object Tablo4thGen {
                   }
               }
 
+          import app.stream.ResilientHlsSource
           val attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
-          @volatile var lastDataResumedNanos: Long = System.nanoTime()
-          @volatile var stallStartTimeNanos: Long = 0L
-          @volatile var consecutiveFlaps: Int = 0
-          @volatile var isStalling: Boolean = false
+          val flapTracker = new AtomicReference[WatchSession.FlapState](
+            WatchSession.FlapState(dataResumedNanos = System.nanoTime())
+          )
+          @volatile var softRetryAttempted: Boolean = false
 
           val onSegmentReceived: () => Unit = () => {
-            lastDataResumedNanos = System.nanoTime()
-            isStalling = false
-            stallStartTimeNanos = 0L
+            val nowNanos = System.nanoTime()
+            val prev = flapTracker.getAndUpdate(_.onSegmentReceived(nowNanos))
+            if (prev.isStalling) {
+              softRetryAttempted = false
+              log.info("[4thgen-channel] stream data resumed channelId={}", channelId)
+            }
           }
 
           def streamFactory(): Source[ByteString, ?] = {
@@ -1516,67 +1574,68 @@ object Tablo4thGen {
             if (attempt == 1 && !WatchSession.shouldRefreshSession(session)) {
               streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = false, onSegmentReceived)
             } else {
-              if (!isStalling) {
-                isStalling = true
-                stallStartTimeNanos = nowNanos
-                if (WatchSession.isFlapping(lastDataResumedNanos, nowNanos)) {
-                  consecutiveFlaps += 1
-                  log.warn("[4thgen-channel] retune flap detected channelId={} consecutiveFlaps={}", channelId, consecutiveFlaps)
-                } else {
-                  consecutiveFlaps = 0
-                }
+              val prevFlapState = flapTracker.getAndUpdate(_.onStall(nowNanos))
+              val isFirstStallEntry = !prevFlapState.isStalling
+              val currentFlapState = if (isFirstStallEntry) prevFlapState.onStall(nowNanos) else prevFlapState
+              val consecutiveFlaps = currentFlapState.consecutiveFlaps
+              if (isFirstStallEntry && consecutiveFlaps > 0) {
+                log.warn("[4thgen-channel] retune flap detected channelId={} consecutiveFlaps={}", channelId, consecutiveFlaps)
               }
 
-              val stallElapsedNanos = nowNanos - stallStartTimeNanos
-              val canSoftRetry =
-                attempt > 1 &&
-                stallElapsedNanos <= WatchSession.softRecoveryThresholdSec.seconds.toNanos &&
-                !WatchSession.shouldRefreshSession(session)
+              val decision = WatchSession.decideRecovery(
+                flapState = currentFlapState
+              , attempt = attempt
+              , softRetryAttempted = softRetryAttempted
+              , nowNanos = nowNanos
+              , shouldRefreshSession = WatchSession.shouldRefreshSession(session)
+              )
 
-              if (canSoftRetry) {
-                log.info(
-                  "[4thgen-channel] soft recovery retry attempt={} channelId={} elapsedStallMs={}"
-                , attempt
-                , channelId
-                , stallElapsedNanos / 1000000
-                )
-                streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
-              } else {
-                log.info(
-                  "[4thgen-channel] cold recovery retune attempt={} channelId={} consecutiveFlaps={}"
-                , attempt
-                , channelId
-                , consecutiveFlaps
-                )
-                keepaliveTask.foreach(_.cancel())
-                val oldToken = currentSession.get().token
-                val flapDelayMs = WatchSession.computeFlapDelayMillis(consecutiveFlaps)
-                val tuneFuture = () => {
-                  WatchSession.releaseThenTune(
-                    release = () => oldToken.map(endSession).getOrElse(Future.successful(()))
-                  , tune = () => retuneWatchSession()
-                  ).map { newSession =>
-                    currentSession.set(newSession)
-                    scheduleKeepalive()
-                    streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
-                  }(ec)
-                }
-
-                if (flapDelayMs > 0) {
-                  log.warn(
-                    "[4thgen-channel] delaying cold retune by {}ms during flap dampening channelId={}"
-                  , flapDelayMs
+              decision match {
+                case WatchSession.RecoveryDecision.Soft(softTimeout) =>
+                  softRetryAttempted = true
+                  log.info(
+                    "[4thgen-channel] soft recovery retry attempt={} channelId={} elapsedStallMs={}"
+                  , attempt
                   , channelId
+                  , (nowNanos - currentFlapState.stallStartTimeNanos) / 1000000
                   )
-                  Source.futureSource(after(flapDelayMs.millis, scheduler)(tuneFuture()))
-                } else {
-                  Source.futureSource(tuneFuture())
-                }
+                  val softStream = streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
+                  softStream.via(ResilientHlsSource.StallWatchdog.flow(softTimeout, softTimeout, s"4thgen-channel-$channelId-soft"))
+
+                case WatchSession.RecoveryDecision.Cold(flapDelayMs) =>
+                  log.info(
+                    "[4thgen-channel] cold recovery retune attempt={} channelId={} consecutiveFlaps={}"
+                  , attempt
+                  , channelId
+                  , consecutiveFlaps
+                  )
+                  keepaliveTask.foreach(_.cancel())
+                  val oldToken = currentSession.get().token
+                  val tuneFuture = () => {
+                    WatchSession.releaseThenTune(
+                      release = () => oldToken.map(endSession).getOrElse(Future.successful(()))
+                    , tune = () => retuneWatchSession()
+                    ).map { newSession =>
+                      currentSession.set(newSession)
+                      scheduleKeepalive()
+                      streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
+                    }(ec)
+                  }
+
+                  if (flapDelayMs > 0) {
+                    log.warn(
+                      "[4thgen-channel] delaying cold retune by {}ms during flap dampening channelId={}"
+                    , flapDelayMs
+                    , channelId
+                    )
+                    Source.futureSource(after(flapDelayMs.millis, scheduler)(tuneFuture()))
+                  } else {
+                    Source.futureSource(tuneFuture())
+                  }
               }
             }
           }
 
-          import app.stream.ResilientHlsSource
           val initialHeaders = SessionManager.getCachedHeaders(channelId)
           val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](initialHeaders)
           val headersReadyPromise = scala.concurrent.Promise[Unit]()

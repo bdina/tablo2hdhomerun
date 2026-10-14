@@ -183,7 +183,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val cached = MpegTsSync.CachedHeaders(Some(pat), Some(pmt))
       val cachedRef = new AtomicReference(cached)
 
-      val media = buildMediaPacket(0x0101)
+      val media = buildKeyframePacket(0x0101, isH264 = false)
       val hubSource = Source.single(media)
 
       val primed = MpegTsSync.primeClientSource(hubSource, cachedRef)
@@ -200,7 +200,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
     "not prepend headers if cache is empty" in {
       val emptyRef = new AtomicReference(MpegTsSync.CachedHeaders())
-      val media = buildMediaPacket(0x0101)
+      val media = buildKeyframePacket(0x0101, isH264 = false)
       val hubSource = Source.single(media)
 
       val primed = MpegTsSync.primeClientSource(hubSource, emptyRef)
@@ -208,6 +208,73 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         .futureValue
 
       val _ = primed shouldBe media
+    }
+
+    "gate client attach on an I-frame when cache is empty and drop mid-GOP video packets" in {
+      val videoPid = 0x0101
+      val emptyRef = new AtomicReference(MpegTsSync.CachedHeaders())
+
+      val midGopArr = buildMediaPacket(videoPid).toArray
+      midGopArr(4) = 0x11.toByte
+      val midGop = ByteString(midGopArr)
+
+      val keyframe = buildKeyframePacket(videoPid, isH264 = false)
+
+      val postKeyframeArr = buildMediaPacket(videoPid).toArray
+      postKeyframeArr(4) = 0x22.toByte
+      val postKeyframe = ByteString(postKeyframeArr)
+
+      val hubSource = Source(List(midGop, keyframe, postKeyframe))
+
+      val primed = MpegTsSync.primeClientSource(hubSource, emptyRef)
+        .runWith(Sink.seq)
+        .futureValue
+
+      val allBytes = primed.foldLeft(ByteString.empty)(_ ++ _)
+      val _ = allBytes.length shouldBe (188 * 2)
+      val _ = allBytes.containsSlice(keyframe) shouldBe true
+      val _ = allBytes.containsSlice(postKeyframe) shouldBe true
+      allBytes.containsSlice(midGop) shouldBe false
+    }
+
+    "gate client attach on an I-frame, dropping mid-GOP video packets until sequence header arrives" in {
+      val videoPid = 0x0101
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0100, videoPid = videoPid)
+      val cached = MpegTsSync.CachedHeaders(Some(pat), Some(pmt), Some(0x0100), Some(videoPid))
+      val cachedRef = new AtomicReference(cached)
+
+      val midGop1Arr = buildMediaPacket(videoPid).toArray
+      midGop1Arr(4) = 0x11.toByte
+      val midGop1 = ByteString(midGop1Arr)
+
+      val midGop2Arr = buildMediaPacket(videoPid).toArray
+      midGop2Arr(4) = 0x22.toByte
+      val midGop2 = ByteString(midGop2Arr)
+
+      val keyframe = buildKeyframePacket(videoPid, isH264 = false)
+
+      val postKeyframeArr = buildMediaPacket(videoPid).toArray
+      postKeyframeArr(4) = 0x33.toByte
+      val postKeyframe = ByteString(postKeyframeArr)
+      val hubSource = Source(List(midGop1, midGop2, keyframe, postKeyframe))
+
+      val primed = MpegTsSync.primeClientSource(hubSource, cachedRef)
+        .runWith(Sink.seq)
+        .futureValue
+
+      val allBytes = primed.foldLeft(ByteString.empty)(_ ++ _)
+      val syncPrefixLen = cached.syncPrefix.length
+      val _ = allBytes.length shouldBe (syncPrefixLen + 188 * 2)
+      val _ = allBytes.containsSlice(keyframe) shouldBe true
+      val _ = allBytes.containsSlice(postKeyframe) shouldBe true
+      val _ = allBytes.containsSlice(midGop1) shouldBe false
+      val _ = allBytes.containsSlice(midGop2) shouldBe false
+
+      // First video packet immediately following prefix must begin with sequence header
+      val firstVideoPacket = allBytes.slice(syncPrefixLen, syncPrefixLen + 188)
+      val _ = firstVideoPacket shouldBe keyframe
+      firstVideoPacket.slice(4, 8) shouldBe ByteString(0x00, 0x00, 0x01, 0xB3.toByte)
     }
 
     "emit only packet-aligned chunks starting with 0x47 when receiving arbitrary chunk sizes" in {
@@ -688,6 +755,22 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         .futureValue
 
       result shouldBe Seq(pat, pmt, key)
+    }
+
+    "alignToIFrame should fail open when maxDroppedPackets is exceeded" in {
+      val videoPid = 0x0101
+      val nonKeyPackets = (1 to 4).map { i =>
+        val arr = buildMediaPacket(videoPid).toArray
+        arr(4) = i.toByte
+        ByteString(arr)
+      }.toList
+
+      val result = Source(nonKeyPackets)
+        .via(MpegTsSync.alignToIFrame(Some(videoPid), maxDroppedPackets = 2))
+        .runWith(Sink.seq)
+        .futureValue
+
+      result shouldBe Seq(nonKeyPackets(2), nonKeyPackets(3))
     }
   }
 }

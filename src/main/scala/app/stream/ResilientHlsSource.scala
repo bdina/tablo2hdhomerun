@@ -81,7 +81,7 @@ object ResilientHlsSource {
 
   // Fails the inner (per-tune) stream when it stops making progress, which triggers a retune.
   // Before the first element the longer tune timeout applies (cold /watch takes ~11s).
-  private[stream] object StallWatchdog {
+  private[app] object StallWatchdog {
     def flow(
       tuneTimeout: FiniteDuration
     , stallTimeout: FiniteDuration

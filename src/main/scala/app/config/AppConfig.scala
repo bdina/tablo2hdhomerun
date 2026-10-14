@@ -41,7 +41,7 @@ final case class ProxyConfig(
 , tunerCount: Option[Int] = None
 , enableUdpDiscovery: Boolean = true
 , enableHlsEndpoint: Boolean = true
-, idleGraceSec: Int = 45
+, idleGraceSec: Int = 75
 , enablePreRollKeepAlive: Boolean = true
 , preRollIntervalMs: Int = 100
 , preRollPackets: Int = 7

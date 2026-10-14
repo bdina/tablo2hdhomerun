@@ -47,7 +47,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Topic | Choice |
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
-| Retune | Two-tier recovery: Tier 1 soft recovery (restart stream on the existing session while stall is under 15s old, bounded by the per-tune watchdog), escalating to Tier 2 cold retune (DELETE + POST /watch) with exponential backoff on flapping (<30s since last segment); hub stays up |
+| Retune | Two-tier recovery: Tier 1 soft recovery (single restart on existing session if stall is under 15s old, bounded by 4s soft watchdog), escalating to Tier 2 cold retune (DELETE + POST /watch) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery; hub stays up |
 | Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
@@ -80,8 +80,8 @@ Tablo4thGen.Channel.SessionRunner
 Retune and keepalive run inside the single session runner for that channel. They restart the inner `streamFactory`
 without shutting the outer KillSwitch or the hub. HLS media sequence numbers are preserved across retunes to prevent duplicate segment playback when reception is lost. During retunes and silent gaps, `ResilientHlsSource` emits MPEG-TS
 null packets, followed by a single resume prefix (multi-PID discontinuity + cached PAT/PMT) when new live video resumes.
-When clients attach, `MpegTsSync.primeClientSource` primes the stream with cached PAT, PMT, and discontinuity packets so
-late joiners never stall or fail format probing. Known channel PAT/PMT tables are persisted in
+When clients attach, `MpegTsSync.primeClientSource` primes the stream with cached PAT, PMT, and discontinuity packets and gates attachment on an I-frame (`MpegTsSync.alignToIFrame`) so
+late joiners never stall or fail format probing with mid-GOP packet errors. Known channel PAT/PMT tables are persisted in
 `SessionManager.channelHeaderCache` across session lifecycles so that subsequent tunes (even after idle grace expires)
 immediately have format tables ready. On brand new cold starts, `SessionRunner` coordinates check-in until the first
 segment's headers are parsed (or up to 1.5s fallback), guaranteeing clients receive stream metadata before format
@@ -550,7 +550,7 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Reception drop (no new bytes for 5s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (5s) → Tier 1 soft recovery attempts to poll existing session for up to 15s; escalates to Tier 2 cold retune (DELETE old session, POST /watch) with flap dampening backoff (up to 30s) if stalls recur within 30s; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
+| Reception drop (no new bytes for 5s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (5s) → Tier 1 soft recovery attempts one restart on existing session bounded by 4s soft watchdog; escalates to Tier 2 cold retune (DELETE old session, POST /watch) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery baseline; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
 | 60s without new bytes (recovery timeout) | Stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately; channel is immediately re-tunable |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 1024 buffer) | BroadcastHub backpressures the producer when slowest subscriber is 1024 elements behind |

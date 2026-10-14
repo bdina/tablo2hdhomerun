@@ -261,8 +261,9 @@ object MpegTsSync {
   ): Source[ByteString, NotUsed] =
     Source.lazySource { () =>
       val headers = cachedHeadersRef.get()
-      if (headers.isEmpty) source
-      else Source.single(headers.syncPrefix).concat(source)
+      val aligned = source.via(alignToIFrame(headers.videoPid))
+      if (headers.isEmpty) aligned
+      else Source.single(headers.syncPrefix).concat(aligned)
     }.mapMaterializedValue(_ => NotUsed)
 
   private final class CacheStage(
@@ -402,15 +403,24 @@ object MpegTsSync {
     found
   }
 
-  def alignToIFrame(videoPid: Option[Int] = None): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new AlignToIFrameStage(videoPid))
+  val DefaultMaxDroppedPackets: Int = 8000
 
-  private final class AlignToIFrameStage(videoPid: Option[Int]) extends GraphStage[FlowShape[ByteString, ByteString]] {
+  def alignToIFrame(
+    videoPid: Option[Int] = None
+  , maxDroppedPackets: Int = DefaultMaxDroppedPackets
+  ): Flow[ByteString, ByteString, NotUsed] =
+    Flow.fromGraph(new AlignToIFrameStage(videoPid, maxDroppedPackets))
+
+  private final class AlignToIFrameStage(
+    videoPid: Option[Int]
+  , maxDroppedPackets: Int
+  ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.alignToIFrame.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.alignToIFrame.out")
     override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
 
     override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
+      private val startTimeNanos: Long = System.nanoTime()
       private var carry: ByteString = ByteString.empty
       private var isAligned = false
       private var currentVideoPid: Option[Int] = videoPid
@@ -467,12 +477,14 @@ object MpegTsSync {
                     if ((isTargetVideo || isCandidateVideo) && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen)) {
                       if (currentVideoPid.isEmpty) currentVideoPid = Some(pid)
                       isAligned = true
-                      log.info(s"Aligned to I-Frame on PID ${currentVideoPid.getOrElse(pid)} (dropped $droppedPackets leading packets)")
+                      val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
+                      log.info(s"Aligned to I-Frame on PID ${currentVideoPid.getOrElse(pid)} (dropped $droppedPackets leading packets in ${elapsedMs}ms)")
                       outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
                     } else {
                       droppedPackets += 1
-                      if (droppedPackets > 1500) {
-                        log.warn(s"Max dropped packets ($droppedPackets) exceeded while waiting for I-Frame; forcing alignment")
+                      if (droppedPackets > maxDroppedPackets) {
+                        val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
+                        log.warn(s"Max dropped packets ($droppedPackets in ${elapsedMs}ms) exceeded while waiting for I-Frame; forcing alignment")
                         isAligned = true
                         outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
                       }

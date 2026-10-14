@@ -182,17 +182,17 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
   }
 
   "WatchSession.computeFlapDelayMillis" should "return zero for non-positive flap counts" in {
-    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(0) shouldBe 0L
+    val _ = Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(0) shouldBe 0L
     Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(-1) shouldBe 0L
   }
 
-  it should "escalate exponentially up to thirty seconds cap" in {
-    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(1) shouldBe 2000L
-    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(2) shouldBe 4000L
-    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(3) shouldBe 8000L
-    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(4) shouldBe 16000L
-    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(5) shouldBe 30000L
-    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(10) shouldBe 30000L
+  it should "escalate exponentially up to four seconds cap" in {
+    val _ = Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(1) shouldBe 2000L
+    val _ = Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(2) shouldBe 4000L
+    val _ = Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(3) shouldBe 4000L
+    val _ = Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(4) shouldBe 4000L
+    val _ = Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(5) shouldBe 4000L
+    Tablo4thGen.Channel.WatchSession.computeFlapDelayMillis(10) shouldBe 4000L
   }
 
   "WatchSession.isFlapping" should "detect stalls occurring within thirty seconds of data resumption" in {
@@ -200,7 +200,165 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     val flapNanos = resumeNanos + 15.seconds.toNanos
     val stableNanos = resumeNanos + 35.seconds.toNanos
 
-    Tablo4thGen.Channel.WatchSession.isFlapping(resumeNanos, flapNanos) shouldBe true
+    val _ = Tablo4thGen.Channel.WatchSession.isFlapping(resumeNanos, flapNanos) shouldBe true
     Tablo4thGen.Channel.WatchSession.isFlapping(resumeNanos, stableNanos) shouldBe false
+  }
+
+  "WatchSession.FlapState" should "reset flap count to zero on stall after stable streaming" in {
+    val initialResume = 10000000000L
+    val stableStall = initialResume + 35.seconds.toNanos
+    val state = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = initialResume
+    , consecutiveFlaps = 3
+    )
+
+    val updated = state.onStall(stableStall)
+    val _ = updated.consecutiveFlaps shouldBe 0
+    val _ = updated.isStalling shouldBe true
+    val _ = updated.stallStartTimeNanos shouldBe stableStall
+    updated.dataResumedNanos shouldBe initialResume
+  }
+
+  it should "increment flap count on stall within thirty seconds of resumption" in {
+    val initialResume = 10000000000L
+    val flapStall = initialResume + 10.seconds.toNanos
+    val state = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = initialResume
+    , consecutiveFlaps = 1
+    )
+
+    val updated = state.onStall(flapStall)
+    val _ = updated.consecutiveFlaps shouldBe 2
+    val _ = updated.isStalling shouldBe true
+    updated.stallStartTimeNanos shouldBe flapStall
+  }
+
+  it should "be idempotent during ongoing stall" in {
+    val initialResume = 10000000000L
+    val firstStall = initialResume + 10.seconds.toNanos
+    val secondStall = firstStall + 5.seconds.toNanos
+    val state = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = initialResume
+    , consecutiveFlaps = 1
+    )
+
+    val stallingState = state.onStall(firstStall)
+    val _ = stallingState.consecutiveFlaps shouldBe 2
+    val _ = stallingState.stallStartTimeNanos shouldBe firstStall
+
+    val duplicateStall = stallingState.onStall(secondStall)
+    duplicateStall shouldBe stallingState
+  }
+
+  it should "update dataResumedNanos and clear stalling on segment received after stall" in {
+    val initialResume = 10000000000L
+    val stallNanos = initialResume + 10.seconds.toNanos
+    val recoveryNanos = stallNanos + 2.seconds.toNanos
+    val stallingState = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = initialResume
+    , consecutiveFlaps = 2
+    , isStalling = true
+    , stallStartTimeNanos = stallNanos
+    )
+
+    val recovered = stallingState.onSegmentReceived(recoveryNanos)
+    val _ = recovered.isStalling shouldBe false
+    val _ = recovered.dataResumedNanos shouldBe recoveryNanos
+    val _ = recovered.stallStartTimeNanos shouldBe 0L
+    recovered.consecutiveFlaps shouldBe 2
+  }
+
+  it should "preserve dataResumedNanos during continuous streaming without stalls" in {
+    val resumeNanos = 10000000000L
+    val activeState = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = resumeNanos
+    , consecutiveFlaps = 0
+    , isStalling = false
+    )
+
+    val nextPacketNanos = resumeNanos + 2.seconds.toNanos
+    val afterPacket = activeState.onSegmentReceived(nextPacketNanos)
+    val _ = afterPacket shouldBe activeState
+    afterPacket.dataResumedNanos shouldBe resumeNanos
+  }
+
+  "WatchSession.decideRecovery" should "select Soft recovery on attempt 2 when stall is fresh and session valid" in {
+    val stallNanos = 10000000000L
+    val state = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = stallNanos - 10.seconds.toNanos
+    , consecutiveFlaps = 1
+    , isStalling = true
+    , stallStartTimeNanos = stallNanos
+    )
+
+    val decision = Tablo4thGen.Channel.WatchSession.decideRecovery(
+      flapState = state
+    , attempt = 2
+    , softRetryAttempted = false
+    , nowNanos = stallNanos + 5.seconds.toNanos
+    , shouldRefreshSession = false
+    )
+
+    decision shouldBe Tablo4thGen.Channel.WatchSession.RecoveryDecision.Soft(4.seconds)
+  }
+
+  it should "escalate to Cold recovery when a soft retry was already attempted" in {
+    val stallNanos = 10000000000L
+    val state = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = stallNanos - 10.seconds.toNanos
+    , consecutiveFlaps = 1
+    , isStalling = true
+    , stallStartTimeNanos = stallNanos
+    )
+
+    val decision = Tablo4thGen.Channel.WatchSession.decideRecovery(
+      flapState = state
+    , attempt = 3
+    , softRetryAttempted = true
+    , nowNanos = stallNanos + 5.seconds.toNanos
+    , shouldRefreshSession = false
+    )
+
+    decision shouldBe Tablo4thGen.Channel.WatchSession.RecoveryDecision.Cold(2000L)
+  }
+
+  it should "escalate to Cold recovery when stall duration exceeds soft threshold" in {
+    val stallNanos = 10000000000L
+    val state = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = stallNanos - 10.seconds.toNanos
+    , consecutiveFlaps = 2
+    , isStalling = true
+    , stallStartTimeNanos = stallNanos
+    )
+
+    val decision = Tablo4thGen.Channel.WatchSession.decideRecovery(
+      flapState = state
+    , attempt = 2
+    , softRetryAttempted = false
+    , nowNanos = stallNanos + 16.seconds.toNanos
+    , shouldRefreshSession = false
+    )
+
+    decision shouldBe Tablo4thGen.Channel.WatchSession.RecoveryDecision.Cold(4000L)
+  }
+
+  it should "escalate to Cold recovery when session needs refresh" in {
+    val stallNanos = 10000000000L
+    val state = Tablo4thGen.Channel.WatchSession.FlapState(
+      dataResumedNanos = stallNanos - 10.seconds.toNanos
+    , consecutiveFlaps = 0
+    , isStalling = true
+    , stallStartTimeNanos = stallNanos
+    )
+
+    val decision = Tablo4thGen.Channel.WatchSession.decideRecovery(
+      flapState = state
+    , attempt = 2
+    , softRetryAttempted = false
+    , nowNanos = stallNanos + 2.seconds.toNanos
+    , shouldRefreshSession = true
+    )
+
+    decision shouldBe Tablo4thGen.Channel.WatchSession.RecoveryDecision.Cold(0L)
   }
 }

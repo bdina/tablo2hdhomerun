@@ -284,6 +284,32 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       result.size shouldBe 4
     }
 
+    "fail dead stream within tuneTimeout when initial tune produces no data" in {
+      val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
+        tuneTimeout = 150.millis
+      , stallTimeout = 150.millis
+      , streamName = "test-dead-stream"
+      )
+
+      val source = Source.maybe[ByteString].via(watchdogFlow)
+      val ex = source.runWith(Sink.ignore).failed.futureValue
+      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
+      ex.getMessage should include("tune produced no data")
+    }
+
+    "fail stalling stream within stallTimeout when progress ceases after initial data" in {
+      val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
+        tuneTimeout = 5.seconds
+      , stallTimeout = 150.millis
+      , streamName = "test-stall-stream"
+      )
+
+      val source = Source.single(ByteString("chunk1")).concat(Source.maybe[ByteString]).via(watchdogFlow)
+      val ex = source.runWith(Sink.ignore).failed.futureValue
+      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
+      ex.getMessage should include("no new data")
+    }
+
     "stay alive indefinitely when recoveryTimeout is 0" in {
       val factory = () => Source.failed(new RuntimeException("always fails"))
       val wrappedSource = ResilientHlsSource(
