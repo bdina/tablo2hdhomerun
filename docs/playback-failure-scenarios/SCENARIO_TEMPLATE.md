@@ -9,7 +9,7 @@ This document captures detailed timelines, cross-component accounting, and root-
 | Component | Identifier / IP | Version / Details | Role |
 | :--- | :--- | :--- | :--- |
 | **Tablo Tuner** | `192.168.2.28:8887` / `:80` | Tablo 4th Gen (`SID_<DEVICE_ID>`) | Hardware tuner, ATSC demodulator, HLS packager |
-| **tablo2hdhomerun** | `192.168.2.24:8080` | Scala 3.x / Pekko ([tablo2hdhomerun:<commit_hash>](file:///home/bdina/git/tablo2hdhomerun/src/main/scala/app/stream/ResilientHlsSource.scala)) | HDHomeRun API emulator, HLS demuxer/proxy |
+| **tablo2hdhomerun** | `192.168.2.24:8080` | Scala 3.x / Pekko ([tablo2hdhomerun:<commit_hash>](file:///home/bdina/git/tablo2hdhomerun/src/main/scala/app/stream/ResilientHlsSource.scala)); stall timeout `<N>s`, idle grace `<N>s` | HDHomeRun API emulator, HLS demuxer/proxy |
 | **Plex Media Server** | `192.168.2.24:32400` | PMS `v<version>` (Docker container) | Network tuner client, VAAPI hardware transcoder |
 | **Plex Client** | `<client_ip>` | `<client_app_and_version>` on `<device>` | Downstream player |
 | **RF Broadcast Transmitter** | `<transmitter_location>` (~<distance> miles <direction>) | `<station_callsign>` (<channel_name>, Physical UHF RF <rf_channel>) | OTA broadcast origin |
@@ -111,6 +111,19 @@ Observations recorded at Manchester-Boston Regional Airport (KMHT), situated in 
 ```text
 <Verbatim excerpt of representative tablo2hdhomerun log lines>
 ```
+
+### 5.3 Proxy-Side Health Measurements in the Bad Window
+State what the proxy itself observed (not only Plex symptoms) so hypotheses can be confirmed or ruled out:
+
+| Measurement | Value in baseline | Value in bad window |
+| :--- | :--- | :--- |
+| Segment bytes vs. expected (`byteRange` length / short `206` reads) | `<value>` | `<value>` |
+| Segment arrival interval (`EXTINF` vs. actual) | `<value>` | `<value>` |
+| TEI packets / continuity-counter errors per PID | `<value>` | `<value>` |
+| I-frames per segment | `<value>` | `<value>` |
+| Longest zero-byte gap | `<value>` | `<value>` |
+
+If the proxy did not log a measurement, record it as `not logged` and add a logging recommendation in section 7.
 
 ---
 

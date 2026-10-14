@@ -47,7 +47,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Topic | Choice |
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
-| Retune | Two-tier recovery: Tier 1 soft recovery (polling existing session up to 15s), escalating to Tier 2 cold retune (DELETE + POST /watch) with exponential backoff on flapping (<30s); hub stays up |
+| Retune | Two-tier recovery: Tier 1 soft recovery (restart stream on the existing session while stall is under 15s old, bounded by the per-tune watchdog), escalating to Tier 2 cold retune (DELETE + POST /watch) with exponential backoff on flapping (<30s since last segment); hub stays up |
 | Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
