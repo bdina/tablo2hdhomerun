@@ -33,7 +33,7 @@ Every scenario document must establish whether environmental conditions were cal
 
 
 > [!NOTE]
-> **Code state when reading older scenarios**: the stall watchdog threshold was 8s until `88067da` and is 5s since (`STREAM_STALL_TIMEOUT_SEC`). Scenarios dated 2026-10-09 and earlier describe the 8s behavior. Every scenario should state the commit it was captured against; the `Status` column records what has changed since.
+> **Code state when reading scenarios**: the stall watchdog threshold was 8s until `88067da`, 5s from `88067da` to `d3bdac8`, and restored to 8s with clamped check interval for stability. Every scenario states the commit it was captured against; the `Status` column records what has changed since.
 
 ---
 

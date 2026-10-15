@@ -51,7 +51,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
-| Idle grace | 75s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
+| Idle grace | 180s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
 | Pre-roll keepalive | Immediate HTTP 200 chunked response with MPEG-TS null packets (PID 0x1FFF, ~100 kbps) while cold-tuning, switching smoothly to live stream upon `CheckIn` with primed PAT/PMT headers |
 | BroadcastHub buffer | 1024 elements |
 | Session runner | Functions/object inside `Tablo4thGen.Channel` (not a typed actor) |
@@ -93,7 +93,7 @@ expired, or upstream ended after recovery timeout).
 ```text
 (absent) --Acquire--> Opening --CheckIn--> Live --last Release--> IdleGrace
               │                      ▲        │                       │
-              │                      │        │ UpstreamEnded         │ UpstreamEnded / 75s
+              │                      │        │ UpstreamEnded         │ UpstreamEnded / 180s
               └--AcquireFailed--> (absent)    ▼                       ▼
                                            teardown                teardown
                                               │                       │
@@ -105,7 +105,7 @@ expired, or upstream ended after recovery timeout).
 |-------|----------|
 | **Opening** | One Tablo open in flight; further Acquires enqueue waiters |
 | **Live** | `hubSource` available; `clientCount ≥ 1`; keepalive running in runner |
-| **IdleGrace** | `clientCount == 0`; 75s timer armed (configurable); Acquire cancels timer and attaches (no new `/watch`) |
+| **IdleGrace** | `clientCount == 0`; 180s timer armed (configurable); Acquire cancels timer and attaches (no new `/watch`) |
 | **absent** | No map entry; next Acquire starts Opening |
 
 ## Scala ADT / Behavior sketch
@@ -124,7 +124,7 @@ Style matches existing 4th-gen actors (`LineupActor`): nested `Request` / `Respo
 
 ```scala
 object SessionManager {
-  val IdleGrace: FiniteDuration = 75.seconds
+  val IdleGrace: FiniteDuration = 180.seconds
   val BroadcastHubBufferSize: Int = 1024
 
   sealed trait Request
@@ -550,7 +550,7 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Reception drop (no new bytes for 5s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (5s) → Tier 1 soft recovery attempts one restart on existing session bounded by 4s soft watchdog; escalates to Tier 2 cold retune (DELETE old session, POST /watch) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery baseline; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
+| Reception drop (no new bytes for 8s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (8s) → Tier 1 soft recovery attempts one restart on existing session bounded by 4s soft watchdog; escalates to Tier 2 cold retune (DELETE old session, POST /watch) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery baseline; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
 | 60s without new bytes (recovery timeout) | Stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately; channel is immediately re-tunable |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 1024 buffer) | BroadcastHub backpressures the producer when slowest subscriber is 1024 elements behind |
@@ -565,17 +565,18 @@ To prevent upstream backpressure stalls, `SessionManager` attaches an active `Si
 
 ## Tuner accounting
 
-Today `activeStreams` counts HTTP clients. With SessionManager, a tuner slot is one session in
-`Opening | Live | IdleGrace`, not one proxy client.
+A tuner slot is one session in `Opening | Live | IdleGrace`.
 
-- New channel when at capacity → `Rejected(NoTuners)`
+- New channel when tuners are available → `Opening`
+- New channel when at capacity (`occupied >= tuners`) with an idle-grace session → oldest `IdleGrace` session is evicted and torn down to free a tuner slot
+- New channel when at capacity with all tuners actively streaming → `Rejected(NoTuners)`
 - Second client on an existing channel → attach only
 
 ## Defaults
 
 | Setting | v1 value |
 |---------|----------|
-| Idle grace | 75 seconds (configurable via `SESSION_IDLE_GRACE_SEC`) |
+| Idle grace | 180 seconds (configurable via `SESSION_IDLE_GRACE_SEC`) |
 | BroadcastHub buffer | 1024 elements |
 | Recovery live edge | 3 segments (~7.5s cushion, configurable via `STREAM_RECOVERY_LIVE_EDGE_SEGMENTS`, default 3) |
 

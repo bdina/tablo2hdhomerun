@@ -284,6 +284,24 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       result.size shouldBe 4
     }
 
+    "not trip soft watchdog once initial data is received if stall is within stallTimeout" in {
+      val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
+        tuneTimeout = 100.millis
+      , stallTimeout = 600.millis
+      , streamName = "test-soft-scope"
+      )
+
+      val source = Source(List(1, 2))
+        .map { x =>
+          if (x == 2) Thread.sleep(250)
+          ByteString(x.toString)
+        }
+        .via(watchdogFlow)
+
+      val result = source.runWith(Sink.seq).futureValue
+      result.size shouldBe 2
+    }
+
     "fail dead stream within tuneTimeout when initial tune produces no data" in {
       val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
         tuneTimeout = 150.millis

@@ -242,9 +242,9 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       outBytes.drop(564) shouldBe payload
     }
 
-    "expose defaultIdleGrace as 75 seconds by default" in {
-      val _ = SessionManager.defaultIdleGrace shouldBe 75.seconds
-      SessionManager.IdleGrace shouldBe 75.seconds
+    "expose defaultIdleGrace as 180 seconds by default" in {
+      val _ = SessionManager.defaultIdleGrace shouldBe 180.seconds
+      SessionManager.IdleGrace shouldBe 180.seconds
     }
 
     "persist channel headers in channelHeaderCache across session lifecycles" in {
@@ -466,6 +466,91 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       mgr ! Command.GraceExpired("ch-idle-ended")
       Thread.sleep(100)
       teardownCalls.get() shouldBe 1
+    }
+
+    "evict oldest idle-grace session when tuners are exhausted on new channel acquire" in {
+      val teardownA = new AtomicInteger(0)
+      val teardownB = new AtomicInteger(0)
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager({ (_, self) =>
+        selfRef.set(self)
+      }, totalTuners = 2, idleGrace = 60.seconds)
+
+      val probeA = testKit.createTestProbe[Response.Acquire]()
+      val probeB = testKit.createTestProbe[Response.Acquire]()
+      val probeC = testKit.createTestProbe[Response.Acquire]()
+
+      // Acquire ch-a
+      mgr ! Request.Acquire("ch-a", "client-a", probeA.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) { selfRef.get() should not be null }
+      selfRef.getAndSet(null) ! Command.CheckIn("ch-a", meta(), hubSource, () => { val _ = teardownA.incrementAndGet() })
+      val _ = probeA.expectMessageType[Response.Attached]
+
+      // Acquire ch-b
+      mgr ! Request.Acquire("ch-b", "client-b", probeB.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) { selfRef.get() should not be null }
+      selfRef.getAndSet(null) ! Command.CheckIn("ch-b", meta(), hubSource, () => { val _ = teardownB.incrementAndGet() })
+      val _ = probeB.expectMessageType[Response.Attached]
+
+      // Release ch-a -> enters IdleGrace
+      mgr ! Request.Release("ch-a", "client-a")
+      Thread.sleep(50)
+      val _ = teardownA.get() shouldBe 0
+
+      // Acquire ch-c when occupied == 2 (ch-a in IdleGrace, ch-b in Live)
+      mgr ! Request.Acquire("ch-c", "client-c", probeC.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val _ = teardownA.get() shouldBe 1
+        selfRef.get() should not be null
+      }
+      selfRef.get() ! Command.CheckIn("ch-c", meta(), hubSource, () => ())
+      val _ = probeC.expectMessageType[Response.Attached]
+      teardownB.get() shouldBe 0
+    }
+
+    "evict oldest idle session when multiple idle sessions exist" in {
+      val teardown1 = new AtomicInteger(0)
+      val teardown2 = new AtomicInteger(0)
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager({ (_, self) =>
+        selfRef.set(self)
+      }, totalTuners = 2, idleGrace = 60.seconds)
+
+      val probe1 = testKit.createTestProbe[Response.Acquire]()
+      val probe2 = testKit.createTestProbe[Response.Acquire]()
+      val probe3 = testKit.createTestProbe[Response.Acquire]()
+
+      // Acquire ch-1 & ch-2
+      mgr ! Request.Acquire("ch-1", "c1", probe1.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) { selfRef.get() should not be null }
+      selfRef.getAndSet(null) ! Command.CheckIn("ch-1", meta(), hubSource, () => { val _ = teardown1.incrementAndGet() })
+      val _ = probe1.expectMessageType[Response.Attached]
+
+      mgr ! Request.Acquire("ch-2", "c2", probe2.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) { selfRef.get() should not be null }
+      selfRef.getAndSet(null) ! Command.CheckIn("ch-2", meta(), hubSource, () => { val _ = teardown2.incrementAndGet() })
+      val _ = probe2.expectMessageType[Response.Attached]
+
+      // Release ch-1 first
+      mgr ! Request.Release("ch-1", "c1")
+      Thread.sleep(50)
+      // Release ch-2 second
+      mgr ! Request.Release("ch-2", "c2")
+      Thread.sleep(50)
+
+      val _ = teardown1.get() shouldBe 0
+      val _ = teardown2.get() shouldBe 0
+
+      // Acquire ch-3 -> oldest idle session (ch-1) must be evicted, ch-2 must remain
+      mgr ! Request.Acquire("ch-3", "c3", probe3.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val _ = teardown1.get() shouldBe 1
+        val _ = teardown2.get() shouldBe 0
+        selfRef.get() should not be null
+      }
+      selfRef.get() ! Command.CheckIn("ch-3", meta(), hubSource, () => ())
+      val _ = probe3.expectMessageType[Response.Attached]
+      teardown2.get() shouldBe 0
     }
   }
 }

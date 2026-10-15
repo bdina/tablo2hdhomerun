@@ -146,7 +146,12 @@ object HlsBackend extends StreamBackend {
             , retriesLeft
             ) match {
               case HlsSegmentFetch.Accept =>
-                response.entity.dataBytes
+                response.entity.dataBytes.watchTermination() { (_, done) =>
+                  done.onComplete {
+                    case Success(_) => ()
+                    case Failure(_) => val _ = response.entity.discardBytes()
+                  }(ec)
+                }
               case HlsSegmentFetch.Retry(reason) if retriesLeft > 0 =>
                 val _ = response.entity.discardBytes()
                 retryAfter(retriesLeft, reason, attemptFetch(retriesLeft - 1))
@@ -284,6 +289,7 @@ object HlsBackend extends StreamBackend {
     }
     Source.lazySource { () =>
       log.info("[stream:hls] materialized label={} playlistUrl={}", label, playlistUrl)
+      val lastArrivalNanos = new java.util.concurrent.atomic.AtomicLong(System.nanoTime())
       heartbeatTask = Some(
         system.toClassic.scheduler.scheduleWithFixedDelay(heartbeatSec.seconds, heartbeatSec.seconds) { () =>
           log.debug("[stream:hls] heartbeat label={} lastSeq={} bytes={}", label, lastSeqOut.get(), bytesOut.get())
@@ -296,18 +302,46 @@ object HlsBackend extends StreamBackend {
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
+              val segStartNanos = System.nanoTime()
+              val gapMs = (segStartNanos - lastArrivalNanos.getAndSet(segStartNanos)) / 1000000L
+              val segBytes = new java.util.concurrent.atomic.AtomicLong(0L)
+              val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
+
               fetchSegmentSource(seg.url, seg.byteRange)
                 .via(MpegTsSync.alignPackets)
                 .map { chunk =>
+                  val _ = segBytes.addAndGet(chunk.size)
                   val _ = bytesOut.addAndGet(chunk.size)
                   chunk
                 }
                 .watchTermination() { (_, done) =>
                   done.onComplete {
                     case Success(_) =>
+                      val totalSegBytes = segBytes.get()
                       lastSeqOut.set(seg.sequence + 1)
                       onSeqAdvanced(seg.sequence + 1)
-                    case Failure(_) => ()
+                      log.info(
+                        "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
+                      , label
+                      , seg.sequence
+                      , seg.duration
+                      , totalSegBytes
+                      , gapMs
+                      )
+                      expectedLengthOpt.foreach { expected =>
+                        if (totalSegBytes < expected) {
+                          log.warn(
+                            "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
+                          , label
+                          , seg.sequence
+                          , expected
+                          , totalSegBytes
+                          , LogConfig.truncate(seg.url)
+                          )
+                        }
+                      }
+                    case Failure(ex) =>
+                      log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)
                   }(ec)
                 }
             }

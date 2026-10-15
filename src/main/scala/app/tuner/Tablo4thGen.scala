@@ -1035,8 +1035,8 @@ object Tablo4thGen {
         channelHeaderCache.clear()
 
       def defaultIdleGrace: FiniteDuration =
-        Option(AppContext.config).map(_.proxy.idleGraceSec.seconds).getOrElse(75.seconds)
-      val IdleGrace: FiniteDuration = 75.seconds
+        Option(AppContext.config).map(_.proxy.idleGraceSec.seconds).getOrElse(180.seconds)
+      val IdleGrace: FiniteDuration = 180.seconds
       val BroadcastHubBufferSize: Int = 1024
 
       sealed trait Request
@@ -1110,6 +1110,7 @@ object Tablo4thGen {
         , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders] =
             new AtomicReference(MpegTsSync.CachedHeaders())
         , drainSwitch: Option[pekko.stream.UniqueKillSwitch] = None
+        , enteredAtNanos: Long = System.nanoTime()
         ) extends SessionState
       }
 
@@ -1169,7 +1170,7 @@ object Tablo4thGen {
                 None
             }
           }
-          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef, drainSwitch)
+          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef, drainSwitch, System.nanoTime())
         }
 
         def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
@@ -1202,7 +1203,26 @@ object Tablo4thGen {
             sessions.get(channelId) match {
               case None =>
                 if (occupied >= tuners) {
-                  replyTo ! Response.Rejected(RejectReason.NoTuners)
+                  val oldestIdle = sessions.collect {
+                    case (chId, idle: SessionState.IdleGrace) => (chId, idle)
+                  }.toList.sortBy(_._2.enteredAtNanos).headOption
+
+                  oldestIdle match {
+                    case Some((idleChannelId, idle)) =>
+                      context.log.info(
+                        "[session] evicting oldest idle-grace channelId={} to accommodate new channelId={} clientId={}"
+                      , idleChannelId
+                      , channelId
+                      , clientId
+                      )
+                      val _ = idle.graceTimer.cancel()
+                      teardownAndRemove(idleChannelId, idle.teardown)
+                      sessions += channelId -> SessionState.Opening(Vector(SessionState.Waiter(clientId, replyTo)))
+                      context.log.info("[session] opening channelId={} clientId={} occupied={}", channelId, clientId, occupied)
+                      startRunner(channelId, context.self)
+                    case None =>
+                      replyTo ! Response.Rejected(RejectReason.NoTuners)
+                  }
                 } else {
                   sessions += channelId -> SessionState.Opening(Vector(SessionState.Waiter(clientId, replyTo)))
                   context.log.info("[session] opening channelId={} clientId={} occupied={}", channelId, clientId, occupied)
@@ -1599,8 +1619,11 @@ object Tablo4thGen {
                   , channelId
                   , (nowNanos - currentFlapState.stallStartTimeNanos) / 1000000
                   )
+                  val stallTimeout = Option(AppContext.config)
+                    .map(_.stream.resilient.stallTimeoutSec.seconds)
+                    .getOrElse(8.seconds)
                   val softStream = streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
-                  softStream.via(ResilientHlsSource.StallWatchdog.flow(softTimeout, softTimeout, s"4thgen-channel-$channelId-soft"))
+                  softStream.via(ResilientHlsSource.StallWatchdog.flow(softTimeout, stallTimeout, s"4thgen-channel-$channelId-soft"))
 
                 case WatchSession.RecoveryDecision.Cold(flapDelayMs) =>
                   log.info(
@@ -1889,16 +1912,47 @@ object Tablo4thGen {
           )
         }
 
+        def trackClientStream(
+          channelId: String
+        , clientId: String
+        , source: Source[ByteString, NotUsed]
+        ): Source[ByteString, NotUsed] = {
+          val startNanos = System.nanoTime()
+          val bytesSent = new java.util.concurrent.atomic.AtomicLong(0L)
+
+          source
+            .map { chunk =>
+              val _ = bytesSent.addAndGet(chunk.size)
+              chunk
+            }
+            .watchTermination() { (_, done) =>
+              done.onComplete { result =>
+                val durationMs = (System.nanoTime() - startNanos) / 1000000L
+                val totalBytes = bytesSent.get()
+                val outcome = result match {
+                  case Success(_) => "downstream-closed"
+                  case Failure(ex) => s"failed: ${ex.getMessage}"
+                }
+                log.info(
+                  "[channel] client disconnected channelId={} clientId={} durationMs={} bytes={} outcome={}"
+                , channelId
+                , clientId
+                , durationMs
+                , totalBytes
+                , outcome
+                )
+                sessionManager ! SessionManager.Request.Release(channelId, clientId)
+              }(ec)
+              pekko.NotUsed
+            }
+        }
+
         val preRollEnabled = Option(AppContext.config).forall(_.proxy.enablePreRollKeepAlive)
         if (!preRollEnabled) {
           onComplete(acquireFut) {
             case Success(SessionManager.Response.Attached(source)) =>
               log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
-              val tracked = source.watchTermination() { (_, done) =>
-                done.onComplete { _ =>
-                  sessionManager ! SessionManager.Request.Release(channelId, clientId)
-                }(ec)
-              }
+              val tracked = trackClientStream(channelId, clientId, source)
               respondWithHeaders(streamingHeaders) {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }
@@ -1922,11 +1976,7 @@ object Tablo4thGen {
           onComplete(initialDecision) {
             case Success(Some(SessionManager.Response.Attached(source))) =>
               log.info("[channel] fast-attached channelId={} clientId={}", channelId, clientId)
-              val tracked = source.watchTermination() { (_, done) =>
-                done.onComplete { _ =>
-                  sessionManager ! SessionManager.Request.Release(channelId, clientId)
-                }(ec)
-              }
+              val tracked = trackClientStream(channelId, clientId, source)
               respondWithHeaders(streamingHeaders) {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }
@@ -1954,11 +2004,7 @@ object Tablo4thGen {
               val packets = Option(AppContext.config).map(_.proxy.preRollPackets).getOrElse(7)
 
               val compositeSource = MpegTsSync.withPreRollKeepAlive(realSourceFut, interval, packets)
-              val tracked = compositeSource.watchTermination() { (_, done) =>
-                done.onComplete { _ =>
-                  sessionManager ! SessionManager.Request.Release(channelId, clientId)
-                }(ec)
-              }
+              val tracked = trackClientStream(channelId, clientId, compositeSource)
               respondWithHeaders(streamingHeaders) {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }

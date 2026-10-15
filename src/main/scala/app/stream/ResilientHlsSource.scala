@@ -103,7 +103,7 @@ object ResilientHlsSource {
         private var lastPushNanos = System.nanoTime()
         private val checkInterval = {
           val minTimeout = if (stallTimeout < tuneTimeout) stallTimeout else tuneTimeout
-          (minTimeout / 4).max(50.millis)
+          (minTimeout / 4).max(50.millis).min(250.millis)
         }
 
         override def preStart(): Unit = scheduleWithFixedDelay("watchdog", checkInterval, checkInterval)
@@ -163,6 +163,7 @@ object ResilientHlsSource {
         private var hadGap = false
         private var slateActive = false
         private val slateLoop = new SlateVideoSource.Loop(chunkPackets = 24)
+        private val gapLogThresholdNanos = slateThreshold.toNanos
         private val checkInterval =
           if (timeout.toNanos <= 0) 5.seconds
           else (timeout / 4).max(50.millis)
@@ -180,7 +181,7 @@ object ResilientHlsSource {
           elem match {
             case Real(data) =>
               val now = System.nanoTime()
-              if (hadGap && (now - lastRealNanos) >= 4000000000L) log.info(s"[$streamName] real data resumed after ${(now - lastRealNanos) / 1000000}ms")
+              if (hadGap && (now - lastRealNanos) >= gapLogThresholdNanos) log.info(s"[$streamName] real data resumed after ${(now - lastRealNanos) / 1000000}ms")
               hadGap = false
 
               val outData = if (slateActive) {

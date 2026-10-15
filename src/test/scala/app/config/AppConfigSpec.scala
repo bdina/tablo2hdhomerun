@@ -25,12 +25,12 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.effectiveTunerCount shouldBe 2
     val _ = config.proxy.enableUdpDiscovery shouldBe true
     val _ = config.proxy.enableHlsEndpoint shouldBe true
-    val _ = config.proxy.idleGraceSec shouldBe 75
+    val _ = config.proxy.idleGraceSec shouldBe 180
     val _ = config.proxy.enablePreRollKeepAlive shouldBe true
     val _ = config.proxy.preRollIntervalMs shouldBe 100
     val _ = config.proxy.preRollPackets shouldBe 7
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
-    val _ = config.stream.resilient.stallTimeoutSec shouldBe 5
+    val _ = config.stream.resilient.stallTimeoutSec shouldBe 8
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 20
     val _ = config.stream.resilient.retryDelaySec shouldBe 1
     val _ = config.stream.resilient.maxRetryDelaySec shouldBe 300
@@ -74,7 +74,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val fallbackConfig = AppConfig.load(Map(
       "STREAM_STALL_TIMEOUT_SEC" -> "bad"
     )).config
-    val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 5
+    val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 8
     val _ = fallbackConfig.stream.hls.recoveryLiveEdgeSegments shouldBe 3
   }
 
