@@ -359,5 +359,25 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val _ = HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = true, targetDurationSec = 4, defaultPollSec = 2) shouldBe 1875L
     HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = false, targetDurationSec = 4, defaultPollSec = 2) shouldBe 1000L
   }
+
+  it should "fail immediately with PlaylistStalled when failOnStall is true and playlist has not advanced" in {
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105, liveEdgeCount = 3, failOnStall = true)
+    val _ = HlsPlaylistPoller.pollDelayMs(state, playlistAdvanced = false, targetDurationSec = 4, defaultPollSec = 2) shouldBe 0L
+
+    val pStalled = playlist(102, Seq("seg102.ts", "seg103.ts", "seg104.ts"))
+    val _ = HlsPlaylistPoller.onPlaylist(state, pStalled, defaultPollSec = 2) shouldBe
+      HlsPlaylistPoller.Fail(HlsBackend.HlsError.PlaylistStalled)
+
+    val _ = HlsPlaylistPoller.onPlaylistNotModified(state) shouldBe
+      HlsPlaylistPoller.Fail(HlsBackend.HlsError.PlaylistStalled)
+
+    val pAdvanced = playlist(103, Seq("seg103.ts", "seg104.ts", "seg105.ts"))
+    HlsPlaylistPoller.onPlaylist(state, pAdvanced, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = segments.map(_.sequence) shouldBe Seq(105)
+        next.failOnStall shouldBe false
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit when playlist advanced")
+    }
+  }
 }
 

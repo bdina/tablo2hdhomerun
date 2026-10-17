@@ -20,6 +20,7 @@ object FFmpegBackend extends StreamBackend {
   , initialSeq: Int = 0
   , onSeqAdvanced: Int => Unit = _ => ()
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
+  , failOnStallPoll: Boolean = false
   )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
     Source.lazySource { () =>

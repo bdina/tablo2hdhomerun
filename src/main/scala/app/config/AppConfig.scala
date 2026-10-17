@@ -41,7 +41,7 @@ final case class ProxyConfig(
 , tunerCount: Option[Int] = None
 , enableUdpDiscovery: Boolean = true
 , enableHlsEndpoint: Boolean = true
-, idleGraceSec: Int = 75
+, idleGraceSec: Int = 180
 , enablePreRollKeepAlive: Boolean = true
 , preRollIntervalMs: Int = 100
 , preRollPackets: Int = 7
@@ -125,8 +125,8 @@ object AppConfig {
       stallTimeoutSec = getInt(get, "STREAM_STALL_TIMEOUT_SEC", 8)
     , tuneTimeoutSec = getInt(get, "STREAM_TUNE_TIMEOUT_SEC", 20)
     , retryDelaySec = getInt(get, "STREAM_RETRY_DELAY_SEC", 1)
-    , maxRetryDelaySec = getInt(get, "STREAM_MAX_RETRY_DELAY_SEC", 300)
-    , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 60)
+    , maxRetryDelaySec = getInt(get, "STREAM_MAX_RETRY_DELAY_SEC", 15)
+    , recoveryTimeoutSec = getInt(get, "STREAM_RECOVERY_TIMEOUT_SEC", 0)
     , enableSlateVideo = getBoolTrue(get, "STREAM_ENABLE_SLATE_VIDEO", false)
     )
     val hls = HlsStreamConfig(
