@@ -195,6 +195,7 @@ object TabloLegacy {
         object Command {
           case class Store(channels: Seq[JsValue]) extends Command
           case object Scan extends Command
+          case object ScanFailed extends Command
         }
 
         trait Error extends Exception
@@ -245,16 +246,32 @@ object TabloLegacy {
 
                 channels
               }
+              .recover { case ex =>
+                log.error("[lineup] scan failed", ex)
+                context.self ! Command.ScanFailed
+                cache._2
+              }
 
           context.self ! Command.Scan
 
           Behaviors.receiveMessage {
             case Command.Store(channels) =>
               log.info("[lineup] store count={}", channels.size)
-
-              cache = (1.day.fromNow, channels)
+              if (channels.nonEmpty || cache._2.isEmpty) {
+                cache = (1.day.fromNow, channels)
+              } else {
+                log.warn("[lineup] keeping existing cached lineup count={} after empty scan", cache._2.size)
+                cache = (5.minutes.fromNow, cache._2)
+              }
               scanInProgress = false
 
+              Behaviors.same
+
+            case Command.ScanFailed =>
+              scanInProgress = false
+              if (cache._2.nonEmpty) {
+                cache = (1.minute.fromNow, cache._2)
+              }
               Behaviors.same
 
             case Command.Scan if scanInProgress =>
@@ -279,12 +296,18 @@ object TabloLegacy {
 
             case Request.Fetch(replyTo) if cache._1.isOverdue() =>
               log.debug("[lineup] fetch cache expired")
-
-              val sender = replyTo
-
-              scanInProgress = true
-              scan().foreach { channels =>
-                sender ! LineupActor.Response.Fetch(channels, context.self)
+              if (cache._2.nonEmpty) {
+                replyTo ! LineupActor.Response.Fetch(cache._2, context.self)
+                if (!scanInProgress) {
+                  scanInProgress = true
+                  scan() : Unit
+                }
+              } else {
+                val sender = replyTo
+                scanInProgress = true
+                scan().foreach { channels =>
+                  sender ! LineupActor.Response.Fetch(channels, context.self)
+                }
               }
 
               Behaviors.same

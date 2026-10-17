@@ -25,8 +25,8 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 ### Playback Resilience & End-User Experience
 - **Uninterrupted Plex Playback**: Keep Plex clients playing during periods of OTA channel and tuner instability without crashing or requiring manual viewer intervention.
 - **Warm Client Keepalive with Frozen Video**: Continuously stream MPEG-TS null packets every 40ms while the proxy releases the old Tablo session and performs a cold tune (`/watch`), presenting a clean frozen frame rather than fatal playback errors.
-- **Live-Edge Resumption (No Seen-Content Replay)**: Fresh segments arrive from a new Tablo segment file after a cold tune; a single resume prefix (multi-PID discontinuity + cached PAT/PMT) resets decoder timelines without rewind loops or replayed video.
-- **Deterministic 60-Second Teardown**: Cleanly terminate the stream after 60 seconds (`STREAM_RECOVERY_TIMEOUT_SEC`) without new bytes; the session manager removes the entry immediately so the channel is re-tunable right away.
+- **Live-Edge Resumption (No Seen-Content Replay)**: Fresh segments arrive from a new Tablo segment file after a cold tune; a single resume prefix (multi-PID discontinuity for video, audio, PCR, and null PIDs + cached PAT/PMT) resets decoder timelines without rewind loops or replayed video.
+- **Viewer-Controlled Persistence**: By default (`STREAM_RECOVERY_TIMEOUT_SEC=0`), keep the channel tuned indefinitely while a client is attached; if a finite `STREAM_RECOVERY_TIMEOUT_SEC` is configured, cleanly terminate the stream after that outage duration and remove the session manager entry immediately so the channel is re-tunable right away.
 
 ### Tuner & Session Management
 - One Tablo player session per channel while any proxy client (or idle grace) holds it
@@ -47,8 +47,8 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Topic | Choice |
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
-| Retune | Two-tier recovery: Tier 1 soft recovery (single restart on existing session if stall is under 15s old, bounded by 4s soft watchdog), escalating to Tier 2 cold retune (DELETE + POST /watch) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery; hub stays up |
-| Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
+| Retune | Two-tier recovery: Tier 1 soft recovery (single poll on existing session with `failOnStallPoll = true` if stall is under 15s old, failing immediately if playlist is frozen), escalating to Tier 2 cold retune (DELETE + POST /watch with reset `lastSeqRef`) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery; hub stays up |
+| Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, audio PIDs, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
 | Idle grace | 180s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
@@ -545,13 +545,13 @@ the current per-request path, but as **one instance per channel lease**.
 
 | Event | Behavior |
 |-------|----------|
-| Initial watch fails while Opening | Retries with backoff up to `STREAM_RECOVERY_TIMEOUT_SEC` (60s) before `AcquireFailed` → `Rejected(Failed(_))`; client receives pre-roll null keepalive |
+| Initial watch fails while Opening | Retries with backoff (up to `STREAM_RECOVERY_TIMEOUT_SEC` if > 0, or 60s opening budget) before `AcquireFailed` → `Rejected(Failed(_))`; client receives pre-roll null keepalive |
 | Client releases while Opening | Waiter removed; if all waiters release, Opening is cancelled and tune retries cease |
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
-| Playlist URL change | Inner kill/restart under resilient source; hub stays; clients seamless |
+| Playlist URL change | Inner kill/restart under resilient source (`playlistRollover`); hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Reception drop (no new bytes for 8s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (8s) → Tier 1 soft recovery attempts one restart on existing session bounded by 4s soft watchdog; escalates to Tier 2 cold retune (DELETE old session, POST /watch) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery baseline; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
-| 60s without new bytes (recovery timeout) | Stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately; channel is immediately re-tunable |
+| Reception drop (no new bytes for 8s or no keyframe for 24s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (8s) or keyframe watchdog after 24s → Tier 1 soft recovery polls existing session with `failOnStallPoll = true` and fails immediately if playlist is frozen; escalates to Tier 2 cold retune (DELETE old session, POST /watch, reset `lastSeqRef`) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery baseline; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
+| Extended outage (`STREAM_RECOVERY_TIMEOUT_SEC`) | By default (`0`), keeps retrying every up to `STREAM_MAX_RETRY_DELAY_SEC` (15s) with null keepalives while client is connected; if configured > 0, stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 1024 buffer) | BroadcastHub backpressures the producer when slowest subscriber is 1024 elements behind |
 | Acquire during IdleGrace | Cancel timer; attach; no new `/watch` |

@@ -101,7 +101,8 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | `PROXY_IP` | `127.0.0.1` | IP address for proxy to bind |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit MPEG-TS null packets during cold tune to prevent client timeouts |
-| `SESSION_IDLE_GRACE_SEC` | `75` | Idle grace period (in seconds) to retain tuner session |
+| `SESSION_IDLE_GRACE_SEC` | `180` | Idle grace period (in seconds) to retain tuner session |
+| `STREAM_RECOVERY_TIMEOUT_SEC` | `0` | Total outage duration before ending stream (`0` = indefinite while viewer is tuned) |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 
 ## API Endpoints
@@ -130,7 +131,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 1. Settings > Live TV & DVR > Set Up Plex DVR
 2. Enter `http://<proxy-ip>:8080` as the tuner address
 
-> **Resilience & Playback Experience**: The proxy is specifically optimized for Plex clients. During broadcast drops or tuner hiccups, it trickles MPEG-TS null packets to keep Plex grabbers warm (displaying a brief frozen frame instead of crashing with playback error dialogs) while cold re-tuning the Tablo tuner in the background. Streams recover cleanly at the live edge without repeating previously viewed footage; streams end after 60s without progress and the channel is immediately re-tunable.
+> **Resilience & Playback Experience**: The proxy is specifically optimized for Plex clients. During broadcast drops or tuner hiccups, it trickles MPEG-TS null packets to keep Plex grabbers warm (displaying a brief frozen frame instead of crashing with playback error dialogs) while cold re-tuning the Tablo tuner in the background. Streams recover cleanly at the live edge without repeating previously viewed footage, staying tuned indefinitely (`STREAM_RECOVERY_TIMEOUT_SEC=0` default) until the viewer stops playback or changes the channel.
 
 ### Jellyfin
 
