@@ -440,5 +440,23 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = next.containsSlice(nonKey) shouldBe false
       probe.cancel()
     }
+
+    "fail stream when MPEG-TS packets continue arriving without any decodable keyframe beyond keyframeTimeout" in {
+      val videoPid = 0x0101
+      val nonKey = MpegTsSyncSpec.buildMediaPacket(videoPid)
+      val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
+        tuneTimeout = 2.seconds
+      , stallTimeout = 2.seconds
+      , streamName = "test-keyframe-watchdog"
+      , keyframeTimeout = 250.millis
+      , videoPidSupplier = () => Some(videoPid)
+      , videoStreamTypeSupplier = () => Some(0x02)
+      )
+
+      val source = Source.tick(0.millis, 40.millis, nonKey).via(watchdogFlow)
+      val ex = source.runWith(Sink.ignore).failed.futureValue
+      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
+      ex.getMessage should include("no decodable keyframe")
+    }
   }
 }

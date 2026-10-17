@@ -858,5 +858,33 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       result shouldBe Seq(realMpeg2Key, pusiAudio, nextMidPesAudio)
     }
+
+    "cacheFlow should replace TEI-corrupted packet and subsequent PUSI=0 packets on that PID with null packets until PUSI=1" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val pid = 0x0101
+      val teiOnPid = {
+        val arr = buildMediaPacket(pid).toArray
+        arr(1) = (arr(1) | 0x80).toByte // TEI = 1
+        ByteString(arr)
+      }
+      val midPesContinuation = buildMediaPacket(pid) // PUSI = 0 on same PID
+      val otherPidPacket = buildMediaPacket(0x0102)  // unaffected PID
+      val nextPesStart = {
+        val arr = buildMediaPacket(pid).toArray
+        arr(1) = (arr(1) | 0x40).toByte // PUSI = 1 on same PID
+        ByteString(arr)
+      }
+
+      val out = Source.single(teiOnPid ++ midPesContinuation ++ otherPidPacket ++ nextPesStart)
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = out.length shouldBe (188 * 4)
+      val _ = out.slice(0, 188) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out.slice(188, 376) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out.slice(376, 564) shouldBe otherPidPacket
+      out.slice(564, 752) shouldBe nextPesStart
+    }
   }
 }

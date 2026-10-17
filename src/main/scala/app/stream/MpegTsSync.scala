@@ -306,6 +306,7 @@ object MpegTsSync {
     override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
       private var carry: ByteString = ByteString.empty
       private var detectedPmtPid: Option[Int] = None
+      private var teiedPids: Set[Int] = Set.empty
 
       setHandler(in, new InHandler {
         override def onPush(): Unit = {
@@ -319,31 +320,45 @@ object MpegTsSync {
 
           while (pos + PacketSize <= len) {
             if (arr(pos) == 0x47.toByte) {
-              val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
-              if (pid == PatPid) {
-                val patPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
-                extractPmtPid(arr, pos).foreach { pmtPid =>
-                  detectedPmtPid = Some(pmtPid)
-                }
-                updated = updated.copy(pat = Some(patPacket))
-              } else if (detectedPmtPid.contains(pid)) {
-                val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
-                val streamPids = extractPmtStreamPids(arr, pos)
-                val nextAudioPids = streamPids.map(_.audioPids).filter(_.nonEmpty).getOrElse(updated.audioPids)
-                updated = updated.copy(
-                  pmt = Some(pmtPacket)
-                , pcrPid = streamPids.flatMap(_.pcrPid).orElse(updated.pcrPid)
-                , videoPid = streamPids.flatMap(_.videoPid).orElse(updated.videoPid)
-                , videoStreamType = streamPids.flatMap(_.videoStreamType).orElse(updated.videoStreamType)
-                , audioPids = nextAudioPids
-                )
-              }
-
               val isTei = (arr(pos + 1) & 0x80) != 0
+              val pusi = (arr(pos + 1) & 0x40) != 0
+              val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
+
               if (isTei) {
+                if (pid > 0 && pid != NullPid) {
+                  teiedPids += pid
+                }
                 outputBuilder ++= MPEGTS_NULL_PACKET
               } else {
-                outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                if (pid == PatPid) {
+                  val patPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
+                  extractPmtPid(arr, pos).foreach { pmtPid =>
+                    detectedPmtPid = Some(pmtPid)
+                  }
+                  updated = updated.copy(pat = Some(patPacket))
+                } else if (detectedPmtPid.contains(pid)) {
+                  val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
+                  val streamPids = extractPmtStreamPids(arr, pos)
+                  val nextAudioPids = streamPids.map(_.audioPids).filter(_.nonEmpty).getOrElse(updated.audioPids)
+                  updated = updated.copy(
+                    pmt = Some(pmtPacket)
+                  , pcrPid = streamPids.flatMap(_.pcrPid).orElse(updated.pcrPid)
+                  , videoPid = streamPids.flatMap(_.videoPid).orElse(updated.videoPid)
+                  , videoStreamType = streamPids.flatMap(_.videoStreamType).orElse(updated.videoStreamType)
+                  , audioPids = nextAudioPids
+                  )
+                }
+
+                if (teiedPids.contains(pid)) {
+                  if (pusi) {
+                    teiedPids -= pid
+                    outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                  } else {
+                    outputBuilder ++= MPEGTS_NULL_PACKET
+                  }
+                } else {
+                  outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                }
               }
               pos += PacketSize
             } else {
@@ -380,8 +395,17 @@ object MpegTsSync {
             while (pos + PacketSize <= arr.length) {
               if (arr(pos) == 0x47.toByte) {
                 val isTei = (arr(pos + 1) & 0x80) != 0
-                if (isTei) outputBuilder ++= MPEGTS_NULL_PACKET
-                else outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                val pusi = (arr(pos + 1) & 0x40) != 0
+                val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
+                if (isTei) {
+                  if (pid > 0 && pid != NullPid) teiedPids += pid
+                  outputBuilder ++= MPEGTS_NULL_PACKET
+                } else if (teiedPids.contains(pid) && !pusi) {
+                  outputBuilder ++= MPEGTS_NULL_PACKET
+                } else {
+                  if (teiedPids.contains(pid) && pusi) teiedPids -= pid
+                  outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                }
                 pos += PacketSize
               } else {
                 val next = findNextSync(arr, pos + 1, arr.length)

@@ -51,15 +51,28 @@ object ResilientHlsSource {
   , videoPidSupplier: () => Option[Int] = () => None
   , videoStreamTypeSupplier: () => Option[Int] = () => None
   , audioPidsSupplier: () => Seq[Int] = () => Seq.empty
+  , keyframeTimeout: FiniteDuration = Duration.Zero
   ): Source[ByteString, ?] = {
     val effectiveMax = if (maxRetryDelay < retryDelay) retryDelay else maxRetryDelay
+    val effectiveKeyframeTimeout =
+      if (keyframeTimeout.toNanos > 0) keyframeTimeout
+      else (stallTimeout * 3).max(15.seconds)
     val restartSettings = RestartSettings(minBackoff = retryDelay, maxBackoff = effectiveMax, randomFactor = 0.2)
     val attempts = new java.util.concurrent.atomic.AtomicInteger(0)
     RestartSource.withBackoff(restartSettings) { () =>
       val n = attempts.incrementAndGet()
       if (n == 1) log.info(s"[$streamName] stream connect attempt=$n")
       else log.warn(s"[$streamName] stream recovery retune attempt=$n")
-      val inner = streamFactory().via(StallWatchdog.flow(tuneTimeout, stallTimeout, streamName))
+      val inner = streamFactory().via(
+        StallWatchdog.flow(
+          tuneTimeout = tuneTimeout
+        , stallTimeout = stallTimeout
+        , streamName = streamName
+        , keyframeTimeout = effectiveKeyframeTimeout
+        , videoPidSupplier = videoPidSupplier
+        , videoStreamTypeSupplier = videoStreamTypeSupplier
+        )
+      )
       if (n == 1) {
         inner.map(data => Real(data))
       } else {
@@ -94,13 +107,19 @@ object ResilientHlsSource {
       tuneTimeout: FiniteDuration
     , stallTimeout: FiniteDuration
     , streamName: String
+    , keyframeTimeout: FiniteDuration = Duration.Zero
+    , videoPidSupplier: () => Option[Int] = () => None
+    , videoStreamTypeSupplier: () => Option[Int] = () => None
     ): Flow[ByteString, ByteString, NotUsed] =
-      Flow.fromGraph(new Stage(tuneTimeout, stallTimeout, streamName))
+      Flow.fromGraph(new Stage(tuneTimeout, stallTimeout, streamName, keyframeTimeout, videoPidSupplier, videoStreamTypeSupplier))
 
     private final class Stage(
       tuneTimeout: FiniteDuration
     , stallTimeout: FiniteDuration
     , streamName: String
+    , keyframeTimeout: FiniteDuration
+    , videoPidSupplier: () => Option[Int]
+    , videoStreamTypeSupplier: () => Option[Int]
     ) extends GraphStage[FlowShape[ByteString, ByteString]] {
       val in: Inlet[ByteString] = Inlet("StallWatchdog.in")
       val out: Outlet[ByteString] = Outlet("StallWatchdog.out")
@@ -109,6 +128,8 @@ object ResilientHlsSource {
       override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) with InHandler with OutHandler {
         private var started = false
         private var lastPushNanos = System.nanoTime()
+        private var lastKeyframeNanos = System.nanoTime()
+        private var monitoringKeyframes = false
         private val checkInterval = {
           val minTimeout = if (stallTimeout < tuneTimeout) stallTimeout else tuneTimeout
           (minTimeout / 4).max(50.millis).min(250.millis)
@@ -117,18 +138,59 @@ object ResilientHlsSource {
         override def preStart(): Unit = scheduleWithFixedDelay("watchdog", checkInterval, checkInterval)
 
         override def onPush(): Unit = {
+          val now = System.nanoTime()
+          val chunk = grab(in)
           started = true
-          lastPushNanos = System.nanoTime()
-          push(out, grab(in))
+          lastPushNanos = now
+
+          if (keyframeTimeout.toNanos > 0) {
+            videoPidSupplier() match {
+              case Some(vpid) if chunk.length >= MpegTsSync.PacketSize && chunk(0) == 0x47.toByte =>
+                monitoringKeyframes = true
+                val arr = chunk.toArray
+                val streamType = videoStreamTypeSupplier()
+                var pos = 0
+                var foundKey = false
+                while (pos + MpegTsSync.PacketSize <= arr.length && !foundKey) {
+                  if (arr(pos) == 0x47.toByte && (arr(pos + 1) & 0x80) == 0) {
+                    val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
+                    if (pid == vpid) {
+                      val afc = (arr(pos + 3) & 0x30) >> 4
+                      val payloadOffset =
+                        if (afc == 1) pos + 4
+                        else if (afc == 3) pos + 5 + (arr(pos + 4) & 0xFF)
+                        else pos + MpegTsSync.PacketSize
+                      val payloadLen = (pos + MpegTsSync.PacketSize) - payloadOffset
+                      if (payloadLen > 0 && MpegTsSync.hasKeyframeHeader(arr, payloadOffset, payloadLen, streamType)) {
+                        foundKey = true
+                      }
+                    }
+                  }
+                  pos += MpegTsSync.PacketSize
+                }
+                if (foundKey) {
+                  lastKeyframeNanos = now
+                }
+              case _ =>
+                lastKeyframeNanos = now
+            }
+          }
+
+          push(out, chunk)
         }
 
         override def onPull(): Unit = pull(in)
 
         override protected def onTimer(timerKey: Any): Unit = {
-          val elapsedNanos = System.nanoTime() - lastPushNanos
+          val now = System.nanoTime()
+          val elapsedNanos = now - lastPushNanos
           if (started) {
             if (elapsedNanos > stallTimeout.toNanos) {
               val detail = s"no new data for ${stallTimeout.toSeconds}s"
+              log.warn(s"[$streamName] $detail, retuning")
+              failStage(new StallTimeoutException(s"$streamName $detail"))
+            } else if (monitoringKeyframes && keyframeTimeout.toNanos > 0 && (now - lastKeyframeNanos) > keyframeTimeout.toNanos) {
+              val detail = s"no decodable keyframe for ${keyframeTimeout.toSeconds}s"
               log.warn(s"[$streamName] $detail, retuning")
               failStage(new StallTimeoutException(s"$streamName $detail"))
             }
