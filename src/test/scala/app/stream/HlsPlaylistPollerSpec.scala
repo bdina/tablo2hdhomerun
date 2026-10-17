@@ -326,5 +326,38 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Fail(_) => fail("expected emit")
     }
   }
+
+  it should "reset when playlist restarts at mediaSequence 1 even if prior lastSeq was below sequenceResetThreshold" in {
+    // Prior session stalled early at lastSeq = 5 (below sequenceResetThreshold = 10)
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 5)
+    // Playlist restarted at mediaSequence = 1 with segments 1, 2, 3
+    val p = playlist(1, Seq("s1.ts", "s2.ts", "s3.ts"))
+    HlsPlaylistPoller.onPlaylist(state, p, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = segments.map(_.sequence) shouldBe Seq(3)
+        next.lastSeq shouldBe 4
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit on early sequence restart")
+    }
+  }
+
+  "HlsPlaylistPoller.pollDelayMs" should "use sub-second segment-duration-aware intervals when segment duration is shorter than targetDuration" in {
+    val p = M3U8.Playlist(
+      targetDuration = 4
+    , mediaSequence = 10
+    , segments = Seq(
+        M3U8.Segment("s10.ts", 2.5, None, None)
+      , M3U8.Segment("s11.ts", 2.5, None, None)
+      )
+    , isEndList = false
+    )
+    val state0 = HlsPlaylistPoller.initial("http://host/pl.m3u8")
+    val stateAfterAdvance = HlsPlaylistPoller.onPlaylist(state0, p, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, _) => next
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit")
+    }
+    // 2.5s = 2500ms -> 75% after advance = 1875ms, 40% when unchanged = 1000ms
+    val _ = HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = true, targetDurationSec = 4, defaultPollSec = 2) shouldBe 1875L
+    HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = false, targetDurationSec = 4, defaultPollSec = 2) shouldBe 1000L
+  }
 }
 

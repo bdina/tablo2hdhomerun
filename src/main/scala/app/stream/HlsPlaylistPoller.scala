@@ -25,6 +25,7 @@ object HlsPlaylistPoller {
   , etag: Option[String] = None
   , lastModified: Option[String] = None
   , liveEdgeCount: Int = liveEdgeSegmentCount
+  , lastSegmentDuration: Double = 0.0
   )
 
   sealed trait Outcome
@@ -36,6 +37,8 @@ object HlsPlaylistPoller {
 
   val pollDelayMinSec: Int = 1
   val pollDelayMaxSec: Int = 10
+  val pollDelayMinMs: Long = 500L
+  val pollDelayMaxMs: Long = 10000L
 
   def pollDelaySec(
     state: PollState
@@ -48,6 +51,22 @@ object HlsPlaylistPoller {
       val target = if (targetDurationSec > 0) targetDurationSec else defaultPollSec
       val raw = if (playlistAdvanced) target else (target / 2).max(1)
       raw.max(pollDelayMinSec).min(pollDelayMaxSec)
+    }
+  }
+
+  def pollDelayMs(
+    state: PollState
+  , playlistAdvanced: Boolean
+  , targetDurationSec: Int
+  , defaultPollSec: Int
+  ): Long = {
+    if (state.lastSeq == 0) 0L
+    else if (state.lastSegmentDuration > 0.0 && state.lastSegmentDuration < targetDurationSec.toDouble) {
+      val segMs = (state.lastSegmentDuration * 1000.0).toLong
+      val rawMs = if (playlistAdvanced) (segMs * 3L) / 4L else (segMs * 2L) / 5L
+      rawMs.max(pollDelayMinMs).min(pollDelayMaxMs)
+    } else {
+      pollDelaySec(state, playlistAdvanced, targetDurationSec, defaultPollSec).toLong * 1000L
     }
   }
 
@@ -86,7 +105,8 @@ object HlsPlaylistPoller {
       val isReset =
         state.lastSeq > 0 &&
         allSegments.nonEmpty &&
-        allSegments.last.sequence < (state.lastSeq - math.max(sequenceResetThreshold, allSegments.size))
+        (allSegments.last.sequence < (state.lastSeq - math.max(sequenceResetThreshold, allSegments.size)) ||
+          (playlist.mediaSequence <= 1 && allSegments.last.sequence < state.lastSeq))
       val isFirstPoll = state.lastSeq == 0 || isReset
       val effectiveLastSeq = if (isReset) 0 else state.lastSeq
       val candidates = if (isFirstPoll) {
@@ -100,6 +120,7 @@ object HlsPlaylistPoller {
       // stall handling lives in ResilientHlsSource's StallWatchdog
       val nextStall = if (advanced) 0 else state.stallPolls + 1
       val nextTarget = if (playlist.targetDuration > 0) playlist.targetDuration else defaultPollSec
+      val nextSegDuration = allSegments.lastOption.map(_.duration).filter(_ > 0.0).getOrElse(state.lastSegmentDuration)
       val playlistKeys = allSegments.map(segmentKey).toSet
       val newEmittedKeys = (state.emittedKeys ++ segments.map(segmentKey)).intersect(playlistKeys)
       val nextLastSeq = if (isReset) newLastSeq else math.max(state.lastSeq, newLastSeq)
@@ -112,6 +133,7 @@ object HlsPlaylistPoller {
         , loggedFirstSegment = state.loggedFirstSegment || segments.nonEmpty
         , emittedKeys = newEmittedKeys
         , lastAdvanced = advanced
+        , lastSegmentDuration = nextSegDuration
         )
       , segments
       )

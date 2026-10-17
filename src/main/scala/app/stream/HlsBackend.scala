@@ -203,8 +203,8 @@ object HlsBackend extends StreamBackend {
           }
         }
       }
-    def pollIntervalSecFromState(state: PollState): Int =
-      HlsPlaylistPoller.pollDelaySec(
+    def pollIntervalMsFromState(state: PollState): Long =
+      HlsPlaylistPoller.pollDelayMs(
         state
       , state.lastAdvanced
       , state.lastTargetDuration
@@ -221,12 +221,12 @@ object HlsBackend extends StreamBackend {
               case Some(body) =>
                 val playlist = M3U8.parse(body)
                 log.debug(
-                  "[stream:hls] playlist version={} target={} mediaSequence={} segments={} pollDelay={}"
+                  "[stream:hls] playlist version={} target={} mediaSequence={} segments={} pollDelayMs={}"
                 , playlist.version.map(_.toString).getOrElse("unknown")
                 , playlist.targetDuration
                 , playlist.mediaSequence
                 , playlist.segments.size
-                , pollIntervalSecFromState(fetchedState)
+                , pollIntervalMsFromState(fetchedState)
                 )
                 HlsPlaylistPoller.onPlaylist(
                   fetchedState
@@ -279,11 +279,11 @@ object HlsBackend extends StreamBackend {
           }
       }
       val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
-      val delaySec = pollIntervalSecFromState(state)
-      if (delaySec <= 0) {
+      val delayMs = pollIntervalMsFromState(state)
+      if (delayMs <= 0L) {
         doFetch()
       } else {
-        val delay = delaySec.seconds
+        val delay = delayMs.millis
         after(delay, scheduler)(Future.successful(())).flatMap(_ => doFetch())
       }
     }

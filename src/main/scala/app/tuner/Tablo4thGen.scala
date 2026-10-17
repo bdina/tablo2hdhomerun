@@ -1640,6 +1640,7 @@ object Tablo4thGen {
                     , tune = () => retuneWatchSession()
                     ).map { newSession =>
                       currentSession.set(newSession)
+                      lastSeqRef.set(0)
                       scheduleKeepalive()
                       streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
                     }(ec)
