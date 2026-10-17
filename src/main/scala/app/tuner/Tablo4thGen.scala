@@ -96,10 +96,11 @@ object Tablo4thGen {
     import pekko.http.scaladsl.unmarshalling.Unmarshal
 
     @volatile private var _authContext: Option[AuthContext] = None
+    @volatile private var _tabloAuth: Option[TabloAuthEnv] = None
 
     def authContext: Option[AuthContext] = _authContext
 
-    def initialize(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): AuthContext = {
+    def authenticate(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): Future[AuthContext] = {
       val HttpCtx = Http()
 
       val tablo = AppContext.config.tablo
@@ -117,7 +118,7 @@ object Tablo4thGen {
       import JsonProtocol._
       implicit val ec = system.executionContext
 
-      val authFuture: Future[AuthContext] = for {
+      for {
         loginResp <- {
           val loginUri = Uri(s"$LIGHTHOUSE_BASE_URL/login/")
           val loginBody = LoginRequest(email, password).toJson.compactPrint
@@ -193,7 +194,7 @@ object Tablo4thGen {
         val deviceUrl = device.url.map(Uri(_)).getOrElse {
           Uri(tablo.deviceBaseUri)
         }
-        AuthContext(
+        val ctx = AuthContext(
           accessToken = accessToken
         , lighthouseToken = lighthouseToken
         , deviceKey = tablo.deviceKey
@@ -202,12 +203,28 @@ object Tablo4thGen {
         , profileId = profile.identifier
         , serverId = device.serverId
         )
+        _authContext = Some(ctx)
+        log.info("[auth] complete deviceUrl={}", ctx.deviceUrl)
+        ctx
       }
+    }
 
-      val ctx = Await.result(authFuture, 30.seconds)
-      _authContext = Some(ctx)
-      log.info("[auth] complete deviceUrl={}", ctx.deviceUrl)
-      ctx
+    def initialize(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): AuthContext = {
+      _tabloAuth = Some(tabloAuth)
+      Await.result(authenticate(tabloAuth), 30.seconds)
+    }
+
+    def refresh()(implicit system: ActorSystem[?]): Future[AuthContext] = {
+      _tabloAuth match {
+        case Some(tabloAuth) =>
+          log.info("[auth] refreshing cloud authentication tokens")
+          authenticate(tabloAuth)
+        case None =>
+          _authContext match {
+            case Some(ctx) => Future.successful(ctx)
+            case None => Future.failed(Tablo4thGen.Error.MissingEmail)
+          }
+      }
     }
   }
 
@@ -324,6 +341,7 @@ object Tablo4thGen {
       object Command {
         case class Store(channels: Seq[JsValue]) extends Command
         case object Scan extends Command
+        case object ScanFailed extends Command
       }
 
       implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
@@ -338,36 +356,45 @@ object Tablo4thGen {
         def channelToJsValue(channel: ChannelLineup): JsValue =
           Lineup.channelToJsValue(channel, AppContext.discover.BaseURL)
 
-        def scan(): Future[Seq[JsValue]] = {
+        def fetchGuideChannels(ctx: Auth.AuthContext, allowRefresh: Boolean): Future[Seq[ChannelLineup]] = {
           import Lineup.JsonProtocol._
           import pekko.http.scaladsl.unmarshalling.Unmarshal
-
-          val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
-          log.debug("[lineup] http GET /guide/channels")
-
           import pekko.http.scaladsl.model.headers._
+
+          val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${ctx.lighthouseToken}/guide/channels/")
+          log.debug("[lineup] http GET /guide/channels")
           val request = HttpRequest(
             method = HttpMethods.GET
           , uri = channelsUri
           , headers = Seq(
-              Authorization(OAuth2BearerToken(authContext.accessToken))
-            , RawHeader("Lighthouse", authContext.lighthouseToken)
+              Authorization(OAuth2BearerToken(ctx.accessToken))
+            , RawHeader("Lighthouse", ctx.lighthouseToken)
             )
           )
 
           HttpCtx.singleRequest(request).flatMap { response =>
             log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
-            Unmarshal(response.entity).to[String].map { body =>
-              val channels = body.parseJson.convertTo[Seq[ChannelLineup]]
-              log.info("[lineup] scan complete count={}", channels.size)
-              val jsChannels = channels.map(channelToJsValue)
-              context.self ! Command.Store(jsChannels)
-              jsChannels
+            if ((response.status == StatusCodes.Unauthorized || response.status == StatusCodes.Forbidden) && allowRefresh) {
+              val _ = response.entity.discardBytes()
+              Auth.refresh().flatMap(refreshed => fetchGuideChannels(refreshed, allowRefresh = false))
+            } else {
+              Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[ChannelLineup]])
             }
+          }
+        }
+
+        def scan(): Future[Seq[JsValue]] = {
+          val activeAuth = Auth.authContext.getOrElse(authContext)
+          fetchGuideChannels(activeAuth, allowRefresh = true).map { channels =>
+            log.info("[lineup] scan complete count={}", channels.size)
+            val jsChannels = channels.map(channelToJsValue)
+            context.self ! Command.Store(jsChannels)
+            jsChannels
           }.recover {
             case ex =>
               log.error("[lineup] scan failed", ex)
-              Seq.empty
+              context.self ! Command.ScanFailed
+              cache._2
           }
         }
 
@@ -376,8 +403,20 @@ object Tablo4thGen {
         Behaviors.receiveMessage {
           case Command.Store(channels) =>
             log.info("[lineup] store count={}", channels.size)
-            cache = (1.day.fromNow, channels)
+            if (channels.nonEmpty || cache._2.isEmpty) {
+              cache = (1.day.fromNow, channels)
+            } else {
+              log.warn("[lineup] keeping existing cached lineup count={} after empty scan", cache._2.size)
+              cache = (5.minutes.fromNow, cache._2)
+            }
             scanInProgress = false
+            Behaviors.same
+
+          case Command.ScanFailed =>
+            scanInProgress = false
+            if (cache._2.nonEmpty) {
+              cache = (1.minute.fromNow, cache._2)
+            }
             Behaviors.same
 
           case Command.Scan if scanInProgress =>
@@ -398,10 +437,18 @@ object Tablo4thGen {
 
           case Request.Fetch(replyTo) if cache._1.isOverdue() =>
             log.debug("[lineup] fetch cache expired")
-            val sender = replyTo
-            scanInProgress = true
-            scan().foreach { channels =>
-              sender ! Response.Fetch(channels, context.self)
+            if (cache._2.nonEmpty) {
+              replyTo ! Response.Fetch(cache._2, context.self)
+              if (!scanInProgress) {
+                scanInProgress = true
+                scan() : Unit
+              }
+            } else {
+              val sender = replyTo
+              scanInProgress = true
+              scan().foreach { channels =>
+                sender ! Response.Fetch(channels, context.self)
+              }
             }
             Behaviors.same
 
@@ -634,7 +681,7 @@ object Tablo4thGen {
         )
       }
 
-      def fetchAiringsForChannel(channelId: String, channelName: String, major: Int, minor: Int): Future[Tablo2HDHomeRun.Guide.ChannelGuide] = {
+      def fetchAiringsForChannel(channelId: String, channelName: String, major: Int, minor: Int, currentAuth: Auth.AuthContext): Future[Tablo2HDHomeRun.Guide.ChannelGuide] = {
         import Guide.JsonProtocol._
         import pekko.http.scaladsl.unmarshalling.Unmarshal
         import pekko.http.scaladsl.model.headers._
@@ -650,8 +697,8 @@ object Tablo4thGen {
             method = HttpMethods.GET
           , uri = airingsUri
           , headers = Seq(
-              Authorization(OAuth2BearerToken(authContext.accessToken))
-            , RawHeader("Lighthouse", authContext.lighthouseToken)
+              Authorization(OAuth2BearerToken(currentAuth.accessToken))
+            , RawHeader("Lighthouse", currentAuth.lighthouseToken)
             )
           )
 
@@ -684,44 +731,56 @@ object Tablo4thGen {
         }
       }
 
-      def scan(): Future[Seq[Tablo2HDHomeRun.Guide.ChannelGuide]] = {
+      def scan(retriedAuth: Boolean = false): Future[Seq[Tablo2HDHomeRun.Guide.ChannelGuide]] = {
         import Lineup.JsonProtocol._
         import pekko.http.scaladsl.unmarshalling.Unmarshal
         import pekko.http.scaladsl.model.headers._
 
-        val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${authContext.lighthouseToken}/guide/channels/")
+        val currentAuth = Auth.authContext.getOrElse(authContext)
+        val channelsUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/${currentAuth.lighthouseToken}/guide/channels/")
         log.debug("[guide] http GET /guide/channels")
 
         val request = HttpRequest(
           method = HttpMethods.GET
         , uri = channelsUri
         , headers = Seq(
-            Authorization(OAuth2BearerToken(authContext.accessToken))
-          , RawHeader("Lighthouse", authContext.lighthouseToken)
+            Authorization(OAuth2BearerToken(currentAuth.accessToken))
+          , RawHeader("Lighthouse", currentAuth.lighthouseToken)
           )
         )
 
         HttpCtx.singleRequest(request).flatMap { response =>
-          log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
-          Unmarshal(response.entity).to[String].flatMap { body =>
-            val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
-            log.info("[guide] scan channels count={}", channels.size)
+          val code = response.status.intValue()
+          log.debug("[guide] http GET /guide/channels status={}", code)
+          if ((code == 401 || code == 403) && !retriedAuth) {
+            val _ = response.entity.discardBytes()
+            log.warn("[guide] Lighthouse returned status={}, refreshing cloud auth tokens", code)
+            Auth.refresh().flatMap(_ => scan(retriedAuth = true))
+          } else if (!response.status.isSuccess()) {
+            val _ = response.entity.discardBytes()
+            log.warn("[guide] Lighthouse /guide/channels returned non-success status={}", code)
+            Future.successful(Seq.empty)
+          } else {
+            Unmarshal(response.entity).to[String].flatMap { body =>
+              val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
+              log.info("[guide] scan channels count={}", channels.size)
 
-            val guideFutures = channels.map { channel =>
-              val (major, minor, callSign) = channel.kind match {
-                case "ota" =>
-                  val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
-                  (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
-                case "ott" =>
-                  val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
-                  (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
-                case _ =>
-                  (0, 0, channel.name)
+              val guideFutures = channels.map { channel =>
+                val (major, minor, callSign) = channel.kind match {
+                  case "ota" =>
+                    val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
+                    (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
+                  case "ott" =>
+                    val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
+                    (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
+                  case _ =>
+                    (0, 0, channel.name)
+                }
+                fetchAiringsForChannel(channel.identifier, callSign, major, minor, currentAuth)
               }
-              fetchAiringsForChannel(channel.identifier, callSign, major, minor)
-            }
 
-            Future.sequence(guideFutures)
+              Future.sequence(guideFutures)
+            }
           }
         }.recover {
           case ex =>
@@ -735,7 +794,12 @@ object Tablo4thGen {
       Behaviors.receiveMessage {
         case Command.StoreGuide(guide) =>
           log.info("[guide] store count={}", guide.size)
-          cache = (1.hour.fromNow, guide)
+          if (guide.nonEmpty || cache._2.isEmpty) {
+            cache = (1.hour.fromNow, guide)
+          } else {
+            log.warn("[guide] scan returned empty guide; retaining cached guide count={}", cache._2.size)
+            cache = (5.minutes.fromNow, cache._2)
+          }
           scanInProgress = false
           Behaviors.same
 
@@ -752,10 +816,19 @@ object Tablo4thGen {
           Behaviors.same
 
         case Request.FetchGuide(replyTo) if cache._1.isOverdue() =>
-          log.debug("[guide] fetch cache expired")
-          scanInProgress = true
-          scan().foreach { guide =>
-            replyTo ! Response.FetchGuide(guide, context.self)
+          if (cache._2.nonEmpty) {
+            log.debug("[guide] fetch cache expired; serving stale cache count={} and refreshing in background", cache._2.size)
+            if (!scanInProgress) {
+              context.self ! Command.Scan
+            }
+            replyTo ! Response.FetchGuide(cache._2, context.self)
+          } else {
+            log.debug("[guide] fetch cache expired and empty; scanning")
+            scanInProgress = true
+            scan().foreach { guide =>
+              context.self ! Command.StoreGuide(guide)
+              replyTo ! Response.FetchGuide(guide, context.self)
+            }
           }
           Behaviors.same
 
@@ -1827,7 +1900,7 @@ object Tablo4thGen {
       import pekko.http.scaladsl.unmarshalling.Unmarshal
       implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
       val askTimeout = Option(AppContext.config).map { c =>
-        if (c.stream.resilient.recoveryTimeoutSec <= 0) 365.days
+        if (c.stream.resilient.recoveryTimeoutSec <= 0) 7.days
         else c.stream.resilient.recoveryTimeoutSec.seconds + 10.seconds
       }.getOrElse(70.seconds)
       implicit val timeout: Timeout = Timeout(askTimeout)
