@@ -150,11 +150,22 @@ object MpegTsSync {
     ByteString(arr)
   }
 
-  final case class PmtStreamPids(pcrPid: Option[Int], videoPid: Option[Int])
+  final case class PmtStreamPids(
+    pcrPid: Option[Int]
+  , videoPid: Option[Int]
+  , videoStreamType: Option[Int] = None
+  , audioPids: Seq[Int] = Seq.empty
+  )
 
   def isVideoType(streamType: Int): Boolean =
     streamType match {
       case 0x01 | 0x02 | 0x1B | 0x24 => true // MPEG-1, MPEG-2, H.264, H.265/HEVC
+      case _ => false
+    }
+
+  def isAudioType(streamType: Int): Boolean =
+    streamType match {
+      case 0x03 | 0x04 | 0x0F | 0x11 | 0x81 | 0x87 => true // MPEG-1/2 audio, ADTS AAC, LATM AAC, ATSC AC-3, E-AC-3
       case _ => false
     }
 
@@ -178,17 +189,22 @@ object MpegTsSync {
           var entryPos = tableOffset + 12 + progInfoLen
           val endPos = math.min(offset + PacketSize, tableOffset + 3 + sectionLength - 4)
           var videoPidOpt: Option[Int] = None
+          var videoStreamTypeOpt: Option[Int] = None
+          val audioPidsBuilder = Vector.newBuilder[Int]
           while (entryPos + 5 <= endPos) {
             val streamType = packet(entryPos) & 0xFF
             val elemPid = ((packet(entryPos + 1) & 0x1F) << 8) | (packet(entryPos + 2) & 0xFF)
             val esInfoLen = ((packet(entryPos + 3) & 0x0F) << 8) | (packet(entryPos + 4) & 0xFF)
-            if (videoPidOpt.isEmpty && isVideoType(streamType)) {
+            if (videoPidOpt.isEmpty && isVideoType(streamType) && elemPid > 0 && elemPid != NullPid) {
               videoPidOpt = Some(elemPid)
+              videoStreamTypeOpt = Some(streamType)
+            } else if (isAudioType(streamType) && elemPid > 0 && elemPid != NullPid) {
+              audioPidsBuilder += elemPid
             }
             entryPos += 5 + math.max(0, esInfoLen)
           }
           val validPcr = if (pcrPid > 0 && pcrPid != NullPid) Some(pcrPid) else None
-          Some(PmtStreamPids(validPcr, videoPidOpt))
+          Some(PmtStreamPids(validPcr, videoPidOpt, videoStreamTypeOpt, audioPidsBuilder.result().distinct))
         } else None
       } else None
     } else None
@@ -199,6 +215,8 @@ object MpegTsSync {
   , pmt: Option[ByteString] = None
   , pcrPid: Option[Int] = None
   , videoPid: Option[Int] = None
+  , videoStreamType: Option[Int] = None
+  , audioPids: Seq[Int] = Seq.empty
   ) {
     def isEmpty: Boolean = pat.isEmpty && pmt.isEmpty
 
@@ -210,6 +228,11 @@ object MpegTsSync {
       pcrPid.filter(p => p > 0 && p != NullPid && !videoPid.contains(p)).foreach { pid =>
         b ++= discontinuityPacket(pid)
       }
+      audioPids.distinct
+        .filter(p => p > 0 && p != NullPid && !videoPid.contains(p) && !pcrPid.contains(p))
+        .foreach { pid =>
+          b ++= discontinuityPacket(pid)
+        }
       b ++= MPEGTS_DISCONTINUITY_PACKET
       pat.foreach(b ++= _)
       pmt.foreach(b ++= _)
@@ -261,7 +284,13 @@ object MpegTsSync {
   ): Source[ByteString, NotUsed] =
     Source.lazySource { () =>
       val headers = cachedHeadersRef.get()
-      val aligned = source.via(alignToIFrame(headers.videoPid))
+      val aligned = source.via(
+        alignToIFrame(
+          videoPid = headers.videoPid
+        , videoStreamType = headers.videoStreamType
+        , audioPids = headers.audioPids
+        )
+      )
       if (headers.isEmpty) aligned
       else Source.single(headers.syncPrefix).concat(aligned)
     }.mapMaterializedValue(_ => NotUsed)
@@ -300,10 +329,13 @@ object MpegTsSync {
               } else if (detectedPmtPid.contains(pid)) {
                 val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
                 val streamPids = extractPmtStreamPids(arr, pos)
+                val nextAudioPids = streamPids.map(_.audioPids).filter(_.nonEmpty).getOrElse(updated.audioPids)
                 updated = updated.copy(
                   pmt = Some(pmtPacket)
                 , pcrPid = streamPids.flatMap(_.pcrPid).orElse(updated.pcrPid)
                 , videoPid = streamPids.flatMap(_.videoPid).orElse(updated.videoPid)
+                , videoStreamType = streamPids.flatMap(_.videoStreamType).orElse(updated.videoStreamType)
+                , audioPids = nextAudioPids
                 )
               }
 
@@ -372,29 +404,32 @@ object MpegTsSync {
     }
   }
 
-  def hasKeyframeHeader(arr: Array[Byte], offset: Int, len: Int): Boolean = {
+  def hasKeyframeHeader(arr: Array[Byte], offset: Int, len: Int): Boolean =
+    hasKeyframeHeader(arr, offset, len, None)
+
+  def hasKeyframeHeader(arr: Array[Byte], offset: Int, len: Int, videoStreamType: Option[Int]): Boolean = {
+    val isMpeg2Only = videoStreamType.exists(st => st == 0x01 || st == 0x02)
+    val isH264Only = videoStreamType.contains(0x1B)
     var i = offset
     val end = offset + len - 4
     var found = false
     while (i <= end && !found) {
       if (arr(i) == 0x00.toByte && arr(i + 1) == 0x00.toByte && arr(i + 2) == 0x01.toByte) {
         val code = arr(i + 3) & 0xFF
-        if (code == 0xB3 || code == 0xB8) {
+        if (!isH264Only && (code == 0xB3 || code == 0xB8)) {
+          // MPEG-1/2 Sequence Header (0xB3) or GOP Header (0xB8)
           found = true
-        } else {
+        } else if (!isMpeg2Only && (code & 0x80) == 0) {
+          // H.264 NAL unit with forbidden_zero_bit == 0; check for IDR (5) or SPS (7).
+          // Excluded when streamType is known to be MPEG-1/2 because 0x01..0xAF are MPEG-2 vertical slice start codes.
           val nalType = code & 0x1F
           if (nalType == 5 || nalType == 7) {
             found = true
-          } else if (code == 0x00 && i + 5 < offset + len) {
-            val pictureCodingType = (arr(i + 5) >> 3) & 0x07
-            if (pictureCodingType == 1) {
-              found = true
-            } else {
-              i += 1
-            }
           } else {
             i += 1
           }
+        } else {
+          i += 1
         }
       } else {
         i += 1
@@ -408,12 +443,16 @@ object MpegTsSync {
   def alignToIFrame(
     videoPid: Option[Int] = None
   , maxDroppedPackets: Int = DefaultMaxDroppedPackets
+  , videoStreamType: Option[Int] = None
+  , audioPids: Seq[Int] = Seq.empty
   ): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new AlignToIFrameStage(videoPid, maxDroppedPackets))
+    Flow.fromGraph(new AlignToIFrameStage(videoPid, maxDroppedPackets, videoStreamType, audioPids))
 
   private final class AlignToIFrameStage(
     videoPid: Option[Int]
   , maxDroppedPackets: Int
+  , initialVideoStreamType: Option[Int]
+  , initialAudioPids: Seq[Int]
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.alignToIFrame.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.alignToIFrame.out")
@@ -424,13 +463,19 @@ object MpegTsSync {
       private var carry: ByteString = ByteString.empty
       private var isAligned = false
       private var currentVideoPid: Option[Int] = videoPid
+      private var currentVideoStreamType: Option[Int] = initialVideoStreamType
+      private var knownAudioPids: Set[Int] = initialAudioPids.toSet
+      private var alignedAudioPids: Set[Int] = Set.empty
       private var detectedPmtPid: Option[Int] = None
       private var droppedPackets = 0
+
+      private def allAudioAligned: Boolean =
+        knownAudioPids.isEmpty || alignedAudioPids.size >= knownAudioPids.size
 
       setHandler(in, new InHandler {
         override def onPush(): Unit = {
           val incoming = grab(in)
-          if (isAligned) {
+          if (isAligned && allAudioAligned) {
             if (carry.nonEmpty) {
               val combined = carry ++ incoming
               carry = ByteString.empty
@@ -447,19 +492,33 @@ object MpegTsSync {
 
             while (pos + PacketSize <= len) {
               if (arr(pos) == 0x47.toByte) {
+                val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
                 if (isAligned) {
-                  outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                  if (knownAudioPids.contains(pid) && !alignedAudioPids.contains(pid)) {
+                    val pusi = (arr(pos + 1) & 0x40) != 0
+                    if (pusi) {
+                      alignedAudioPids += pid
+                      outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                    }
+                  } else {
+                    outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                  }
                 } else {
-                  val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
                   if (pid == PatPid) {
                     extractPmtPid(arr, pos).foreach { pmtPid =>
                       detectedPmtPid = Some(pmtPid)
                     }
                     outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
                   } else if (detectedPmtPid.contains(pid)) {
-                    if (currentVideoPid.isEmpty) {
-                      extractPmtStreamPids(arr, pos).flatMap(_.videoPid).foreach { vpid =>
-                        currentVideoPid = Some(vpid)
+                    extractPmtStreamPids(arr, pos).foreach { pids =>
+                      if (currentVideoPid.isEmpty) {
+                        currentVideoPid = pids.videoPid
+                      }
+                      if (currentVideoStreamType.isEmpty) {
+                        currentVideoStreamType = pids.videoStreamType
+                      }
+                      if (pids.audioPids.nonEmpty) {
+                        knownAudioPids ++= pids.audioPids
                       }
                     }
                     outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
@@ -472,9 +531,9 @@ object MpegTsSync {
                     val payloadLen = (pos + PacketSize) - payloadOffset
 
                     val isTargetVideo = currentVideoPid.contains(pid)
-                    val isCandidateVideo = currentVideoPid.isEmpty && pid != NullPid && pid > 0
+                    val isCandidateVideo = currentVideoPid.isEmpty && !knownAudioPids.contains(pid) && pid != NullPid && pid > 0
 
-                    if ((isTargetVideo || isCandidateVideo) && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen)) {
+                    if ((isTargetVideo || isCandidateVideo) && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, currentVideoStreamType)) {
                       if (currentVideoPid.isEmpty) currentVideoPid = Some(pid)
                       isAligned = true
                       val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
@@ -486,6 +545,7 @@ object MpegTsSync {
                         val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
                         log.warn(s"Max dropped packets ($droppedPackets in ${elapsedMs}ms) exceeded while waiting for I-Frame; forcing alignment")
                         isAligned = true
+                        alignedAudioPids = knownAudioPids
                         outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
                       }
                     }
@@ -504,6 +564,7 @@ object MpegTsSync {
 
             if (!isAligned && pos == 0 && len >= PacketSize && findNextSync(arr, 0, len) < 0) {
               isAligned = true
+              alignedAudioPids = knownAudioPids
               outputBuilder ++= combined
               pos = len
             }

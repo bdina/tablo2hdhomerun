@@ -49,6 +49,8 @@ object ResilientHlsSource {
   , enableSlateVideo: Boolean = AppContext.config.stream.resilient.enableSlateVideo
   , resumePrefixSupplier: () => Option[ByteString] = () => None
   , videoPidSupplier: () => Option[Int] = () => None
+  , videoStreamTypeSupplier: () => Option[Int] = () => None
+  , audioPidsSupplier: () => Seq[Int] = () => Seq.empty
   ): Source[ByteString, ?] = {
     val effectiveMax = if (maxRetryDelay < retryDelay) retryDelay else maxRetryDelay
     val restartSettings = RestartSettings(minBackoff = retryDelay, maxBackoff = effectiveMax, randomFactor = 0.2)
@@ -61,7 +63,13 @@ object ResilientHlsSource {
       if (n == 1) {
         inner.map(data => Real(data))
       } else {
-        val aligned = inner.via(MpegTsSync.alignToIFrame(videoPidSupplier()))
+        val aligned = inner.via(
+          MpegTsSync.alignToIFrame(
+            videoPid = videoPidSupplier()
+          , videoStreamType = videoStreamTypeSupplier()
+          , audioPids = audioPidsSupplier()
+          )
+        )
         val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
         aligned.statefulMapConcat { () =>
           var isFirst = true

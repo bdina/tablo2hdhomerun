@@ -772,5 +772,91 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       result shouldBe Seq(nonKeyPackets(2), nonKeyPackets(3))
     }
+
+    "hasKeyframeHeader should reject MPEG-2 vertical slice codes when videoStreamType is MPEG-2" in {
+      // Slice codes 0x05, 0x07, 0x25, 0x27 have (code & 0x1F) == 5 or 7, which collide with H.264 IDR/SPS
+      val mpeg2Slice05 = Array[Byte](0x00, 0x00, 0x01, 0x05, 0x88.toByte)
+      val mpeg2Slice25 = Array[Byte](0x00, 0x00, 0x01, 0x25, 0x88.toByte)
+      val mpeg2Slice27 = Array[Byte](0x00, 0x00, 0x01, 0x27, 0x88.toByte)
+      val mpeg2Slice85 = Array[Byte](0x00, 0x00, 0x01, 0x85.toByte, 0x88.toByte)
+
+      val _ = MpegTsSync.hasKeyframeHeader(mpeg2Slice05, 0, mpeg2Slice05.length, Some(0x02)) shouldBe false
+      val _ = MpegTsSync.hasKeyframeHeader(mpeg2Slice25, 0, mpeg2Slice25.length, Some(0x02)) shouldBe false
+      val _ = MpegTsSync.hasKeyframeHeader(mpeg2Slice27, 0, mpeg2Slice27.length, Some(0x02)) shouldBe false
+      // 0x85 has forbidden_zero_bit == 1, so it is rejected even when videoStreamType is None
+      val _ = MpegTsSync.hasKeyframeHeader(mpeg2Slice85, 0, mpeg2Slice85.length, None) shouldBe false
+
+      val mpeg2Seq = Array[Byte](0x00, 0x00, 0x01, 0xB3.toByte, 0x10, 0x20)
+      MpegTsSync.hasKeyframeHeader(mpeg2Seq, 0, mpeg2Seq.length, Some(0x02)) shouldBe true
+    }
+
+    "extractPmtStreamPids and CachedHeaders.syncPrefix should include audio PIDs" in {
+      val arr = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0101, videoPid = 0x0101).toArray
+      // Extend section_length by 5 bytes (from 18 = 0x12 to 23 = 0x17) to add an AC-3 (0x81) audio stream on PID 0x0102
+      arr(7) = 0x17.toByte
+      arr(22) = 0x81.toByte // stream_type = 0x81 (ATSC AC-3)
+      arr(23) = 0xE1.toByte // PID 0x0102
+      arr(24) = 0x02.toByte
+      arr(25) = 0xF0.toByte // ES info length = 0
+      arr(26) = 0x00.toByte
+      val pmtWithAudio = ByteString(arr)
+
+      val pids = MpegTsSync.extractPmtStreamPids(pmtWithAudio.toArray, 0)
+      val _ = pids shouldBe defined
+      val _ = pids.get.videoPid shouldBe Some(0x0101)
+      val _ = pids.get.videoStreamType shouldBe Some(0x02)
+      val _ = pids.get.audioPids shouldBe Seq(0x0102)
+
+      val pat = buildPatPacket(0x0100)
+      val cached = MpegTsSync.CachedHeaders(
+        pat = Some(pat)
+      , pmt = Some(pmtWithAudio)
+      , pcrPid = Some(0x0101)
+      , videoPid = Some(0x0101)
+      , videoStreamType = Some(0x02)
+      , audioPids = Seq(0x0102)
+      )
+      val prefix = cached.syncPrefix
+      // Video Disc (0x0101) + Audio Disc (0x0102) + Null Disc (0x1FFF) + PAT + PMT = 5 * 188
+      val _ = prefix.length shouldBe (188 * 5)
+      val audioDisc = prefix.slice(188, 376)
+      val _ = (((audioDisc(1) & 0x1F) << 8) | (audioDisc(2) & 0xFF)) shouldBe 0x0102
+      (audioDisc(5) & 0x80) should not be 0
+    }
+
+    "alignToIFrame should gate post-alignment audio packets on PUSI=1 and ignore MPEG-2 slice codes" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      // MPEG-2 P-frame with slice code 0x25 (which would falsely match H.264 IDR if not codec-aware)
+      val falseMpeg2Slice = {
+        val a = buildMediaPacket(videoPid).toArray
+        a(4) = 0x00.toByte
+        a(5) = 0x00.toByte
+        a(6) = 0x01.toByte
+        a(7) = 0x25.toByte
+        ByteString(a)
+      }
+      val realMpeg2Key = buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+      val midPesAudio = buildMediaPacket(audioPid) // PUSI = 0
+      val pusiAudio = {
+        val a = buildMediaPacket(audioPid).toArray
+        a(1) = (a(1) | 0x40).toByte // PUSI = 1
+        ByteString(a)
+      }
+      val nextMidPesAudio = buildMediaPacket(audioPid) // PUSI = 0 after audio is aligned
+
+      val result = Source(List(falseMpeg2Slice, realMpeg2Key, midPesAudio, pusiAudio, nextMidPesAudio))
+        .via(
+          MpegTsSync.alignToIFrame(
+            videoPid = Some(videoPid)
+          , videoStreamType = Some(0x02)
+          , audioPids = Seq(audioPid)
+          )
+        )
+        .runWith(Sink.seq)
+        .futureValue
+
+      result shouldBe Seq(realMpeg2Key, pusiAudio, nextMidPesAudio)
+    }
   }
 }
