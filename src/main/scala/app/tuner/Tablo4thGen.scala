@@ -1477,6 +1477,7 @@ object Tablo4thGen {
         , lastSeqRef: java.util.concurrent.atomic.AtomicInteger
         , isRecovery: Boolean
         , onSegmentReceived: () => Unit
+        , failOnStallPoll: Boolean = false
         ): Source[ByteString, ?] = {
           log.info(
             "[4thgen-channel] stream session expires={} keepalive={} playlist={}"
@@ -1496,6 +1497,7 @@ object Tablo4thGen {
                 onSegmentReceived()
               }
             , liveEdgeCount = liveEdgeCount
+            , failOnStallPoll = failOnStallPoll
             )
             .viaMat(KillSwitches.single)(Keep.right)
             .mapMaterializedValue { killSwitch =>
@@ -1508,6 +1510,7 @@ object Tablo4thGen {
           val currentSession = new AtomicReference[WatchSession.Session](firstSession)
           val streamKillSwitch = new AtomicReference[Option[UniqueKillSwitch]](None)
           val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
+          val playlistRollover = new AtomicBoolean(false)
           @volatile var keepaliveTask: Option[pekko.actor.Cancellable] = None
           val leaseStopped = new AtomicBoolean(false)
           val tornDown = new AtomicBoolean(false)
@@ -1540,6 +1543,8 @@ object Tablo4thGen {
                     )
                     if (WatchSession.playlistChanged(previous, updated)) {
                       log.info("[channel] playlist url changed leaseId={}, restarting hls", leaseId)
+                      playlistRollover.set(true)
+                      lastSeqRef.set(0)
                       streamKillSwitch.get().foreach(_.shutdown())
                     }
                     scheduleKeepalive()
@@ -1590,9 +1595,10 @@ object Tablo4thGen {
             val attempt = attemptCount.incrementAndGet()
             val session = currentSession.get()
             val nowNanos = System.nanoTime()
+            val isRollover = playlistRollover.compareAndSet(true, false)
 
-            if (attempt == 1 && !WatchSession.shouldRefreshSession(session)) {
-              streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = false, onSegmentReceived)
+            if ((attempt == 1 || isRollover) && !WatchSession.shouldRefreshSession(session)) {
+              streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = isRollover, onSegmentReceived)
             } else {
               val prevFlapState = flapTracker.getAndUpdate(_.onStall(nowNanos))
               val isFirstStallEntry = !prevFlapState.isStalling
@@ -1622,7 +1628,14 @@ object Tablo4thGen {
                   val stallTimeout = Option(AppContext.config)
                     .map(_.stream.resilient.stallTimeoutSec.seconds)
                     .getOrElse(8.seconds)
-                  val softStream = streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
+                  val softStream = streamFromWatchSession(
+                    session
+                  , streamKillSwitch
+                  , lastSeqRef
+                  , isRecovery = true
+                  , onSegmentReceived = onSegmentReceived
+                  , failOnStallPoll = true
+                  )
                   softStream.via(ResilientHlsSource.StallWatchdog.flow(softTimeout, stallTimeout, s"4thgen-channel-$channelId-soft"))
 
                 case WatchSession.RecoveryDecision.Cold(flapDelayMs) =>
@@ -1752,7 +1765,7 @@ object Tablo4thGen {
           }(ec)
         }
 
-        val recoveryTimeout = Option(AppContext.config).map(_.stream.resilient.recoveryTimeoutSec.seconds).getOrElse(60.seconds)
+        val recoveryTimeout = Option(AppContext.config).map(_.stream.resilient.recoveryTimeoutSec.seconds).getOrElse(0.seconds)
         val deadline = System.nanoTime() + recoveryTimeout.toNanos
         val retryDelay = 2.seconds
 

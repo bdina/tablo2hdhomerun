@@ -39,6 +39,7 @@ object HlsBackend extends StreamBackend {
     case object SegmentNotReady extends RuntimeException("newest segment not ready") with HlsError
     case object SessionEnded extends RuntimeException("playlist ended (EXT-X-ENDLIST)") with HlsError
     case object PollExhausted extends RuntimeException("playlist poll failures exhausted") with HlsError
+    case object PlaylistStalled extends RuntimeException("playlist stalled on soft recovery") with HlsError
   }
 
   private[stream] def pollOutcomeToFuture(
@@ -58,6 +59,7 @@ object HlsBackend extends StreamBackend {
   , initialSeq: Int = 0
   , onSeqAdvanced: Int => Unit = _ => ()
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
+  , failOnStallPoll: Boolean = false
   )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -298,7 +300,7 @@ object HlsBackend extends StreamBackend {
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
           log.debug("[stream:hls] resolved media playlist={}", url)
-          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s)(mat))
+          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount, failOnStallPoll))(s => step(s)(mat))
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>

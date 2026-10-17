@@ -33,8 +33,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 8
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 20
     val _ = config.stream.resilient.retryDelaySec shouldBe 1
-    val _ = config.stream.resilient.maxRetryDelaySec shouldBe 300
-    val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 60
+    val _ = config.stream.resilient.maxRetryDelaySec shouldBe 15
+    val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 0
     val _ = config.stream.resilient.enableSlateVideo shouldBe false
     val _ = config.stream.hls.heartbeatSec shouldBe 60
     val _ = config.stream.hls.pollFailuresMax shouldBe 4
@@ -53,7 +53,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "STREAM_TUNE_TIMEOUT_SEC" -> "30",
       "STREAM_RETRY_DELAY_SEC" -> "2",
       "STREAM_MAX_RETRY_DELAY_SEC" -> "120",
-      "STREAM_RECOVERY_TIMEOUT_SEC" -> "0",
+      "STREAM_RECOVERY_TIMEOUT_SEC" -> "90",
       "STREAM_ENABLE_SLATE_VIDEO" -> "true",
       "SESSION_IDLE_GRACE_SEC" -> "60",
       "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
@@ -64,7 +64,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
     val _ = config.stream.resilient.retryDelaySec shouldBe 2
     val _ = config.stream.resilient.maxRetryDelaySec shouldBe 120
-    val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 0
+    val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 90
     val _ = config.stream.resilient.enableSlateVideo shouldBe true
     val _ = config.stream.hls.recoveryLiveEdgeSegments shouldBe 5
     val _ = config.proxy.idleGraceSec shouldBe 60
