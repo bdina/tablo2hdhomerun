@@ -886,5 +886,90 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = out.slice(376, 564) shouldBe otherPidPacket
       out.slice(564, 752) shouldBe nextPesStart
     }
+
+    "cacheFlow should gate an entire corrupt video GOP on TEI or CC jump until the next clean keyframe" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(
+          videoPid = Some(videoPid)
+        , videoStreamType = Some(0x02)
+        , audioPids = Seq(audioPid)
+        )
+      )
+
+      def withCc(packet: ByteString, cc: Int, pusi: Boolean = false): ByteString = {
+        val arr = packet.toArray
+        if (pusi) arr(1) = (arr(1) | 0x40).toByte
+        arr(3) = ((arr(3) & 0xF0) | (cc & 0x0F)).toByte
+        ByteString(arr)
+      }
+
+      val cleanVideo1 = withCc(buildKeyframePacket(videoPid, isH264 = false, isGop = false), cc = 1, pusi = true)
+      // Sudden CC jump from 1 -> 5 (missing packets 2, 3, 4) inside the video GOP
+      val ccJumpVideo = withCc(buildMediaPacket(videoPid), cc = 5, pusi = false)
+      // Subsequent P-frame (PUSI = 1, but NOT a keyframe!) within the same damaged GOP
+      val damagedGopPFrame = withCc(buildMediaPacket(videoPid), cc = 6, pusi = true)
+      // Unaffected audio packet should still pass through
+      val cleanAudio = withCc(buildMediaPacket(audioPid), cc = 1, pusi = true)
+      // Next clean keyframe (Sequence Header, CC = 7) recovers the video stream
+      val recoveryKeyframe = withCc(buildKeyframePacket(videoPid, isH264 = false, isGop = false), cc = 7, pusi = true)
+      val postRecoveryVideo = withCc(buildMediaPacket(videoPid), cc = 8, pusi = false)
+
+      val input =
+        cleanVideo1 ++ ccJumpVideo ++ damagedGopPFrame ++ cleanAudio ++ recoveryKeyframe ++ postRecoveryVideo
+
+      val out = Source.single(input)
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      // Expected packets:
+      // 0: cleanVideo1
+      // 1: MPEGTS_NULL_PACKET (ccJumpVideo gated)
+      // 2: MPEGTS_NULL_PACKET (damagedGopPFrame with PUSI=1 also gated because it is not a keyframe!)
+      // 3: cleanAudio
+      // 4: discontinuityPacket(videoPid, cc = 6) injected before recoveryKeyframe
+      // 5: recoveryKeyframe
+      // 6: postRecoveryVideo
+      val _ = out.length shouldBe (188 * 7)
+      val _ = out.slice(0, 188) shouldBe cleanVideo1
+      val _ = out.slice(188, 376) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out.slice(376, 564) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out.slice(564, 752) shouldBe cleanAudio
+      val _ = out.slice(752, 940) shouldBe MpegTsSync.discontinuityPacket(videoPid, 6)
+      val _ = out.slice(940, 1128) shouldBe recoveryKeyframe
+      out.slice(1128, 1316) shouldBe postRecoveryVideo
+    }
+
+    "cacheFlow should scrub PUSI=0 packets on non-video PID after a CC jump until next PUSI=1" in {
+      val audioPid = 0x0102
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(videoPid = Some(0x0101), audioPids = Seq(audioPid))
+      )
+
+      def withCc(packet: ByteString, cc: Int, pusi: Boolean = false): ByteString = {
+        val arr = packet.toArray
+        if (pusi) arr(1) = (arr(1) | 0x40).toByte
+        arr(3) = ((arr(3) & 0xF0) | (cc & 0x0F)).toByte
+        ByteString(arr)
+      }
+
+      val audio1 = withCc(buildMediaPacket(audioPid), cc = 2, pusi = true)
+      val audioCcJumpMidPes = withCc(buildMediaPacket(audioPid), cc = 6, pusi = false)
+      val audioTrailingMidPes = withCc(buildMediaPacket(audioPid), cc = 7, pusi = false)
+      val audioNextPes = withCc(buildMediaPacket(audioPid), cc = 8, pusi = true)
+
+      val out = Source.single(audio1 ++ audioCcJumpMidPes ++ audioTrailingMidPes ++ audioNextPes)
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = out.length shouldBe (188 * 4)
+      val _ = out.slice(0, 188) shouldBe audio1
+      val _ = out.slice(188, 376) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out.slice(376, 564) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      out.slice(564, 752) shouldBe audioNextPes
+    }
   }
 }

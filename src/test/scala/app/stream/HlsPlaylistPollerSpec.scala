@@ -315,8 +315,8 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
   }
 
   it should "take 3 live edge segments by default on recovery" in {
-    HlsPlaylistPoller.defaultRecoveryLiveEdgeSegmentCount shouldBe 3
-    HlsPlaylistPoller.recoveryLiveEdgeSegmentCount shouldBe 3
+    val _ = HlsPlaylistPoller.defaultRecoveryLiveEdgeSegmentCount shouldBe 3
+    val _ = HlsPlaylistPoller.recoveryLiveEdgeSegmentCount shouldBe 3
 
     val recoveryState = HlsPlaylistPoller.initial("http://host/pl.m3u8", liveEdgeCount = HlsPlaylistPoller.recoveryLiveEdgeSegmentCount)
     val p = playlist(1, Seq("s1.ts", "s2.ts", "s3.ts", "s4.ts", "s5.ts"))

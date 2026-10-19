@@ -458,5 +458,54 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
       ex.getMessage should include("no decodable keyframe")
     }
+
+    "fail stream when keyframes arrive on videoPid but are corrupted by TEI or CC errors within the I-frame" in {
+      val videoPid = 0x0101
+      val keyStart = MpegTsSyncSpec.buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+      val teiContinuation = {
+        val arr = MpegTsSyncSpec.buildMediaPacket(videoPid).toArray
+        arr(1) = (arr(1) | 0x80).toByte // TEI = 1 inside the I-frame
+        ByteString(arr)
+      }
+      val ccJumpContinuation = {
+        val arr = MpegTsSyncSpec.buildMediaPacket(videoPid).toArray
+        arr(3) = ((arr(3) & 0xF0) | 0x07).toByte // CC jump from 0 -> 7 inside the I-frame
+        ByteString(arr)
+      }
+
+      val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
+        tuneTimeout = 2.seconds
+      , stallTimeout = 2.seconds
+      , streamName = "test-corrupt-keyframe-watchdog"
+      , keyframeTimeout = 250.millis
+      , videoPidSupplier = () => Some(videoPid)
+      , videoStreamTypeSupplier = () => Some(0x02)
+      )
+
+      val corruptChunk = keyStart ++ teiContinuation ++ keyStart ++ ccJumpContinuation
+      val source = Source.tick(0.millis, 40.millis, corruptChunk).via(watchdogFlow)
+      val ex = source.runWith(Sink.ignore).failed.futureValue
+      val _ = ex shouldBe a[ResilientHlsSource.StallTimeoutException]
+      ex.getMessage should include("no decodable keyframe")
+    }
+
+    "not fail stream when clean keyframes and intact continuation packets arrive within keyframeTimeout" in {
+      val videoPid = 0x0101
+      val cleanKey = MpegTsSyncSpec.buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+      val cleanCont = MpegTsSyncSpec.buildMediaPacket(videoPid)
+      val watchdogFlow = ResilientHlsSource.StallWatchdog.flow(
+        tuneTimeout = 2.seconds
+      , stallTimeout = 2.seconds
+      , streamName = "test-clean-keyframe-watchdog"
+      , keyframeTimeout = 200.millis
+      , videoPidSupplier = () => Some(videoPid)
+      , videoStreamTypeSupplier = () => Some(0x02)
+      )
+
+      val cleanChunk = cleanKey ++ cleanCont
+      val source = Source.tick(0.millis, 50.millis, cleanChunk).take(8).via(watchdogFlow)
+      val result = source.runWith(Sink.seq).futureValue
+      result.size shouldBe 8
+    }
   }
 }
