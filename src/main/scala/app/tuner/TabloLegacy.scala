@@ -222,14 +222,17 @@ object TabloLegacy {
               .flatMap { paths =>
                 import JsonProtocol._
                 import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
-                Marshal(paths.toJson)
-                  .to[RequestEntity]
-                  .flatMap { entity =>
-                    HttpCtx.singleRequest(Proxy.Request.postRequest(entity)).flatMap { response =>
-                      log.debug("[lineup] http POST /batch status={}", response.status.intValue())
-                      Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
+                // Legacy Tablo rejects /batch with more than 50 paths ("Batch size limit exceeded")
+                Future.traverse(paths.grouped(50).toSeq) { chunk =>
+                  Marshal(chunk.toJson)
+                    .to[RequestEntity]
+                    .flatMap { entity =>
+                      HttpCtx.singleRequest(Proxy.Request.postRequest(entity)).flatMap { response =>
+                        log.debug("[lineup] http POST /batch status={}", response.status.intValue())
+                        Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
+                      }
                     }
-                  }
+                }.map(_.foldLeft(Map.empty[String, ChannelObject])(_ ++ _))
               }
               .map { data =>
                 log.info("[lineup] scan complete count={}", data.size)
