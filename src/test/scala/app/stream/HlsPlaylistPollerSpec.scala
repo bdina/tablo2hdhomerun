@@ -355,9 +355,33 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Emit(next, _) => next
       case HlsPlaylistPoller.Fail(_) => fail("expected emit")
     }
-    // 2.5s = 2500ms -> 75% after advance = 1875ms, 40% when unchanged = 1000ms
+    // 2.5s = 2500ms -> 75% after advance = 1875ms, fast-poll when unchanged = 500ms
     val _ = HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = true, targetDurationSec = 4, defaultPollSec = 2) shouldBe 1875L
-    HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = false, targetDurationSec = 4, defaultPollSec = 2) shouldBe 1000L
+    HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = false, targetDurationSec = 4, defaultPollSec = 2) shouldBe 500L
+  }
+
+  it should "return pollDelayMinMs (500ms) whenever playlistAdvanced is false" in {
+    val stateZeroDuration = HlsPlaylistPoller.PollState(
+      baseUrl = "http://host/pl.m3u8"
+    , lastSeq = 10
+    , lastTargetDuration = 6
+    , stallPolls = 1
+    , fetchFailures = 0
+    , loggedFirstSegment = true
+    , lastSegmentDuration = 0.0
+    )
+    val _ = HlsPlaylistPoller.pollDelayMs(stateZeroDuration, playlistAdvanced = false, targetDurationSec = 6, defaultPollSec = 2) shouldBe 500L
+
+    val stateTargetDuration = stateZeroDuration.copy(lastSegmentDuration = 6.0)
+    val _ = HlsPlaylistPoller.pollDelayMs(stateTargetDuration, playlistAdvanced = false, targetDurationSec = 6, defaultPollSec = 2) shouldBe 500L
+
+    HlsPlaylistPoller.onPlaylistNotModified(stateTargetDuration) match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = segments shouldBe empty
+        val _ = next.lastAdvanced shouldBe false
+        HlsPlaylistPoller.pollDelayMs(next, playlistAdvanced = next.lastAdvanced, targetDurationSec = 6, defaultPollSec = 2) shouldBe 500L
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit on NotModified")
+    }
   }
 
   it should "fail immediately with PlaylistStalled when failOnStall is true and playlist has not advanced" in {

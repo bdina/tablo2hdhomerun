@@ -1014,8 +1014,8 @@ object Tablo4thGen {
       def playlistChanged(before: Session, after: Session): Boolean =
         before.playlistUrl != after.playlistUrl
 
-      val softRecoveryThresholdSec: Int = 15
-      val softRecoveryTimeoutSec: Int = 4
+      val softRecoveryThresholdSec: Int = 45
+      val softRecoveryTimeoutSec: Int = 15
       def softRecoveryTimeout: FiniteDuration = softRecoveryTimeoutSec.seconds
       val flapWindowSec: Int = 30
       val maxFlapDelaySec: Int = 4
@@ -1700,14 +1700,14 @@ object Tablo4thGen {
                   )
                   val stallTimeout = Option(AppContext.config)
                     .map(_.stream.resilient.stallTimeoutSec.seconds)
-                    .getOrElse(8.seconds)
+                    .getOrElse(45.seconds)
                   val softStream = streamFromWatchSession(
                     session
                   , streamKillSwitch
                   , lastSeqRef
                   , isRecovery = true
                   , onSegmentReceived = onSegmentReceived
-                  , failOnStallPoll = true
+                  , failOnStallPoll = false
                   )
                   softStream.via(ResilientHlsSource.StallWatchdog.flow(softTimeout, stallTimeout, s"4thgen-channel-$channelId-soft"))
 
