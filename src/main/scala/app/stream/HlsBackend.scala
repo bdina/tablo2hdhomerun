@@ -310,7 +310,7 @@ object HlsBackend extends StreamBackend {
               val gapMs = (segStartNanos - lastArrivalNanos.getAndSet(segStartNanos)) / 1000000L
               val segBytes = new java.util.concurrent.atomic.AtomicLong(0L)
               val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
-              val realignThisSegment = needsRealign.compareAndSet(true, false)
+              val _ = needsRealign.compareAndSet(true, false)
 
               val countedSource = fetchSegmentSource(seg.url, seg.byteRange)
                 .via(MpegTsSync.alignPackets)
@@ -352,12 +352,7 @@ object HlsBackend extends StreamBackend {
                   }(ec)
                 }
 
-              if (realignThisSegment) {
-                Source.single(MpegTsSync.MPEGTS_DISCONTINUITY_PACKET)
-                  .concat(countedSource.via(MpegTsSync.alignToIFrame()))
-              } else {
-                countedSource
-              }
+              countedSource
             }
         }
       ).watchTermination() { (_, done) =>

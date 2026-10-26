@@ -24,7 +24,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 
 ### Playback Resilience & End-User Experience
 - **Uninterrupted Plex Playback**: Keep Plex clients playing during periods of OTA channel and tuner instability without crashing or requiring manual viewer intervention.
-- **Warm Client Keepalive with Frozen Video**: Continuously stream MPEG-TS null packets every 40ms while the proxy releases the old Tablo session and performs a cold tune (`/watch`), presenting a clean frozen frame rather than fatal playback errors.
+- **Warm Client Keepalive with Frozen Video**: When upstream segments pause for > 750ms, `FreezeFramePacer` emits live-compatible `PAT`/`PMT`, MPEG-2 repeat/skip P-frames (or H.264 keepalive units), and silent AC-3/AAC frames every 100ms. Plex's ingest grabber (`-codec copy -f ssegment`) continues writing 1s segments of the frozen picture while the existing Tablo `/watch` session is preserved for up to 45s, presenting a seamless video freeze rather than fatal playback errors or crash loops.
 - **Live-Edge Resumption (No Seen-Content Replay)**: Fresh segments arrive from a new Tablo segment file after a cold tune; a single resume prefix (multi-PID discontinuity for video, audio, PCR, and null PIDs + cached PAT/PMT) resets decoder timelines without rewind loops or replayed video.
 - **Viewer-Controlled Persistence**: By default (`STREAM_RECOVERY_TIMEOUT_SEC=0`), keep the channel tuned indefinitely while a client is attached; if a finite `STREAM_RECOVERY_TIMEOUT_SEC` is configured, cleanly terminate the stream after that outage duration and remove the session manager entry immediately so the channel is re-tunable right away.
 
@@ -47,8 +47,8 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Topic | Choice |
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
-| Retune | Two-tier recovery: Tier 1 soft recovery (single poll on existing session with `failOnStallPoll = true` if stall is under 15s old, failing immediately if playlist is frozen), escalating to Tier 2 cold retune (DELETE + POST /watch with reset `lastSeqRef`) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery; hub stays up |
-| Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, audio PIDs, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
+| Retune | Two-tier recovery governed by `WatchSession.decideRecovery`: Tier 1 soft recovery retains existing `/watch` session for up to `softRecoveryThresholdSec = 45s` (`STREAM_STALL_TIMEOUT_SEC = 45s`), fast-polling `pls.m3u8` every 500ms when stalled with `failOnStallPoll = false` (watchdog `softRecoveryTimeoutSec = 15s`). Escalates to Tier 2 cold retune (DELETE + POST /watch with reset `lastSeqRef`) only if stall exceeds 45s or session expires; flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery; hub stays up |
+| Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets (video PID, audio PIDs, PCR PID, and null PID) prepended on client attach via `MpegTsSync`; continuous monotonic PCR/PTS/DTS timeline normalization and outbound CC rewriting in `MpegTsSync.cacheFlow` & `FreezeFramePacer`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
 | Idle grace | 180s default (configurable via `SESSION_IDLE_GRACE_SEC`) after last client leaves (channel surfing / app reload) |
@@ -71,22 +71,32 @@ Tablo4thGen.Channel.SessionRunner
   POST /watch
        │
        ▼
-  StreamBackend → StallWatchdog → ResilientHlsSource → MpegTsSync.cacheFlow → KillSwitch → watchTermination → BroadcastHub.sink(1024)
+  StreamBackend → StallWatchdog → ResilientHlsSource (FreezeFramePacer) → MpegTsSync.cacheFlow → KillSwitch → watchTermination → BroadcastHub.sink(1024)
                          ▲
                          │
               keepalive / playlist change / near-expiry retune
 ```
 
 Retune and keepalive run inside the single session runner for that channel. They restart the inner `streamFactory`
-without shutting the outer KillSwitch or the hub. HLS media sequence numbers are preserved across retunes to prevent duplicate segment playback when reception is lost. During retunes and silent gaps, `ResilientHlsSource` emits MPEG-TS
-null packets, followed by a single resume prefix (multi-PID discontinuity + cached PAT/PMT) when new live video resumes.
-When clients attach, `MpegTsSync.primeClientSource` primes the stream with cached PAT, PMT, and discontinuity packets and gates attachment on an I-frame (`MpegTsSync.alignToIFrame`) so
-late joiners never stall or fail format probing with mid-GOP packet errors. Known channel PAT/PMT tables are persisted in
-`SessionManager.channelHeaderCache` across session lifecycles so that subsequent tunes (even after idle grace expires)
-immediately have format tables ready. On brand new cold starts, `SessionRunner` coordinates check-in until the first
-segment's headers are parsed (or up to 1.5s fallback), guaranteeing clients receive stream metadata before format
-probing timeouts fire. The KillSwitch and upstream `watchTermination` are used for teardown (refcount 0 and idle grace
-expired, or upstream ended after recovery timeout).
+without shutting the outer KillSwitch or the hub. During transient upstream pauses (`> 750ms`), `FreezeFramePacer` emits
+live-compatible `PAT`/`PMT`, MPEG-2 repeat/skip P-frames (or H.264 keepalive units), and silent AC-3 (`0x0B77` with valid CRC-16) or
+ADTS AAC frames every 100ms so downstream Plex ingest grabbers (`-codec copy -f ssegment`) keep segmenting without timing out.
+During dropouts, `HlsPlaylistPoller` polls `pls.m3u8` every 500ms when unchanged (`lastAdvanced == false`), and `WatchSession.decideRecovery`
+preserves the `/watch` session up to `softRecoveryThresholdSec = 45s` (`failOnStallPoll = false`, `softRecoveryTimeoutSec = 15s`),
+removing the 16s clean-keyframe retune failure from `c57c238` so the existing hardware tuner lock can ride out the RF fade.
+If a prolonged outage (> 45s) requires a Tier 2 cold retune, HLS media sequence numbers (`lastSeqRef`) are reset for the fresh session
+to resume directly at the live edge (`STREAM_RECOVERY_LIVE_EDGE_SEGMENTS`, default 3).
+`MpegTsSync.cacheFlow` performs surgical slice-level sanitization (`droppingVideoSlice`) resuming on valid MPEG-2 slice start codes
+(`00 00 01 [01..maxSliceRow]`), clamps slice vertical positions (`<= maxSliceRow`, e.g. 68 on 1080i) to eliminate VAAPI `slice below image`
+crashes, locks confirmed sequence header geometry, gates audio on valid syncwords (`0x0B77`/`0xFFF`), rewrites outbound CCs per PID
+to prevent demuxer discontinuities, and maintains monotonic PCR/PTS/DTS timelines (`ptsDeltaTicks`).
+When clients attach, `MpegTsSync.primeClientSource` primes the stream with cached PAT, PMT, and discontinuity packets and gates
+attachment on an I-frame (`MpegTsSync.alignToIFrame`) so late joiners never stall or fail format probing with mid-GOP packet errors.
+Known channel PAT/PMT tables are persisted in `SessionManager.channelHeaderCache` across session lifecycles so that subsequent tunes
+(even after idle grace expires) immediately have format tables ready. On brand new cold starts, `SessionRunner` coordinates check-in until
+the first segment's headers are parsed (or up to 1.5s fallback), guaranteeing clients receive stream metadata before format probing
+timeouts fire. The KillSwitch and upstream `watchTermination` are used for teardown (refcount 0 and idle grace expired, or upstream ended
+after recovery timeout).
 
 ## State machine
 
@@ -550,7 +560,7 @@ the current per-request path, but as **one instance per channel lease**.
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source (`playlistRollover`); hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |
-| Reception drop (no new bytes for 8s or no keyframe for 24s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (8s) or keyframe watchdog after 24s → Tier 1 soft recovery polls existing session with `failOnStallPoll = true` and fails immediately if playlist is frozen; escalates to Tier 2 cold retune (DELETE old session, POST /watch, reset `lastSeqRef`) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery baseline; resumes with cached syncPrefix; MPEG-TS null packets keep Plex client warm with frozen video |
+| Reception drop (no new bytes for 45s) | Stall watchdog trips after `STREAM_STALL_TIMEOUT_SEC` (45s) → `WatchSession.decideRecovery` holds existing `/watch` session up to `softRecoveryThresholdSec = 45s` (polling `pls.m3u8` every 500ms with `failOnStallPoll = false` and watchdog `softRecoveryTimeoutSec = 15s`); `FreezeFramePacer` emits 100ms repeat P-frames and silent audio to keep Plex warm; `MpegTsSync.cacheFlow` performs slice-level recovery (`droppingVideoSlice`); if outage exceeds 45s, escalates to Tier 2 cold retune (`DELETE` old session, `POST /watch`, reset `lastSeqRef`) with flap dampening backoff (capped at 4s) if stalls recur within 30s of recovery baseline; resumes with cached syncPrefix and continuous monotonic timeline |
 | Extended outage (`STREAM_RECOVERY_TIMEOUT_SEC`) | By default (`0`), keeps retrying every up to `STREAM_MAX_RETRY_DELAY_SEC` (15s) with null keepalives while client is connected; if configured > 0, stream completes cleanly → runner teardown → `UpstreamEnded(channelId, leaseId)` → entry removed immediately |
 | User remote stop during recovery | Client disconnects → `Release` drain → IdleGrace → killSwitch shutdown cancels retune loop |
 | Slow client (lags past 1024 buffer) | BroadcastHub backpressures the producer when slowest subscriber is 1024 elements behind |

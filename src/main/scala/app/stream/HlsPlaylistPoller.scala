@@ -67,9 +67,10 @@ object HlsPlaylistPoller {
   , defaultPollSec: Int
   ): Long = {
     if (state.lastSeq == 0 || state.failOnStall) 0L
+    else if (!playlistAdvanced) pollDelayMinMs
     else if (state.lastSegmentDuration > 0.0 && state.lastSegmentDuration < targetDurationSec.toDouble) {
       val segMs = (state.lastSegmentDuration * 1000.0).toLong
-      val rawMs = if (playlistAdvanced) (segMs * 3L) / 4L else (segMs * 2L) / 5L
+      val rawMs = (segMs * 3L) / 4L
       rawMs.max(pollDelayMinMs).min(pollDelayMaxMs)
     } else {
       pollDelaySec(state, playlistAdvanced, targetDurationSec, defaultPollSec).toLong * 1000L

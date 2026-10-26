@@ -54,9 +54,7 @@ object ResilientHlsSource {
   , keyframeTimeout: FiniteDuration = Duration.Zero
   ): Source[ByteString, ?] = {
     val effectiveMax = if (maxRetryDelay < retryDelay) retryDelay else maxRetryDelay
-    val effectiveKeyframeTimeout =
-      if (keyframeTimeout.toNanos > 0) keyframeTimeout
-      else (stallTimeout * 2).max(12.seconds)
+    val effectiveKeyframeTimeout = keyframeTimeout
     val restartSettings = RestartSettings(minBackoff = retryDelay, maxBackoff = effectiveMax, randomFactor = 0.2)
     val attempts = new java.util.concurrent.atomic.AtomicInteger(0)
     RestartSource.withBackoff(restartSettings) { () =>

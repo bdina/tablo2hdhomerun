@@ -3,7 +3,7 @@ package app.stream
 import org.apache.pekko.NotUsed
 import org.apache.pekko.stream.{Attributes, FlowShape, Inlet, Outlet}
 import org.apache.pekko.stream.scaladsl.{Flow, Source}
-import org.apache.pekko.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler}
+import org.apache.pekko.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler, TimerGraphStageLogic}
 import org.apache.pekko.util.ByteString
 
 import org.slf4j.LoggerFactory
@@ -155,6 +155,7 @@ object MpegTsSync {
   , videoPid: Option[Int]
   , videoStreamType: Option[Int] = None
   , audioPids: Seq[Int] = Seq.empty
+  , audioStreamTypes: Map[Int, Int] = Map.empty
   )
 
   def isVideoType(streamType: Int): Boolean =
@@ -191,6 +192,7 @@ object MpegTsSync {
           var videoPidOpt: Option[Int] = None
           var videoStreamTypeOpt: Option[Int] = None
           val audioPidsBuilder = Vector.newBuilder[Int]
+          val audioStreamTypesBuilder = Map.newBuilder[Int, Int]
           while (entryPos + 5 <= endPos) {
             val streamType = packet(entryPos) & 0xFF
             val elemPid = ((packet(entryPos + 1) & 0x1F) << 8) | (packet(entryPos + 2) & 0xFF)
@@ -200,11 +202,12 @@ object MpegTsSync {
               videoStreamTypeOpt = Some(streamType)
             } else if (isAudioType(streamType) && elemPid > 0 && elemPid != NullPid) {
               audioPidsBuilder += elemPid
+              audioStreamTypesBuilder += (elemPid -> streamType)
             }
             entryPos += 5 + math.max(0, esInfoLen)
           }
           val validPcr = if (pcrPid > 0 && pcrPid != NullPid) Some(pcrPid) else None
-          Some(PmtStreamPids(validPcr, videoPidOpt, videoStreamTypeOpt, audioPidsBuilder.result().distinct))
+          Some(PmtStreamPids(validPcr, videoPidOpt, videoStreamTypeOpt, audioPidsBuilder.result().distinct, audioStreamTypesBuilder.result()))
         } else None
       } else None
     } else None
@@ -217,6 +220,7 @@ object MpegTsSync {
   , videoPid: Option[Int] = None
   , videoStreamType: Option[Int] = None
   , audioPids: Seq[Int] = Seq.empty
+  , audioStreamTypes: Map[Int, Int] = Map.empty
   ) {
     def isEmpty: Boolean = pat.isEmpty && pmt.isEmpty
 
@@ -272,11 +276,21 @@ object MpegTsSync {
     } else None
   }
 
+  val DefaultFreezeThreshold: FiniteDuration = 750.millis
+  val DefaultFreezeTickInterval: FiniteDuration = 100.millis
+
   def cacheFlow(
     cachedHeadersRef: AtomicReference[CachedHeaders]
   , onHeadersUpdated: CachedHeaders => Unit = _ => ()
+  , freezeThreshold: FiniteDuration = DefaultFreezeThreshold
+  , freezeTickInterval: FiniteDuration = DefaultFreezeTickInterval
   ): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new CacheStage(cachedHeadersRef, onHeadersUpdated))
+    Flow.fromGraph(new CacheStage(cachedHeadersRef, onHeadersUpdated, freezeThreshold, freezeTickInterval))
+
+  def signedPtsDiff(a: Long, b: Long): Long = {
+    val raw = (a - b) & FreezeFramePacer.PtsMask
+    if ((raw & 0x100000000L) != 0L) raw - 0x200000000L else raw
+  }
 
   def primeClientSource(
     source: Source[ByteString, NotUsed]
@@ -298,24 +312,125 @@ object MpegTsSync {
   private final class CacheStage(
     cachedHeadersRef: AtomicReference[CachedHeaders]
   , onHeadersUpdated: CachedHeaders => Unit
+  , freezeThreshold: FiniteDuration
+  , freezeTickInterval: FiniteDuration
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.out")
     override val shape: FlowShape[ByteString, ByteString] = FlowShape(in, out)
 
-    override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
+    override def createLogic(attrs: Attributes): GraphStageLogic = new TimerGraphStageLogic(shape) {
       private var carry: ByteString = ByteString.empty
       private var detectedPmtPid: Option[Int] = None
-      private var teiedPids: Set[Int] = Set.empty
-      private val lastCcByPid = scala.collection.mutable.Map.empty[Int, Int]
-      private var corruptVideoGop: Boolean = false
-      private var currentGopDroppedPackets: Int = 0
-      private var currentGopTeiPackets: Int = 0
-      private var currentGopCcErrors: Int = 0
+      private val lastInCcByPid = scala.collection.mutable.Map.empty[Int, Int]
+      private val outboundCcByPid = scala.collection.mutable.Map.empty[Int, Int]
+      private var droppingVideoSlice: Boolean = false
+      private var droppingAudioPids: Set[Int] = Set.empty
+      private var droppingOtherPids: Set[Int] = Set.empty
+      private var maxSliceRow: Int = FreezeFramePacer.DefaultMaxSliceRow
+      private var candidateSeqHeader: Option[ByteString] = None
+      private var lockedSeqHeader: Option[ByteString] = None
+      private val learnedAudioFormats = scala.collection.mutable.Map.empty[Int, FreezeFramePacer.AudioFormat]
+      private var seenLiveKeyframe: Boolean = false
+      private var lastLiveDataNanos: Long = System.nanoTime()
+      private var freezeActive: Boolean = false
+      private var freezeTicksCount: Int = 0
+      private var lastInputVideoPts: Long = -1L
+      private var lastOutputPts: Long = -1L
+      private var ptsDeltaTicks: Long = 0L
+      private var pendingOutlierPts: Option[Long] = None
       private var totalTeiPackets: Long = 0L
       private var totalCcErrors: Long = 0L
-      private var totalDroppedGops: Long = 0L
-      private var totalDroppedGopPackets: Long = 0L
+      private var totalClampedSlices: Long = 0L
+      private var totalScrubbedPts: Long = 0L
+      private var totalFreezeBursts: Long = 0L
+
+      private def nextOutboundCc(pid: Int, hasPayload: Boolean): Int =
+        if (hasPayload) {
+          val next = (outboundCcByPid.getOrElse(pid, -1) + 1) & 0x0F
+          val _ = outboundCcByPid.put(pid, next)
+          next
+        } else {
+          outboundCcByPid.getOrElse(pid, 0) & 0x0F
+        }
+
+      private def emitWithOutboundCc(
+        pkt: Array[Byte]
+      , pid: Int
+      , hasPayload: Boolean
+      , outputBuilder: org.apache.pekko.util.ByteStringBuilder
+      ): Unit = {
+        val outCc = nextOutboundCc(pid, hasPayload)
+        pkt(3) = ((pkt(3) & 0xF0) | outCc).toByte
+        val _ = outputBuilder ++= ByteString.fromArray(pkt)
+      }
+
+      private def normalizePacketTimestamps(pkt: Array[Byte], isVideo: Boolean): Unit = {
+        val pesOff = FreezeFramePacer.findPesHeaderOffset(pkt, 0)
+        if (pesOff >= 0) {
+          FreezeFramePacer.readPtsDts(pkt, pesOff, PacketSize).foreach { case (inPts, inDtsOpt) =>
+            val outPts = if (isVideo) {
+              val chosen = if (lastOutputPts >= 0) {
+                val mappedPts = (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+                val diffFromOut = signedPtsDiff(mappedPts, lastOutputPts)
+                val inputJump = if (lastInputVideoPts >= 0) math.abs(signedPtsDiff(inPts, lastInputVideoPts)) else 0L
+                if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                  if (pendingOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)) {
+                    ptsDeltaTicks = (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks - inPts) & FreezeFramePacer.PtsMask
+                    pendingOutlierPts = None
+                    lastInputVideoPts = inPts
+                    (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+                  } else {
+                    pendingOutlierPts = Some(inPts)
+                    totalScrubbedPts += 1L
+                    (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks) & FreezeFramePacer.PtsMask
+                  }
+                } else if (diffFromOut < 0 || diffFromOut > FreezeFramePacer.RebaseThresholdTicks) {
+                  ptsDeltaTicks = (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks - inPts) & FreezeFramePacer.PtsMask
+                  pendingOutlierPts = None
+                  lastInputVideoPts = inPts
+                  (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+                } else {
+                  pendingOutlierPts = None
+                  lastInputVideoPts = inPts
+                  mappedPts
+                }
+              } else {
+                lastInputVideoPts = inPts
+                (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+              }
+              if (lastOutputPts < 0 || signedPtsDiff(chosen, lastOutputPts) > 0) {
+                lastOutputPts = chosen
+              }
+              chosen
+            } else {
+              val mappedPts = (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+              if (lastOutputPts >= 0 && math.abs(signedPtsDiff(mappedPts, lastOutputPts)) > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                totalScrubbedPts += 1L
+                lastOutputPts
+              } else {
+                mappedPts
+              }
+            }
+
+            val stepDelta = (outPts - inPts) & FreezeFramePacer.PtsMask
+            val outDtsOpt = inDtsOpt.map(d => (d + stepDelta) & FreezeFramePacer.PtsMask)
+            if (outPts != inPts || outDtsOpt != inDtsOpt) {
+              FreezeFramePacer.writePtsDts(pkt, pesOff, PacketSize, outPts, outDtsOpt)
+            }
+          }
+        }
+
+        FreezeFramePacer.readPcrBase(pkt, 0).foreach { inPcr =>
+          val outPcr = (inPcr + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+          if (ptsDeltaTicks != 0L) {
+            FreezeFramePacer.writePcrBase(pkt, 0, outPcr)
+          }
+          if (lastOutputPts < 0) {
+            lastOutputPts = outPcr
+          }
+        }
+      }
 
       private def processPacket(
         arr: Array[Byte]
@@ -337,137 +452,246 @@ object MpegTsSync {
         val isElementaryPid =
           pid > 0 && pid != NullPid && pid != PatPid && !detectedPmtPid.contains(pid)
 
-        val isCcError =
-          if (isTei || !isElementaryPid) {
-            false
-          } else if (isDiscontinuity) {
-            if (hasPayload) {
-              val _ = lastCcByPid.put(pid, cc)
-            } else {
-              val _ = lastCcByPid.remove(pid)
-            }
-            false
-          } else if (hasPayload) {
-            val err = lastCcByPid.get(pid) match {
-              case Some(prevCc) => cc != ((prevCc + 1) & 0x0F) && cc != prevCc
-              case None => false
-            }
-            val _ = lastCcByPid.put(pid, cc)
-            err
-          } else {
-            false
+        if (pid == NullPid) {
+          if (!freezeActive) {
+            val _ = outputBuilder ++= MPEGTS_NULL_PACKET
+          }
+        } else {
+          if (!isTei) {
+            lastLiveDataNanos = System.nanoTime()
           }
 
-        if (isTei) {
-          totalTeiPackets += 1
-          if (updated.videoPid.contains(pid)) {
-            if (!corruptVideoGop) {
-              corruptVideoGop = true
-              totalDroppedGops += 1
+          val isCcError =
+            if (isTei || !isElementaryPid) {
+              false
+            } else if (isDiscontinuity) {
+              if (hasPayload) {
+                val _ = lastInCcByPid.put(pid, cc)
+              } else {
+                val _ = lastInCcByPid.remove(pid)
+              }
+              false
+            } else if (hasPayload) {
+              val err = lastInCcByPid.get(pid) match {
+                case Some(prevCc) => cc != ((prevCc + 1) & 0x0F) && cc != prevCc
+                case None => false
+              }
+              val _ = lastInCcByPid.put(pid, cc)
+              err
+            } else {
+              false
             }
-            currentGopTeiPackets += 1
-            currentGopDroppedPackets += 1
-            totalDroppedGopPackets += 1
-          } else if (pid > 0 && pid != NullPid) {
-            teiedPids += pid
-          }
-          outputBuilder ++= MPEGTS_NULL_PACKET
-        } else {
-          if (pid == PatPid) {
+
+          val payloadOffset =
+            if (afc == 1) pos + 4
+            else if (afc == 3) pos + 5 + (arr(pos + 4) & 0xFF)
+            else pos + PacketSize
+          val payloadLen = math.max(0, (pos + PacketSize) - payloadOffset)
+
+          if (isTei) {
+            totalTeiPackets += 1L
+            if (updated.videoPid.contains(pid)) {
+              droppingVideoSlice = true
+            } else if (updated.audioPids.contains(pid)) {
+              droppingAudioPids += pid
+            } else if (isElementaryPid) {
+              droppingOtherPids += pid
+            }
+            val _ = outputBuilder ++= MPEGTS_NULL_PACKET
+          } else if (pid == PatPid) {
             val patPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
             extractPmtPid(arr, pos).foreach { pmtPid =>
               detectedPmtPid = Some(pmtPid)
             }
             updated = updated.copy(pat = Some(patPacket))
+            val pkt = java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize)
+            emitWithOutboundCc(pkt, pid, hasPayload, outputBuilder)
           } else if (detectedPmtPid.contains(pid)) {
             val pmtPacket = ByteString(java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize))
             val streamPids = extractPmtStreamPids(arr, pos)
             val nextAudioPids = streamPids.map(_.audioPids).filter(_.nonEmpty).getOrElse(updated.audioPids)
+            val nextAudioStreamTypes = updated.audioStreamTypes ++ streamPids.map(_.audioStreamTypes).getOrElse(Map.empty)
             updated = updated.copy(
               pmt = Some(pmtPacket)
             , pcrPid = streamPids.flatMap(_.pcrPid).orElse(updated.pcrPid)
             , videoPid = streamPids.flatMap(_.videoPid).orElse(updated.videoPid)
             , videoStreamType = streamPids.flatMap(_.videoStreamType).orElse(updated.videoStreamType)
             , audioPids = nextAudioPids
+            , audioStreamTypes = nextAudioStreamTypes
             )
-          }
-
-          if (updated.videoPid.contains(pid)) {
-            val payloadOffset =
-              if (afc == 1) pos + 4
-              else if (afc == 3) pos + 5 + (arr(pos + 4) & 0xFF)
-              else pos + PacketSize
-            val payloadLen = (pos + PacketSize) - payloadOffset
-            val isKeyframeStart =
-              payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
-
-            if (isKeyframeStart || (corruptVideoGop && pusi && currentGopDroppedPackets >= DefaultMaxDroppedPackets)) {
-              if (corruptVideoGop) {
-                if (isCcError) {
-                  totalCcErrors += 1
-                  currentGopCcErrors += 1
-                }
-                log.warn(
-                  "[mpegts] gated corrupt video GOP on pid={} (droppedPackets={} tei={} ccErrors={} totalDroppedGops={})"
-                , pid
-                , currentGopDroppedPackets
-                , currentGopTeiPackets
-                , currentGopCcErrors
-                , totalDroppedGops
-                )
-                corruptVideoGop = false
-                currentGopDroppedPackets = 0
-                currentGopTeiPackets = 0
-                currentGopCcErrors = 0
-                teiedPids -= pid
-                outputBuilder ++= discontinuityPacket(pid, (cc - 1) & 0x0F)
-                outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
-              } else if (isCcError) {
-                totalCcErrors += 1
-                outputBuilder ++= discontinuityPacket(pid, (cc - 1) & 0x0F)
-                outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+            val pkt = java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize)
+            emitWithOutboundCc(pkt, pid, hasPayload, outputBuilder)
+          } else if (updated.videoPid.contains(pid)) {
+            if (isCcError) {
+              totalCcErrors += 1L
+              droppingVideoSlice = true
+            }
+            val isKeyStart = hasPayload && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
+            if (freezeActive) {
+              if (isKeyStart) {
+                freezeActive = false
+                droppingVideoSlice = false
+                seenLiveKeyframe = true
               } else {
-                outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+                val _ = outputBuilder ++= MPEGTS_NULL_PACKET
               }
-            } else if (corruptVideoGop || isCcError) {
-              if (isCcError) {
-                totalCcErrors += 1
-                currentGopCcErrors += 1
+            }
+
+            if (!freezeActive) {
+              var sliceStuffTargetOffset = -1
+              if (droppingVideoSlice) {
+                if (pusi && FreezeFramePacer.findPesHeaderOffset(arr, pos) >= 0) {
+                  droppingVideoSlice = false
+                } else if (!pusi && hasPayload && payloadLen > 0) {
+                  val validSliceOff = FreezeFramePacer.findFirstValidVideoSliceOffset(arr, payloadOffset, payloadLen, updated.videoStreamType, maxSliceRow)
+                  if (validSliceOff >= 0) {
+                    droppingVideoSlice = false
+                    if (validSliceOff > payloadOffset) {
+                      sliceStuffTargetOffset = validSliceOff - pos
+                    }
+                  }
+                }
               }
-              if (!corruptVideoGop) {
-                corruptVideoGop = true
-                totalDroppedGops += 1
+
+              if (droppingVideoSlice) {
+                FreezeFramePacer.readPcrBase(arr, pos) match {
+                  case Some(rawPcr) =>
+                    val normPcr = (rawPcr + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+                    val pcrPkt = FreezeFramePacer.pcrOnlyPacket(pid, nextOutboundCc(pid, hasPayload = false), normPcr)
+                    val _ = outputBuilder ++= ByteString.fromArray(pcrPkt)
+                  case None =>
+                    val _ = outputBuilder ++= MPEGTS_NULL_PACKET
+                }
+              } else {
+                if (isKeyStart) {
+                  seenLiveKeyframe = true
+                }
+                val pkt = java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize)
+                if (sliceStuffTargetOffset > 0) {
+                  val _ = FreezeFramePacer.stuffPacketPrefix(pkt, 0, sliceStuffTargetOffset)
+                }
+                val pktAfc = (pkt(3) & 0x30) >> 4
+                val pktPayloadOffset =
+                  if (pktAfc == 1) 4
+                  else if (pktAfc == 3) 5 + (pkt(4) & 0xFF)
+                  else PacketSize
+                val pktPayloadLen = math.max(0, PacketSize - pktPayloadOffset)
+                val isMpeg2 = updated.videoStreamType.isEmpty || updated.videoStreamType.contains(0x01) || updated.videoStreamType.contains(0x02)
+                if (isMpeg2 && pktPayloadLen > 0) {
+                  if (lockedSeqHeader.isEmpty) {
+                    FreezeFramePacer.parseMpeg2SequenceHeader(pkt, pktPayloadOffset, pktPayloadLen).foreach { case (hdr, rows) =>
+                      maxSliceRow = rows
+                      if (candidateSeqHeader.contains(hdr)) lockedSeqHeader = Some(hdr) else candidateSeqHeader = Some(hdr)
+                    }
+                  }
+                  totalClampedSlices += FreezeFramePacer.sanitizeMpeg2Payload(pkt, pktPayloadOffset, pktPayloadLen, maxSliceRow, lockedSeqHeader).toLong
+                }
+                normalizePacketTimestamps(pkt, isVideo = true)
+                emitWithOutboundCc(pkt, pid, hasPayload = (pktAfc == 1 || pktAfc == 3), outputBuilder)
               }
-              currentGopDroppedPackets += 1
-              totalDroppedGopPackets += 1
-              outputBuilder ++= MPEGTS_NULL_PACKET
+            }
+          } else if (updated.audioPids.contains(pid)) {
+            if (freezeActive) {
+              val _ = outputBuilder ++= MPEGTS_NULL_PACKET
             } else {
-              outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+              val streamTypeOpt = updated.audioStreamTypes.get(pid)
+              if (isCcError) {
+                totalCcErrors += 1L
+                droppingAudioPids += pid
+              }
+              if (droppingAudioPids.contains(pid)) {
+                if (pusi && hasPayload && payloadLen > 0 && FreezeFramePacer.hasValidAudioSyncword(arr, payloadOffset, payloadLen, streamTypeOpt)) {
+                  droppingAudioPids -= pid
+                }
+              }
+              if (droppingAudioPids.contains(pid)) {
+                val _ = outputBuilder ++= MPEGTS_NULL_PACKET
+              } else {
+                if (pusi && hasPayload && payloadLen > 0 && !learnedAudioFormats.contains(pid)) {
+                  FreezeFramePacer.extractAudioFormat(arr, payloadOffset, payloadLen, streamTypeOpt).foreach { fmt =>
+                    val _ = learnedAudioFormats.put(pid, fmt)
+                  }
+                }
+                val pkt = java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize)
+                normalizePacketTimestamps(pkt, isVideo = false)
+                emitWithOutboundCc(pkt, pid, hasPayload, outputBuilder)
+              }
             }
           } else {
             if (isCcError) {
-              totalCcErrors += 1
-              if (pusi) {
-                teiedPids -= pid
-                outputBuilder ++= discontinuityPacket(pid, (cc - 1) & 0x0F)
-                outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
-              } else {
-                teiedPids += pid
-                outputBuilder ++= MPEGTS_NULL_PACKET
-              }
-            } else if (teiedPids.contains(pid)) {
-              if (pusi) {
-                teiedPids -= pid
-                outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
-              } else {
-                outputBuilder ++= MPEGTS_NULL_PACKET
-              }
+              totalCcErrors += 1L
+              if (pusi) droppingOtherPids -= pid else droppingOtherPids += pid
+            } else if (droppingOtherPids.contains(pid) && pusi) {
+              droppingOtherPids -= pid
+            }
+            if (droppingOtherPids.contains(pid)) {
+              val _ = outputBuilder ++= MPEGTS_NULL_PACKET
             } else {
-              outputBuilder ++= ByteString.fromArray(arr, pos, PacketSize)
+              val pkt = java.util.Arrays.copyOfRange(arr, pos, pos + PacketSize)
+              normalizePacketTimestamps(pkt, isVideo = false)
+              emitWithOutboundCc(pkt, pid, hasPayload, outputBuilder)
             }
           }
         }
         updated
+      }
+
+      override def preStart(): Unit = {
+        if (freezeThreshold.toNanos > 0 && freezeTickInterval.toNanos > 0) {
+          scheduleWithFixedDelay("freeze-pacer", freezeTickInterval, freezeTickInterval)
+        }
+      }
+
+      override protected def onTimer(timerKey: Any): Unit = {
+        if (isAvailable(out) && seenLiveKeyframe && freezeThreshold.toNanos > 0) {
+          val now = System.nanoTime()
+          val headers = cachedHeadersRef.get()
+          headers.videoPid.foreach { vpid =>
+            if ((now - lastLiveDataNanos) >= freezeThreshold.toNanos) {
+              freezeActive = true
+              totalFreezeBursts += 1L
+              val b = ByteString.newBuilder
+              if (freezeTicksCount % 5 == 0) {
+                headers.pat.foreach { patBs =>
+                  val patArr = patBs.toArray
+                  emitWithOutboundCc(patArr, PatPid, hasPayload = true, b)
+                }
+                headers.pmt.foreach { pmtBs =>
+                  val pmtArr = pmtBs.toArray
+                  val pmtPid = ((pmtArr(1) & 0x1F) << 8) | (pmtArr(2) & 0xFF)
+                  emitWithOutboundCc(pmtArr, pmtPid, hasPayload = true, b)
+                }
+              }
+              freezeTicksCount += 1
+              var f = 0
+              while (f < 3) {
+                val basePts = if (lastOutputPts >= 0) lastOutputPts else 90000L
+                lastOutputPts = (basePts + FreezeFramePacer.DefaultVideoStepTicks) & FreezeFramePacer.PtsMask
+                val _ = b ++= FreezeFramePacer.synthesizeVideoFreezeFrame(
+                  vpid
+                , headers.videoStreamType
+                , lastOutputPts
+                , includePcr = true
+                , maxSliceRow
+                , () => nextOutboundCc(vpid, hasPayload = true)
+                )
+                headers.audioPids.foreach { apid =>
+                  val stOpt = headers.audioStreamTypes.get(apid)
+                  val fmtOpt = learnedAudioFormats.get(apid)
+                  val _ = b ++= FreezeFramePacer.synthesizeSilentAudioFrame(
+                    apid
+                  , stOpt
+                  , fmtOpt
+                  , lastOutputPts
+                  , () => nextOutboundCc(apid, hasPayload = true)
+                  )
+                }
+                f += 1
+              }
+              push(out, b.result())
+            }
+          }
+        }
       }
 
       setHandler(in, new InHandler {
@@ -506,7 +730,9 @@ object MpegTsSync {
           if (result.nonEmpty) {
             push(out, result)
           } else {
-            pull(in)
+            if (!hasBeenPulled(in)) {
+              pull(in)
+            }
           }
         }
 
@@ -536,13 +762,14 @@ object MpegTsSync {
               emit(out, result)
             }
           }
-          if (totalTeiPackets > 0 || totalCcErrors > 0) {
+          if (totalTeiPackets > 0 || totalCcErrors > 0 || totalClampedSlices > 0 || totalScrubbedPts > 0 || totalFreezeBursts > 0) {
             log.info(
-              "[mpegts] stream ended with transport stats: totalTei={} totalCcErrors={} totalDroppedGops={} totalDroppedGopPackets={}"
+              "[mpegts] stream ended with transport stats: totalTei={} totalCcErrors={} totalClampedSlices={} totalScrubbedPts={} totalFreezeBursts={}"
             , totalTeiPackets
             , totalCcErrors
-            , totalDroppedGops
-            , totalDroppedGopPackets
+            , totalClampedSlices
+            , totalScrubbedPts
+            , totalFreezeBursts
             )
           }
           completeStage()
@@ -550,7 +777,11 @@ object MpegTsSync {
       })
 
       setHandler(out, new OutHandler {
-        override def onPull(): Unit = pull(in)
+        override def onPull(): Unit = {
+          if (!hasBeenPulled(in)) {
+            pull(in)
+          }
+        }
       })
     }
   }

@@ -299,7 +299,7 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     , shouldRefreshSession = false
     )
 
-    decision shouldBe Tablo4thGen.Channel.WatchSession.RecoveryDecision.Soft(4.seconds)
+    decision shouldBe Tablo4thGen.Channel.WatchSession.RecoveryDecision.Soft(15.seconds)
   }
 
   it should "escalate to Cold recovery when a soft retry was already attempted" in {
@@ -335,7 +335,7 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
       flapState = state
     , attempt = 2
     , softRetryAttempted = false
-    , nowNanos = stallNanos + 16.seconds.toNanos
+    , nowNanos = stallNanos + 46.seconds.toNanos
     , shouldRefreshSession = false
     )
 

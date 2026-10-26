@@ -507,5 +507,34 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val result = source.runWith(Sink.seq).futureValue
       result.size shouldBe 8
     }
+
+    "not retune when non-keyframe packets flow past 2 * stallTimeout with default keyframeTimeout" in {
+      val attempts = new AtomicInteger(0)
+      val videoPid = 0x0101
+      val nonKey = MpegTsSyncSpec.buildMediaPacket(videoPid)
+
+      val factory = () => {
+        val _ = attempts.incrementAndGet()
+        Source.tick(0.millis, 40.millis, nonKey)
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-default-no-keyframe-retune"
+      , stallTimeout = 150.millis
+      , tuneTimeout = 500.millis
+      , recoveryTimeout = 5.seconds
+      , videoPidSupplier = () => Some(videoPid)
+      , videoStreamTypeSupplier = () => Some(0x02)
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+
+      val packets = probe.request(15).expectNextN(12)
+      val _ = packets.nonEmpty shouldBe true
+      val _ = probe.cancel()
+      attempts.get() shouldBe 1
+    }
   }
 }
