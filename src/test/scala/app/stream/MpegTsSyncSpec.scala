@@ -3,7 +3,7 @@ package app.stream
 import org.apache.pekko.NotUsed
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
 import org.apache.pekko.stream.OverflowStrategy
-import org.apache.pekko.stream.scaladsl.{Sink, Source}
+import org.apache.pekko.stream.scaladsl.{Flow, Sink, Source}
 import org.apache.pekko.util.ByteString
 import org.junit.runner.RunWith
 import org.scalatest.matchers.should.Matchers
@@ -1268,7 +1268,9 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         arr(1) = (0x40 | ((videoPid >> 8) & 0x1F)).toByte
         arr(2) = (videoPid & 0xFF).toByte
         arr(3) = 0x10.toByte
-        System.arraycopy(seqBytes, 0, arr, 4, 12)
+        val pesHdr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte, 0x00.toByte, 0x80.toByte, 0x00.toByte, 0x00.toByte)
+        System.arraycopy(pesHdr, 0, arr, 4, pesHdr.length)
+        System.arraycopy(seqBytes, 0, arr, 4 + pesHdr.length, 12)
         ByteString(arr)
       }
 
@@ -1304,14 +1306,12 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         .futureValue
 
       val _ = out.length shouldBe 6
-      // Packet index 4 is poisonSlicePkt
-      val sanitizedSlice = out(4)
-      val _ = sanitizedSlice.slice(4, 8) shouldBe ByteString(0x00, 0x00, 0x00, 0x99.toByte) // neutralized 00 00 01 99 -> 00 00 00 99
-      val _ = sanitizedSlice.slice(8, 12) shouldBe ByteString(0x00, 0x00, 0x01, 0x02) // preserved valid slice
+      // Packet index 4 is poisonSlicePkt: dropped and replaced with null packet
+      val _ = out(4) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
 
       // Packet index 5 is mutatedSeqPkt: should have been restored to lockedSeqHeaderBytes
       val restoredSeq = out(5)
-      restoredSeq.slice(4, 16) shouldBe ByteString.fromArray(lockedSeqHeaderBytes)
+      restoredSeq.slice(13, 25) shouldBe ByteString.fromArray(lockedSeqHeaderBytes)
     }
 
     "cacheFlow should gate audio on TEI/CC error and reject PUSI=1 packet with garbage elementary bytes until valid syncword arrives" in {
@@ -1366,7 +1366,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val v4 = buildVideoPesPacket(videoPid, pts = 96006L, cc = 4)
 
       val out = Source.single(v1 ++ v2 ++ vOutlier ++ v4)
-        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, freezeThreshold = 10.seconds))
         .runWith(Sink.fold(ByteString.empty)(_ ++ _))
         .futureValue
 
@@ -1396,7 +1396,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val vReset2 = buildVideoPesPacket(videoPid, pts = 3003L, cc = 4)
 
       val out = Source.single(v1 ++ v2 ++ vReset1 ++ vReset2)
-        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, freezeThreshold = 10.seconds))
         .runWith(Sink.fold(ByteString.empty)(_ ++ _))
         .futureValue
 
@@ -1410,6 +1410,89 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = p2Pts shouldBe 903003L
       val _ = p3Pts should be >= 906006L
       p4Pts should be > p3Pts
+    }
+
+    "cacheFlow should preserve native B-frame decode-order PTS/DTS and audio/PCR timestamps without rebasing or scrambling" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+
+      val pcrPkt = ByteString.fromArray(FreezeFramePacer.pcrOnlyPacket(videoPid, cc = 0, pcrBase = 80000L))
+      val vI = buildVideoPesPacket(videoPid, pts = 90090L, dtsOpt = Some(81081L), cc = 1, isKeyframe = true)
+      val a1 = buildAudioPesPacket(audioPid, pts = 83000L, cc = 1, withValidSyncword = true)
+      val vB1 = buildVideoPesPacket(videoPid, pts = 84084L, dtsOpt = Some(84084L), cc = 2)
+      val vB2 = buildVideoPesPacket(videoPid, pts = 87087L, dtsOpt = Some(87087L), cc = 3)
+      val a2 = buildAudioPesPacket(audioPid, pts = 86000L, cc = 2, withValidSyncword = true)
+      val vP = buildVideoPesPacket(videoPid, pts = 99099L, dtsOpt = Some(90090L), cc = 4)
+      val vB3 = buildVideoPesPacket(videoPid, pts = 93093L, dtsOpt = Some(93093L), cc = 5)
+      val vB4 = buildVideoPesPacket(videoPid, pts = 96096L, dtsOpt = Some(96096L), cc = 6)
+      val a3 = buildAudioPesPacket(audioPid, pts = 89000L, cc = 3, withValidSyncword = true)
+
+      val inputGop = pcrPkt ++ vI ++ a1 ++ vB1 ++ vB2 ++ a2 ++ vP ++ vB3 ++ vB4 ++ a3
+
+      def verifyStream(flow: Flow[ByteString, ByteString, NotUsed]): org.scalatest.Assertion = {
+        val out = Source.single(inputGop)
+          .via(flow)
+          .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+          .futureValue
+
+        val _ = out.length shouldBe (188 * 10)
+
+        // Packet 0: PCR packet
+        val pcrPktOut = out.slice(0, 188).toArray
+        val _ = FreezeFramePacer.readPcrBase(pcrPktOut, 0) shouldBe Some(80000L)
+
+        // Packet 1: I-frame (PTS = 90090L, DTS = 81081L)
+        val vIOut = out.slice(188, 376).toArray
+        val _ = FreezeFramePacer.readPtsDts(vIOut, 4, 188) shouldBe Some((90090L, Some(81081L)))
+
+        // Packet 2: Audio 1 (PTS = 83000L)
+        val a1Out = out.slice(376, 564).toArray
+        val _ = FreezeFramePacer.readPtsDts(a1Out, 4, 188).map(_._1) shouldBe Some(83000L)
+
+        // Packet 3: B-frame 1 (PTS = 84084L, DTS = 84084L)
+        val vB1Out = out.slice(564, 752).toArray
+        val _ = FreezeFramePacer.readPtsDts(vB1Out, 4, 188) shouldBe Some((84084L, Some(84084L)))
+
+        // Packet 4: B-frame 2 (PTS = 87087L, DTS = 87087L)
+        val vB2Out = out.slice(752, 940).toArray
+        val _ = FreezeFramePacer.readPtsDts(vB2Out, 4, 188) shouldBe Some((87087L, Some(87087L)))
+
+        // Packet 5: Audio 2 (PTS = 86000L)
+        val a2Out = out.slice(940, 1128).toArray
+        val _ = FreezeFramePacer.readPtsDts(a2Out, 4, 188).map(_._1) shouldBe Some(86000L)
+
+        // Packet 6: P-frame (PTS = 99099L, DTS = 90090L)
+        val vPOut = out.slice(1128, 1316).toArray
+        val _ = FreezeFramePacer.readPtsDts(vPOut, 4, 188) shouldBe Some((99099L, Some(90090L)))
+
+        // Packet 7: B-frame 3 (PTS = 93093L, DTS = 93093L)
+        val vB3Out = out.slice(1316, 1504).toArray
+        val _ = FreezeFramePacer.readPtsDts(vB3Out, 4, 188) shouldBe Some((93093L, Some(93093L)))
+
+        // Packet 8: B-frame 4 (PTS = 96096L, DTS = 96096L)
+        val vB4Out = out.slice(1504, 1692).toArray
+        val _ = FreezeFramePacer.readPtsDts(vB4Out, 4, 188) shouldBe Some((96096L, Some(96096L)))
+
+        // Packet 9: Audio 3 (PTS = 89000L)
+        val a3Out = out.slice(1692, 1880).toArray
+        FreezeFramePacer.readPtsDts(a3Out, 4, 188).map(_._1) shouldBe Some(89000L)
+      }
+
+      def newHeadersRef(): AtomicReference[MpegTsSync.CachedHeaders] =
+        new AtomicReference[MpegTsSync.CachedHeaders](
+          MpegTsSync.CachedHeaders(
+            videoPid = Some(videoPid)
+          , videoStreamType = Some(0x02)
+          , audioPids = Seq(audioPid)
+          , audioStreamTypes = Map(audioPid -> 0x81)
+          )
+        )
+
+      // Test with default freezeThreshold (Duration.Zero)
+      val _ = verifyStream(MpegTsSync.cacheFlow(newHeadersRef()))
+
+      // Test with freezeThreshold = 10.seconds (active timestamp normalization)
+      verifyStream(MpegTsSync.cacheFlow(newHeadersRef(), freezeThreshold = 10.seconds))
     }
 
     "cacheFlow should synthesize freeze-frame video and audio during upstream stalls and resume on live keyframe" in {
