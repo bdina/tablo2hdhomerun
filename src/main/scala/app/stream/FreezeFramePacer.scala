@@ -257,6 +257,36 @@ object FreezeFramePacer {
     clamped
   }
 
+  def hasOutOfBoundsMpeg2Slice(
+      arr: Array[Byte],
+      payloadOffset: Int,
+      payloadLen: Int,
+      maxSliceRow: Int
+  ): Boolean = {
+    if (payloadOffset < 0 || payloadLen < 4 || payloadOffset + payloadLen > arr.length) {
+      false
+    } else {
+      val end = payloadOffset + payloadLen - 4
+      var i = payloadOffset
+      var found = false
+      while (i <= end && !found) {
+        if (arr(i) == 0x00.toByte &&
+            arr(i + 1) == 0x00.toByte &&
+            arr(i + 2) == 0x01.toByte) {
+          val code = arr(i + 3) & 0xFF
+          if (code >= 0x01 && code <= 0xAF && code > maxSliceRow) {
+            found = true
+          } else {
+            i += 1
+          }
+        } else {
+          i += 1
+        }
+      }
+      found
+    }
+  }
+
   def findFirstValidVideoSliceOffset(
       arr: Array[Byte],
       payloadOffset: Int,
@@ -336,7 +366,14 @@ object FreezeFramePacer {
       val newAfLen = oldAfLen + delta
       if (newAfLen > 182) return false
       arr(pktOffset + 4) = newAfLen.toByte
-      Arrays.fill(arr, oldPayloadOffset, keepFromOffset, 0xFF.toByte)
+      if (oldAfLen == 0) {
+        arr(pktOffset + 5) = 0x00.toByte
+        if (keepFromOffset > pktOffset + 6) {
+          Arrays.fill(arr, pktOffset + 6, keepFromOffset, 0xFF.toByte)
+        }
+      } else {
+        Arrays.fill(arr, oldPayloadOffset, keepFromOffset, 0xFF.toByte)
+      }
       true
     }
   }

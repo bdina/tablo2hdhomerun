@@ -199,6 +199,26 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = extractedHdr shouldBe seqHeader
       maxRow shouldBe 68
     }
+
+    "detect out-of-bounds MPEG-2 slice start codes with hasOutOfBoundsMpeg2Slice" in {
+      val inBoundsPayload = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x01.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x44.toByte
+      )
+      val _ = FreezeFramePacer.hasOutOfBoundsMpeg2Slice(inBoundsPayload, 0, inBoundsPayload.length, 68) shouldBe false
+
+      val outOfBoundsPayload = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x01.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x45.toByte
+      )
+      val _ = FreezeFramePacer.hasOutOfBoundsMpeg2Slice(outOfBoundsPayload, 0, outOfBoundsPayload.length, 68) shouldBe true
+
+      val nonSliceCodesPayload = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x00.toByte
+      )
+      FreezeFramePacer.hasOutOfBoundsMpeg2Slice(nonSliceCodesPayload, 0, nonSliceCodesPayload.length, 68) shouldBe false
+    }
   }
 
   "FreezeFramePacer slice offset & packet prefix stuffing" should {
@@ -249,6 +269,20 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = adjusted shouldBe true
       val _ = (pkt(4) & 0xFF) shouldBe 15
       pkt.slice(12, 20).forall(_ == 0xFF.toByte) shouldBe true
+    }
+
+    "expand existing adaptation field with oldAfLen = 0 without corrupting flags" in {
+      val pkt = Array.fill[Byte](188)(0xAA.toByte)
+      pkt(0) = 0x47.toByte
+      pkt(1) = 0x00.toByte
+      pkt(2) = 0x20.toByte
+      pkt(3) = 0x30.toByte
+      pkt(4) = 0.toByte
+      val adjusted = FreezeFramePacer.stuffPacketPrefix(pkt, 0, 10)
+      val _ = adjusted shouldBe true
+      val _ = (pkt(4) & 0xFF) shouldBe 5
+      val _ = pkt(5) shouldBe 0x00.toByte
+      pkt.slice(6, 10).forall(_ == 0xFF.toByte) shouldBe true
     }
   }
 
