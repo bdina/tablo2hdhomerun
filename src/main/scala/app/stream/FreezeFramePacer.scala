@@ -238,7 +238,7 @@ object FreezeFramePacer {
                 k += 1
               }
               if (differs) {
-                locked.copyToArray(arr, i)
+                val _ = locked.copyToArray(arr, i)
               }
             }
           }

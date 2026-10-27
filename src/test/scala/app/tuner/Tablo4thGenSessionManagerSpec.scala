@@ -338,7 +338,7 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val probeB = testKit.createTestProbe[Response.Acquire]()
 
       val drainedCounter = new AtomicInteger(0)
-      val hub = Source.repeat(ByteString(0x47, 0x1F, 0xFF, 0x10))
+      val hub = Source.repeat(ByteString(1, 2, 3, 4))
         .map { bs =>
           val _ = drainedCounter.incrementAndGet()
           bs

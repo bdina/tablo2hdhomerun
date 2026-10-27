@@ -1009,7 +1009,7 @@ object MpegTsSync {
               }
             }
 
-            if (!isAligned && pos == 0 && len >= PacketSize && findNextSync(arr, 0, len) < 0) {
+            if (!isAligned && len >= PacketSize && findNextSync(arr, 0, len) < 0) {
               isAligned = true
               alignedAudioPids = knownAudioPids
               outputBuilder ++= combined

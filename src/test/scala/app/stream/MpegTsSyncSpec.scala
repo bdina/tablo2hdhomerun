@@ -1657,12 +1657,12 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
 
       // Feed 1 sparse keyframe every 60ms (< 90ms freezeThreshold so wall-clock silence never trips),
       // advancing PTS by only 3,003 ticks (33.3ms) per 60ms of wall clock so media-clock deficit exceeds 90ms (8,100 ticks).
-      (1 to 4).foreach { i =>
+      (1 to 5).foreach { i =>
         Thread.sleep(60L)
         val sparsePts = 90000L + (i * 3003L)
         val _ = queue.offer(buildVideoPesPacket(videoPid, pts = sparsePts, cc = 1 + i, isKeyframe = true))
       }
-      Thread.sleep(40L)
+      Thread.sleep(150L)
 
       queue.complete()
 
@@ -1678,8 +1678,8 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         }
         i += 1
       }
-      // 5 live single-packet video frames were offered; deficit catch-up must have synthesized additional video packets
-      videoPacketCount should be > 5
+      // 6 live single-packet video frames were offered; deficit catch-up must have synthesized additional video packets
+      videoPacketCount should be > 6
     }
   }
 }

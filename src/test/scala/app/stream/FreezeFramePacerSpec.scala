@@ -259,9 +259,9 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       pkt(5) = 0x00.toByte
       pkt(6) = 0x01.toByte
       pkt(7) = 0xBD.toByte
-      pkt(12) = 0x80.toByte
-      pkt(13) = 0x80.toByte
-      pkt(14) = 5.toByte
+      pkt(10) = 0x80.toByte
+      pkt(11) = 0x80.toByte
+      pkt(12) = 5.toByte
       pkt(18) = 0x0B.toByte
       pkt(19) = 0x77.toByte
       pkt(22) = 0x04.toByte
@@ -278,9 +278,9 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       pkt(5) = 0x00.toByte
       pkt(6) = 0x01.toByte
       pkt(7) = 0xC0.toByte
-      pkt(12) = 0x80.toByte
-      pkt(13) = 0x80.toByte
-      pkt(14) = 5.toByte
+      pkt(10) = 0x80.toByte
+      pkt(11) = 0x80.toByte
+      pkt(12) = 5.toByte
       pkt(18) = 0xFF.toByte
       pkt(19) = 0xF1.toByte
       pkt(20) = 0x50.toByte
@@ -342,7 +342,10 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = pesOffset should be >= 0
       val _ = FreezeFramePacer.readPtsDts(arr, pesOffset, 188) shouldBe Some((180000L, None))
       val es = pesOffset + 9 + 5
-      val frameBytes = arr.slice(es, es + 224)
+      val p1Payload = arr.slice(es, 188)
+      val p2AfLen = if ((arr(188 + 3) & 0x20) != 0) (arr(188 + 4) & 0xFF) + 1 else 0
+      val p2Payload = arr.slice(188 + 4 + p2AfLen, 188 + 4 + p2AfLen + (224 - p1Payload.length))
+      val frameBytes = p1Payload ++ p2Payload
       val _ = FreezeFramePacer.ac3Crc16(frameBytes, 2, 138) shouldBe 0
       FreezeFramePacer.ac3Crc16(frameBytes, 2, 222) shouldBe 0
     }
