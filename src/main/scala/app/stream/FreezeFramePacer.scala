@@ -172,6 +172,45 @@ object FreezeFramePacer {
     result
   }
 
+  def hasMpeg2SequenceHeader(arr: Array[Byte], offset: Int, len: Int): Boolean = {
+    if (offset < 0 || len < 4 || offset + len > arr.length) {
+      false
+    } else {
+      val end = offset + len - 4
+      var i = offset
+      var found = false
+      while (i <= end && !found) {
+        if (arr(i) == 0x00.toByte &&
+            arr(i + 1) == 0x00.toByte &&
+            arr(i + 2) == 0x01.toByte &&
+            (arr(i + 3) & 0xFF) == 0xB3) {
+          found = true
+        } else {
+          i += 1
+        }
+      }
+      found
+    }
+  }
+
+  def synthesizeSequenceHeaderPacket(videoPid: Int, seqHeader: ByteString, cc: Int = 0): ByteString = {
+    val seqBytes = if (seqHeader.length >= 12) seqHeader.take(12).toArray else seqHeader.toArray
+    val pesHdr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte, 0x00.toByte, 0x80.toByte, 0x00.toByte, 0x00.toByte)
+    val totalPayload = pesHdr.length + seqBytes.length
+    val pkt = Array.fill[Byte](PacketSize)(0xFF.toByte)
+    pkt(0) = 0x47.toByte
+    pkt(1) = (0x40 | ((videoPid >> 8) & 0x1F)).toByte
+    pkt(2) = (videoPid & 0xFF).toByte
+    pkt(3) = (0x30 | (cc & 0x0F)).toByte
+    val stuffBytes = PacketSize - 4 - totalPayload
+    val afLen = stuffBytes - 1
+    pkt(4) = afLen.toByte
+    pkt(5) = 0x00.toByte
+    System.arraycopy(pesHdr, 0, pkt, 4 + stuffBytes, pesHdr.length)
+    System.arraycopy(seqBytes, 0, pkt, 4 + stuffBytes + pesHdr.length, seqBytes.length)
+    ByteString.fromArray(pkt)
+  }
+
   def sanitizeMpeg2Payload(
       arr: Array[Byte],
       payloadOffset: Int,

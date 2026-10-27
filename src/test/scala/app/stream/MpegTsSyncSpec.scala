@@ -1484,5 +1484,202 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       }
       syntheticVideoFound shouldBe true
     }
+
+    "alignToIFrame should align and emit PUSI=1 audio packets immediately while waiting for video keyframe (Failure Mode G fix)" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+
+      val midGopVideo1 = buildMediaPacket(videoPid, cc = 1)
+      val midPesAudio = buildMediaPacket(audioPid, cc = 1)
+      val pusiAudio1 = buildAudioPesPacket(audioPid, pts = 90000L, cc = 2, withValidSyncword = true)
+      val contAudio1 = buildMediaPacket(audioPid, cc = 3)
+      val midGopVideo2 = buildMediaPacket(videoPid, cc = 2)
+      val videoKeyframe = buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+
+      val emitted = Source(List(midGopVideo1, midPesAudio, pusiAudio1, contAudio1, midGopVideo2, videoKeyframe))
+        .via(
+          MpegTsSync.alignToIFrame(
+            videoPid = Some(videoPid)
+          , videoStreamType = Some(0x02)
+          , audioPids = Seq(audioPid)
+          , audioStreamTypes = Map(audioPid -> 0x81)
+          )
+        )
+        .runWith(Sink.seq)
+        .futureValue
+
+      emitted shouldBe Seq(pusiAudio1, contAudio1, videoKeyframe)
+    }
+
+    "alignToIFrame should not count null packets or audio packets toward maxDroppedPackets" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+
+      val nullPackets = List.fill(5)(MpegTsSync.MPEGTS_NULL_PACKET)
+      val audioPackets = (1 to 3).map(c => buildMediaPacket(audioPid, cc = c)).toList
+      val nonKeyVideo1 = buildMediaPacket(videoPid, cc = 1)
+      val nonKeyVideo2 = buildMediaPacket(videoPid, cc = 2)
+      val videoKeyframe = buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+
+      val emitted = Source(nullPackets ++ audioPackets ++ List(nonKeyVideo1, nonKeyVideo2, videoKeyframe))
+        .via(
+          MpegTsSync.alignToIFrame(
+            videoPid = Some(videoPid)
+          , maxDroppedPackets = 2
+          , videoStreamType = Some(0x02)
+          , audioPids = Seq(audioPid)
+          , audioStreamTypes = Map(audioPid -> 0x81)
+          )
+        )
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = emitted.contains(nonKeyVideo1) shouldBe false
+      val _ = emitted.contains(nonKeyVideo2) shouldBe false
+      emitted shouldBe Seq(videoKeyframe)
+    }
+
+    "alignToIFrame should prepend synthesized Sequence Header packet when aligning on GOP header or forced alignment without 0xB3" in {
+      val videoPid = 0x0101
+      val seqHeader = ByteString(0x00, 0x00, 0x01, 0xB3.toByte, 0x78, 0x04, 0x38, 0x12, 0x34, 0x56, 0x78, 0x9A.toByte)
+
+      // Case A: GOP header (0xB8) without 0xB3 sequence header
+      val midGopA = buildMediaPacket(videoPid, cc = 1)
+      val gopKey = withCc(buildKeyframePacket(videoPid, isH264 = false, isGop = true), cc = 5)
+
+      val resA = Source(List(midGopA, gopKey))
+        .via(
+          MpegTsSync.alignToIFrame(
+            videoPid = Some(videoPid)
+          , videoStreamType = Some(0x02)
+          , lockedSeqHeader = Some(seqHeader)
+          )
+        )
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = resA.length shouldBe (188 * 2)
+      val firstPktA = resA.take(188)
+      val _ = (((firstPktA(1) & 0x1F) << 8) | (firstPktA(2) & 0xFF)) shouldBe videoPid
+      val _ = (firstPktA(3) & 0x0F) shouldBe 4 // (5 - 1) & 0x0F
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(firstPktA.toArray, 0, 188) shouldBe true
+      val secondPktA = resA.drop(188)
+      val _ = secondPktA shouldBe gopKey
+
+      // Case B: Forced alignment on maxDroppedPackets = 1 without 0xB3
+      val midGopB1 = buildMediaPacket(videoPid, cc = 1)
+      val midGopB2 = buildMediaPacket(videoPid, cc = 2)
+
+      val resB = Source(List(midGopB1, midGopB2))
+        .via(
+          MpegTsSync.alignToIFrame(
+            videoPid = Some(videoPid)
+          , maxDroppedPackets = 1
+          , videoStreamType = Some(0x02)
+          , lockedSeqHeader = Some(seqHeader)
+          )
+        )
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      val _ = resB.length shouldBe (188 * 2)
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(resB.take(188).toArray, 0, 188) shouldBe true
+      resB.drop(188) shouldBe midGopB2
+    }
+
+    "cacheFlow should not suppress FreezeFramePacer when only non-video or discarded non-keyframe packets arrive during a stall" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64, OverflowStrategy.backpressure)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 80.millis
+          , freezeTickInterval = 30.millis
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      val initialKeyframe = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+      val initialAudio = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1, withValidSyncword = true)
+      val _ = queue.offer(pat ++ pmt ++ initialKeyframe ++ initialAudio)
+
+      (1 to 3).foreach { i =>
+        Thread.sleep(60L)
+        val pts = 90000L + (i * 2880L)
+        val _ = queue.offer(pat ++ pmt ++ buildAudioPesPacket(audioPid, pts = pts, cc = 1 + i, withValidSyncword = true))
+      }
+
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val packetCount = emitted.length / 188
+      var videoPacketCount = 0
+      var i = 0
+      while (i < packetCount) {
+        val pkt = emitted.slice(i * 188, (i + 1) * 188)
+        val pid = (((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF))
+        if (pid == videoPid) {
+          videoPacketCount += 1
+        }
+        i += 1
+      }
+      val _ = videoPacketCount should be > 3
+      val cached = cachedHeadersRef.get()
+      cached.lockedSeqHeader.isDefined shouldBe true
+    }
+
+    "cacheFlow should synthesize catch-up freeze frames on media-clock PTS deficit during sparse video trickle" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64, OverflowStrategy.backpressure)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 90.millis
+          , freezeTickInterval = 25.millis
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      val initialKeyframe = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+      val _ = queue.offer(pat ++ pmt ++ initialKeyframe)
+
+      // Feed 1 sparse keyframe every 60ms (< 90ms freezeThreshold so wall-clock silence never trips),
+      // advancing PTS by only 3,003 ticks (33.3ms) per 60ms of wall clock so media-clock deficit exceeds 90ms (8,100 ticks).
+      (1 to 4).foreach { i =>
+        Thread.sleep(60L)
+        val sparsePts = 90000L + (i * 3003L)
+        val _ = queue.offer(buildVideoPesPacket(videoPid, pts = sparsePts, cc = 1 + i, isKeyframe = true))
+      }
+      Thread.sleep(40L)
+
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val packetCount = emitted.length / 188
+      var videoPacketCount = 0
+      var i = 0
+      while (i < packetCount) {
+        val pkt = emitted.slice(i * 188, (i + 1) * 188)
+        val pid = (((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF))
+        if (pid == videoPid) {
+          videoPacketCount += 1
+        }
+        i += 1
+      }
+      // 5 live single-packet video frames were offered; deficit catch-up must have synthesized additional video packets
+      videoPacketCount should be > 5
+    }
   }
 }

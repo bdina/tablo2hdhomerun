@@ -51,6 +51,8 @@ object ResilientHlsSource {
   , videoPidSupplier: () => Option[Int] = () => None
   , videoStreamTypeSupplier: () => Option[Int] = () => None
   , audioPidsSupplier: () => Seq[Int] = () => Seq.empty
+  , audioStreamTypesSupplier: () => Map[Int, Int] = () => Map.empty
+  , lockedSeqHeaderSupplier: () => Option[ByteString] = () => None
   , keyframeTimeout: FiniteDuration = Duration.Zero
   ): Source[ByteString, ?] = {
     val effectiveMax = if (maxRetryDelay < retryDelay) retryDelay else maxRetryDelay
@@ -79,6 +81,8 @@ object ResilientHlsSource {
             videoPid = videoPidSupplier()
           , videoStreamType = videoStreamTypeSupplier()
           , audioPids = audioPidsSupplier()
+          , audioStreamTypes = audioStreamTypesSupplier()
+          , lockedSeqHeader = lockedSeqHeaderSupplier()
           )
         )
         val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)

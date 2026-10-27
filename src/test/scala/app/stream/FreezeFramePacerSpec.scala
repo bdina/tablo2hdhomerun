@@ -156,6 +156,49 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = clamped shouldBe 0
       ByteString.fromArray(payload, 0, 12) shouldBe lockedHdr
     }
+
+    "detect sequence header with hasMpeg2SequenceHeader within bounds" in {
+      val arr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte, 0x78.toByte, 0x04.toByte)
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(arr, 0, arr.length) shouldBe true
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(arr, 1, arr.length - 1) shouldBe false
+      FreezeFramePacer.hasMpeg2SequenceHeader(arr, 0, 3) shouldBe false
+    }
+
+    "return false for hasMpeg2SequenceHeader when sequence header is absent or out of bounds" in {
+      val gopArr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB8.toByte, 0x00.toByte, 0x00.toByte)
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(gopArr, 0, gopArr.length) shouldBe false
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(gopArr, -1, gopArr.length) shouldBe false
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(gopArr, 0, 10) shouldBe false
+      FreezeFramePacer.hasMpeg2SequenceHeader(gopArr, 0, 0) shouldBe false
+    }
+
+    "synthesize a valid sequence header packet" in {
+      val lockedArr = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+        0x78.toByte, 0x04.toByte, 0x38.toByte, 0x12.toByte,
+        0x34.toByte, 0x56.toByte, 0x78.toByte, 0x9A.toByte
+      )
+      val seqHeader = ByteString.fromArray(lockedArr)
+      val videoPid = 0x0100
+      val cc = 7
+      val bs = FreezeFramePacer.synthesizeSequenceHeaderPacket(videoPid, seqHeader, cc)
+      val _ = bs.length shouldBe 188
+      val arr = bs.toArray
+      val _ = arr(0) shouldBe 0x47.toByte
+      val _ = (arr(1) & 0x40) should not be 0
+      val _ = (((arr(1) & 0x1F) << 8) | (arr(2) & 0xFF)) shouldBe videoPid
+      val _ = ((arr(3) & 0x30) >> 4) shouldBe 3
+      val _ = (arr(3) & 0x0F) shouldBe cc
+      val pesOffset = FreezeFramePacer.findPesHeaderOffset(arr, 0)
+      val _ = pesOffset shouldBe 167
+      val payloadLen = 188 - pesOffset
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(arr, pesOffset, payloadLen) shouldBe true
+      val parsed = FreezeFramePacer.parseMpeg2SequenceHeader(arr, pesOffset, payloadLen)
+      val _ = parsed.isDefined shouldBe true
+      val (extractedHdr, maxRow) = parsed.get
+      val _ = extractedHdr shouldBe seqHeader
+      maxRow shouldBe 68
+    }
   }
 
   "FreezeFramePacer slice offset & packet prefix stuffing" should {

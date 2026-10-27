@@ -119,4 +119,47 @@ object HlsSegmentFetch {
         validateRangedResponse(status, headers, RangeRequest(offset, length), retriesLeft)
       case None => classifyStatus(status, retriesLeft)
     }
+
+  val DefaultTrickleRatioThreshold: Double = 0.15
+  val DefaultMinBaselineBytesPerSec: Double = 200000.0
+  val DefaultMaxConsecutiveTrickleSegments: Int = 5
+  val DefaultBaselineEmaAlpha: Double = 0.30
+
+  sealed trait TrickleDecision {
+    def state: TrickleState
+  }
+  final case class HealthySegment(state: TrickleState, rateBytesPerSec: Double) extends TrickleDecision
+  final case class TrickleSegment(state: TrickleState, rateBytesPerSec: Double, baselineBytesPerSec: Double) extends TrickleDecision
+  final case class TrickleCollapsed(state: TrickleState, rateBytesPerSec: Double, baselineBytesPerSec: Double) extends TrickleDecision
+
+  final case class TrickleState(
+    baselineBytesPerSec: Double = 0.0
+  , consecutiveTrickleCount: Int = 0
+  , trickleRatioThreshold: Double = DefaultTrickleRatioThreshold
+  , minBaselineBytesPerSec: Double = DefaultMinBaselineBytesPerSec
+  , maxConsecutiveTrickleSegments: Int = DefaultMaxConsecutiveTrickleSegments
+  ) {
+    def recordSegment(bytes: Long, durationSec: Double): TrickleDecision = {
+      val effectiveDuration = if (durationSec > 0.1) durationSec else 2.0
+      val rate = math.max(0.0, bytes.toDouble) / effectiveDuration
+      if (baselineBytesPerSec < minBaselineBytesPerSec) {
+        if (rate >= minBaselineBytesPerSec) {
+          HealthySegment(copy(baselineBytesPerSec = rate, consecutiveTrickleCount = 0), rate)
+        } else {
+          HealthySegment(this, rate)
+        }
+      } else if (rate < baselineBytesPerSec * trickleRatioThreshold) {
+        val nextCount = consecutiveTrickleCount + 1
+        val nextState = copy(consecutiveTrickleCount = nextCount)
+        if (nextCount >= maxConsecutiveTrickleSegments) {
+          TrickleCollapsed(nextState, rate, baselineBytesPerSec)
+        } else {
+          TrickleSegment(nextState, rate, baselineBytesPerSec)
+        }
+      } else {
+        val nextBaseline = ((1.0 - DefaultBaselineEmaAlpha) * baselineBytesPerSec) + (DefaultBaselineEmaAlpha * rate)
+        HealthySegment(copy(baselineBytesPerSec = nextBaseline, consecutiveTrickleCount = 0), rate)
+      }
+    }
+  }
 }

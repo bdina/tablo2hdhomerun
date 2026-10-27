@@ -40,6 +40,9 @@ object HlsBackend extends StreamBackend {
     case object SessionEnded extends RuntimeException("playlist ended (EXT-X-ENDLIST)") with HlsError
     case object PollExhausted extends RuntimeException("playlist poll failures exhausted") with HlsError
     case object PlaylistStalled extends RuntimeException("playlist stalled on soft recovery") with HlsError
+    case class SegmentTrickleCollapse(consecutiveSegments: Int, rateBps: Long, baselineBps: Long)
+      extends RuntimeException(s"segment trickle collapse after $consecutiveSegments segments (${rateBps} B/s vs baseline ${baselineBps} B/s)")
+      with HlsError
   }
 
   private[stream] def pollOutcomeToFuture(
@@ -68,6 +71,8 @@ object HlsBackend extends StreamBackend {
     val bytesOut = new java.util.concurrent.atomic.AtomicLong(0L)
     val lastSeqOut = new java.util.concurrent.atomic.AtomicInteger(initialSeq)
     val needsRealign = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val trickleState = new java.util.concurrent.atomic.AtomicReference[HlsSegmentFetch.TrickleState](HlsSegmentFetch.TrickleState())
+    val trickleCollapsedError = new java.util.concurrent.atomic.AtomicReference[Option[HlsError.SegmentTrickleCollapse]](None)
     val hlsConfig = AppContext.config.stream.hls
     val heartbeatSec = hlsConfig.heartbeatSec
     var heartbeatTask: Option[org.apache.pekko.actor.Cancellable] = None
@@ -213,9 +218,14 @@ object HlsBackend extends StreamBackend {
       , state.lastTargetDuration
       , defaultPollSec
       )
-    def step(state: PollState)(implicit mat: pekko.stream.Materializer): Future[Option[(PollState, Seq[SegmentInfo])]] = {
-      val doFetch: () => Future[Option[(PollState, Seq[SegmentInfo])]] = () => {
-        fetchPlaylistWithState(state)(mat)
+    def step(state: PollState)(implicit mat: pekko.stream.Materializer): Future[Option[(PollState, Seq[SegmentInfo])]] =
+      trickleCollapsedError.get() match {
+        case Some(err) =>
+          log.warn("[stream:hls] retune reason={}", err.getMessage)
+          Future.failed(err)
+        case None =>
+          val doFetch: () => Future[Option[(PollState, Seq[SegmentInfo])]] = () => {
+            fetchPlaylistWithState(state)(mat)
           .map { case (fetchedState, bodyOpt) =>
             bodyOpt match {
               case None =>
@@ -306,53 +316,91 @@ object HlsBackend extends StreamBackend {
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
-              val segStartNanos = System.nanoTime()
-              val gapMs = (segStartNanos - lastArrivalNanos.getAndSet(segStartNanos)) / 1000000L
-              val segBytes = new java.util.concurrent.atomic.AtomicLong(0L)
-              val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
-              val _ = needsRealign.compareAndSet(true, false)
+              trickleCollapsedError.get() match {
+                case Some(err) => Source.failed(err)
+                case None =>
+                  val segStartNanos = System.nanoTime()
+                  val gapMs = (segStartNanos - lastArrivalNanos.getAndSet(segStartNanos)) / 1000000L
+                  val segBytes = new java.util.concurrent.atomic.AtomicLong(0L)
+                  val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
+                  val _ = needsRealign.compareAndSet(true, false)
 
-              val countedSource = fetchSegmentSource(seg.url, seg.byteRange)
-                .via(MpegTsSync.alignPackets)
-                .map { chunk =>
-                  val _ = segBytes.addAndGet(chunk.size)
-                  val _ = bytesOut.addAndGet(chunk.size)
-                  chunk
-                }
-                .watchTermination() { (_, done) =>
-                  done.onComplete {
-                    case Success(_) =>
-                      val totalSegBytes = segBytes.get()
-                      lastSeqOut.set(seg.sequence + 1)
-                      onSeqAdvanced(seg.sequence + 1)
-                      log.info(
-                        "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
-                      , label
-                      , seg.sequence
-                      , seg.duration
-                      , totalSegBytes
-                      , gapMs
-                      )
-                      expectedLengthOpt.foreach { expected =>
-                        if (totalSegBytes < expected) {
+                  val countedSource = fetchSegmentSource(seg.url, seg.byteRange)
+                    .via(MpegTsSync.alignPackets)
+                    .map { chunk =>
+                      val _ = segBytes.addAndGet(chunk.size)
+                      val _ = bytesOut.addAndGet(chunk.size)
+                      chunk
+                    }
+                    .watchTermination() { (_, done) =>
+                      done.onComplete {
+                        case Success(_) => ()
+                        case Failure(ex) =>
                           needsRealign.set(true)
-                          log.warn(
-                            "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
-                          , label
-                          , seg.sequence
-                          , expected
-                          , totalSegBytes
-                          , LogConfig.truncate(seg.url)
-                          )
+                          log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)
+                      }(ec)
+                    }
+                    .concat(
+                      Source.lazySource { () =>
+                        val totalSegBytes = segBytes.get()
+                        lastSeqOut.set(seg.sequence + 1)
+                        val decision = trickleState.get().recordSegment(totalSegBytes, seg.duration)
+                        trickleState.set(decision.state)
+                        log.info(
+                          "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
+                        , label
+                        , seg.sequence
+                        , seg.duration
+                        , totalSegBytes
+                        , gapMs
+                        )
+                        expectedLengthOpt.foreach { expected =>
+                          if (totalSegBytes < expected) {
+                            needsRealign.set(true)
+                            log.warn(
+                              "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
+                            , label
+                            , seg.sequence
+                            , expected
+                            , totalSegBytes
+                            , LogConfig.truncate(seg.url)
+                            )
+                          }
                         }
-                      }
-                    case Failure(ex) =>
-                      needsRealign.set(true)
-                      log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)
-                  }(ec)
-                }
+                        decision match {
+                          case _: HlsSegmentFetch.HealthySegment =>
+                            onSeqAdvanced(seg.sequence + 1)
+                            Source.empty[ByteString]
+                          case HlsSegmentFetch.TrickleSegment(nextState, rate, baseline) =>
+                            log.warn(
+                              "[stream:hls] trickle segment detected label={} seq={} bytes={} rateBps={} baselineBps={} consecutive={}"
+                            , label
+                            , seg.sequence
+                            , totalSegBytes
+                            , rate.toLong
+                            , baseline.toLong
+                            , nextState.consecutiveTrickleCount
+                            )
+                            Source.empty[ByteString]
+                          case HlsSegmentFetch.TrickleCollapsed(nextState, rate, baseline) =>
+                            val collapseErr = HlsError.SegmentTrickleCollapse(nextState.consecutiveTrickleCount, rate.toLong, baseline.toLong)
+                            trickleCollapsedError.set(Some(collapseErr))
+                            log.warn(
+                              "[stream:hls] trickle collapse threshold reached label={} seq={} bytes={} rateBps={} baselineBps={} consecutive={}"
+                            , label
+                            , seg.sequence
+                            , totalSegBytes
+                            , rate.toLong
+                            , baseline.toLong
+                            , nextState.consecutiveTrickleCount
+                            )
+                            Source.failed[ByteString](collapseErr)
+                        }
+                      }.mapMaterializedValue(_ => pekko.NotUsed)
+                    )
 
-              countedSource
+                  countedSource
+              }
             }
         }
       ).watchTermination() { (_, done) =>

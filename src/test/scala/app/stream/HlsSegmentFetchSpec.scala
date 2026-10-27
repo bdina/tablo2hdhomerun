@@ -129,4 +129,91 @@ class HlsSegmentFetchSpec extends AnyFlatSpec with Matchers {
     val _ = an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(0L, 0L)
     an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(100L, -10L)
   }
+
+  "HlsSegmentFetch.TrickleState" should "not arm trickle detection when baseline has not been established" in {
+    val initial = HlsSegmentFetch.TrickleState()
+    val _ = initial.baselineBytesPerSec shouldBe 0.0
+    val _ = initial.consecutiveTrickleCount shouldBe 0
+
+    val decision = initial.recordSegment(bytes = 100000L, durationSec = 2.0)
+    decision match {
+      case HlsSegmentFetch.HealthySegment(nextState, rate) =>
+        val _ = rate shouldBe 50000.0
+        val _ = nextState.baselineBytesPerSec shouldBe 0.0
+        nextState.consecutiveTrickleCount shouldBe 0
+      case other => fail(s"expected HealthySegment, got $other")
+    }
+  }
+
+  it should "establish baseline on first healthy segment and update baseline via EMA on subsequent healthy segments" in {
+    val initial = HlsSegmentFetch.TrickleState()
+    val firstDecision = initial.recordSegment(bytes = 5000000L, durationSec = 2.0)
+    val state1 = firstDecision match {
+      case HlsSegmentFetch.HealthySegment(nextState, rate) =>
+        val _ = rate shouldBe 2500000.0
+        val _ = nextState.baselineBytesPerSec shouldBe 2500000.0
+        val _ = nextState.consecutiveTrickleCount shouldBe 0
+        nextState
+      case other => fail(s"expected HealthySegment on initial healthy segment, got $other")
+    }
+
+    val secondDecision = state1.recordSegment(bytes = 4000000L, durationSec = 2.0)
+    secondDecision match {
+      case HlsSegmentFetch.HealthySegment(nextState, rate) =>
+        val _ = rate shouldBe 2000000.0
+        val _ = nextState.baselineBytesPerSec shouldBe 2350000.0
+        nextState.consecutiveTrickleCount shouldBe 0
+      case other => fail(s"expected HealthySegment on subsequent healthy segment, got $other")
+    }
+  }
+
+  it should "detect TrickleSegment when segment rate drops below 15% of baseline without reducing baseline" in {
+    val state = HlsSegmentFetch.TrickleState(baselineBytesPerSec = 2500000.0)
+    val decision = state.recordSegment(bytes = 150000L, durationSec = 2.0)
+    decision match {
+      case HlsSegmentFetch.TrickleSegment(nextState, rate, baseline) =>
+        val _ = rate shouldBe 75000.0
+        val _ = baseline shouldBe 2500000.0
+        val _ = nextState.consecutiveTrickleCount shouldBe 1
+        nextState.baselineBytesPerSec shouldBe 2500000.0
+      case other => fail(s"expected TrickleSegment, got $other")
+    }
+  }
+
+  it should "reset consecutiveTrickleCount to 0 when a healthy segment arrives before maxConsecutiveTrickleSegments" in {
+    val stateWithTrickles = HlsSegmentFetch.TrickleState(
+      baselineBytesPerSec = 2500000.0
+    , consecutiveTrickleCount = 3
+    )
+    val decision = stateWithTrickles.recordSegment(bytes = 5000000L, durationSec = 2.0)
+    decision match {
+      case HlsSegmentFetch.HealthySegment(nextState, rate) =>
+        val _ = rate shouldBe 2500000.0
+        nextState.consecutiveTrickleCount shouldBe 0
+      case other => fail(s"expected HealthySegment, got $other")
+    }
+  }
+
+  it should "transition to TrickleCollapsed on the 5th consecutive trickle segment" in {
+    var state = HlsSegmentFetch.TrickleState(baselineBytesPerSec = 2500000.0)
+    (1 to 4).foreach { count =>
+      state.recordSegment(bytes = 150000L, durationSec = 2.0) match {
+        case HlsSegmentFetch.TrickleSegment(nextState, rate, baseline) =>
+          val _ = rate shouldBe 75000.0
+          val _ = baseline shouldBe 2500000.0
+          val _ = nextState.consecutiveTrickleCount shouldBe count
+          state = nextState
+        case other => fail(s"expected TrickleSegment at count=$count, got $other")
+      }
+    }
+    val _ = state.consecutiveTrickleCount shouldBe 4
+
+    state.recordSegment(bytes = 150000L, durationSec = 2.0) match {
+      case HlsSegmentFetch.TrickleCollapsed(finalState, rate, baseline) =>
+        val _ = rate shouldBe 75000.0
+        val _ = baseline shouldBe 2500000.0
+        finalState.consecutiveTrickleCount shouldBe 5
+      case other => fail(s"expected TrickleCollapsed on 5th trickle segment, got $other")
+    }
+  }
 }
