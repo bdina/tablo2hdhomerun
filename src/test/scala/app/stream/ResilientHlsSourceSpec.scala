@@ -536,5 +536,52 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = probe.cancel()
       attempts.get() shouldBe 1
     }
+
+    "stay on the same inner stream during a stall when stallTimeout is zero, and cold-retune when inner stream fails with SessionEnded" in {
+      val attempts = new AtomicInteger(0)
+      val data1 = ByteString("chunk-1")
+      val data2 = ByteString("chunk-2")
+      val customPrefix = ByteString("retune-")
+      val sessionEndedPromise = scala.concurrent.Promise[ByteString]()
+
+      val factory = () => {
+        val a = attempts.incrementAndGet()
+        if (a == 1) {
+          Source.single(data1).concat(Source.future(sessionEndedPromise.future))
+        } else {
+          Source.single(data2)
+        }
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-session-probe-lifecycle"
+      , tuneTimeout = 500.millis
+      , retryDelay = 50.millis
+      , recoveryTimeout = 0.seconds
+      , resumePrefixSupplier = () => Some(customPrefix)
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+      val _ = probe.requestNext(2.seconds) shouldBe data1
+
+      // While waiting for next chunks, null keepalive packets flow without triggering a retune
+      for (_ <- 1 to 8) {
+        val _ = probe.requestNext(2.seconds) shouldBe ResilientHlsSource.MPEGTS_NULL_PACKET
+      }
+      val _ = attempts.get() shouldBe 1
+
+      // When control-plane probe detects the session closed, inner stream fails with SessionEnded
+      sessionEndedPromise.failure(HlsBackend.HlsError.SessionEnded)
+
+      var next = probe.requestNext(2.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(2.seconds)
+      }
+      val _ = next shouldBe (customPrefix ++ data2)
+      val _ = attempts.get() shouldBe 2
+      probe.cancel()
+    }
   }
 }

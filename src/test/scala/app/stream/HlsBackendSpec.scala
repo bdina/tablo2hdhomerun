@@ -59,4 +59,17 @@ class HlsBackendSpec extends AnyFlatSpec with Matchers with ScalaFutures {
     val failed = HlsBackend.pollOutcomeToFuture(outcome).failed.futureValue
     failed shouldBe HlsBackend.HlsError.PollExhausted
   }
+
+  it should "propagate SessionEnded when stall probe reports session closed" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.Future
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 10).copy(stallPolls = 3)
+    val rawOutcome = HlsPlaylistPoller.onPlaylistNotModified(state)
+    val failed = HlsPlaylistPoller
+      .resolveStallOutcome(rawOutcome, () => Future.successful(false))
+      .flatMap(HlsBackend.pollOutcomeToFuture)
+      .failed
+      .futureValue
+    failed shouldBe HlsBackend.HlsError.SessionEnded
+  }
 }

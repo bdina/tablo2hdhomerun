@@ -384,24 +384,56 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     }
   }
 
-  it should "fail immediately with PlaylistStalled when failOnStall is true and playlist has not advanced" in {
-    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105, liveEdgeCount = 3, failOnStall = true)
-    val _ = HlsPlaylistPoller.pollDelayMs(state, playlistAdvanced = false, targetDurationSec = 4, defaultPollSec = 2) shouldBe 0L
+  "HlsPlaylistPoller.shouldProbeSession" should "trigger every 4th consecutive stall poll" in {
+    val base = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 10)
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 0)) shouldBe false
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 1)) shouldBe false
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 2)) shouldBe false
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 3)) shouldBe false
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 4)) shouldBe true
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 5)) shouldBe false
+    HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 8)) shouldBe true
+  }
 
+  "HlsPlaylistPoller.resolveStallOutcome" should "probe session on 4th stall poll and continue emitting when session is alive" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.duration._
+
+    var probeCalls = 0
     val pStalled = playlist(102, Seq("seg102.ts", "seg103.ts", "seg104.ts"))
-    val _ = HlsPlaylistPoller.onPlaylist(state, pStalled, defaultPollSec = 2) shouldBe
-      HlsPlaylistPoller.Fail(HlsBackend.HlsError.PlaylistStalled)
+    var state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105)
 
-    val _ = HlsPlaylistPoller.onPlaylistNotModified(state) shouldBe
-      HlsPlaylistPoller.Fail(HlsBackend.HlsError.PlaylistStalled)
-
-    val pAdvanced = playlist(103, Seq("seg103.ts", "seg104.ts", "seg105.ts"))
-    HlsPlaylistPoller.onPlaylist(state, pAdvanced, defaultPollSec = 2) match {
-      case HlsPlaylistPoller.Emit(next, segments) =>
-        val _ = segments.map(_.sequence) shouldBe Seq(105)
-        next.failOnStall shouldBe false
-      case HlsPlaylistPoller.Fail(_) => fail("expected emit when playlist advanced")
+    (1 to 4).foreach { i =>
+      val raw = HlsPlaylistPoller.onPlaylist(state, pStalled, defaultPollSec = 2)
+      val resolved = Await.result(
+        HlsPlaylistPoller.resolveStallOutcome(raw, () => { probeCalls += 1; Future.successful(true) })
+      , 2.seconds
+      )
+      resolved match {
+        case HlsPlaylistPoller.Emit(next, segments) =>
+          val _ = segments shouldBe empty
+          val _ = next.stallPolls shouldBe i
+          state = next
+        case HlsPlaylistPoller.Fail(err) =>
+          fail(s"unexpected failure on poll $i: $err")
+      }
     }
+    probeCalls shouldBe 1
+  }
+
+  it should "fail with SessionEnded when session probe returns false on 4th stall poll" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.duration._
+
+    val stateAt3 = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105).copy(stallPolls = 3)
+    val raw = HlsPlaylistPoller.onPlaylistNotModified(stateAt3)
+    val resolved = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(raw, () => Future.successful(false))
+    , 2.seconds
+    )
+    resolved shouldBe HlsPlaylistPoller.Fail(HlsBackend.HlsError.SessionEnded)
   }
 }
 
