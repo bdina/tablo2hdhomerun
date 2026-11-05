@@ -7,7 +7,7 @@ import pekko.actor.typed.scaladsl.AskPattern.{Askable, schedulerFromActorSystem}
 import pekko.actor.typed.scaladsl.Behaviors
 import pekko.actor.typed.{ActorRef, ActorSystem, Behavior}
 import pekko.http.scaladsl.Http
-import pekko.http.scaladsl.model.{ContentTypes, HttpEntity, HttpMethod, HttpMethods, HttpRequest, HttpResponse, MediaType, StatusCodes, Uri}
+import pekko.http.scaladsl.model.{ContentTypes, HttpEntity, HttpMethod, HttpMethods, HttpRequest, HttpResponse, MediaType, StatusCode, StatusCodes, Uri}
 import pekko.http.scaladsl.server.Directives._
 import pekko.stream.scaladsl.{BroadcastHub, Keep, Source}
 import pekko.stream.{KillSwitches, UniqueKillSwitch}
@@ -55,7 +55,7 @@ object Tablo4thGen {
     case object NoDevicesFound extends Exception("No devices found in account") with Error
     case class SelectFailed(message: String) extends Exception(s"Select failed: $message") with Error
     case object NoAvailableTuners extends Exception("No available tuners") with Error
-    case class SessionFailed(message: String) extends Exception(message) with Error
+    case class SessionFailed(message: String, status: Option[StatusCode] = None) extends Exception(message) with Error
     case class SessionDeleteFailed(message: String) extends Exception(message) with Error
     case object SessionTokenMissing extends Exception("Session token missing") with Error
     case class WatchFailed(message: String) extends Exception(message) with Error
@@ -1014,73 +1014,44 @@ object Tablo4thGen {
       def playlistChanged(before: Session, after: Session): Boolean =
         before.playlistUrl != after.playlistUrl
 
-      val softRecoveryThresholdSec: Int = 45
-      val softRecoveryTimeoutSec: Int = 15
-      def softRecoveryTimeout: FiniteDuration = softRecoveryTimeoutSec.seconds
-      val flapWindowSec: Int = 30
-      val maxFlapDelaySec: Int = 4
-
-      final case class FlapState(
-        dataResumedNanos: Long
-      , consecutiveFlaps: Int = 0
-      , isStalling: Boolean = false
-      , stallStartTimeNanos: Long = 0L
-      ) {
-        def onStall(nowNanos: Long): FlapState =
-          if (isStalling) this
-          else {
-            val flapping = isFlapping(dataResumedNanos, nowNanos)
-            val nextFlaps = if (flapping) consecutiveFlaps + 1 else 0
-            copy(
-              consecutiveFlaps = nextFlaps
-            , isStalling = true
-            , stallStartTimeNanos = nowNanos
-            )
-          }
-
-        def onSegmentReceived(nowNanos: Long): FlapState =
-          if (isStalling) {
-            copy(
-              dataResumedNanos = nowNanos
-            , isStalling = false
-            , stallStartTimeNanos = 0L
-            )
-          } else this
+      sealed trait ProbeOutcome
+      object ProbeOutcome {
+        final case class Alive(session: Session, playlistChanged: Boolean) extends ProbeOutcome
+        case object TransientFailure extends ProbeOutcome
+        case object ClosedByTablo extends ProbeOutcome
+        case object ProbeExhausted extends ProbeOutcome
       }
 
-      sealed trait RecoveryDecision
-      object RecoveryDecision {
-        final case class Soft(timeout: FiniteDuration) extends RecoveryDecision
-        final case class Cold(flapDelayMs: Long) extends RecoveryDecision
-      }
+      def isSessionClosedStatus(status: StatusCode): Boolean =
+        status == StatusCodes.NotFound ||
+        status == StatusCodes.Gone ||
+        status == StatusCodes.Unauthorized ||
+        status == StatusCodes.Forbidden ||
+        status == StatusCodes.BadRequest
 
-      def decideRecovery(
-        flapState: FlapState
-      , attempt: Int
-      , softRetryAttempted: Boolean
-      , nowNanos: Long
-      , shouldRefreshSession: Boolean
-      ): RecoveryDecision = {
-        val stallElapsedNanos = nowNanos - flapState.stallStartTimeNanos
-        val canSoftRetry =
-          attempt > 1 &&
-          !softRetryAttempted &&
-          stallElapsedNanos <= softRecoveryThresholdSec.seconds.toNanos &&
-          !shouldRefreshSession
-
-        if (canSoftRetry) RecoveryDecision.Soft(softRecoveryTimeout)
-        else RecoveryDecision.Cold(computeFlapDelayMillis(flapState.consecutiveFlaps))
-      }
-
-      def computeFlapDelayMillis(consecutiveFlaps: Int, baseRetryDelayMs: Long = 1000L): Long =
-        if (consecutiveFlaps <= 0) 0L
-        else {
-          val multiplier = 1L << math.min(5, consecutiveFlaps)
-          math.min(maxFlapDelaySec * 1000L, baseRetryDelayMs * multiplier)
+      def isSessionClosedError(error: Throwable): Boolean =
+        error match {
+          case Error.SessionFailed(_, Some(status)) => isSessionClosedStatus(status)
+          case Error.SessionTokenMissing => true
+          case _ => false
         }
 
-      def isFlapping(lastDataResumedNanos: Long, nowNanos: Long): Boolean =
-        (nowNanos - lastDataResumedNanos) < flapWindowSec.toLong * 1000000000L
+      def classifyProbeResult(
+        previous: Session
+      , result: Try[Session]
+      , consecutiveFailures: Int
+      , maxFailures: Int
+      ): (ProbeOutcome, Int) =
+        result match {
+          case Success(updated) =>
+            (ProbeOutcome.Alive(updated, playlistChanged(previous, updated)), 0)
+          case Failure(ex) if isSessionClosedError(ex) =>
+            (ProbeOutcome.ClosedByTablo, consecutiveFailures + 1)
+          case Failure(_) =>
+            val nextFailures = consecutiveFailures + 1
+            if (nextFailures >= maxFailures) (ProbeOutcome.ProbeExhausted, nextFailures)
+            else (ProbeOutcome.TransientFailure, nextFailures)
+        }
 
       /** Release the previous Tablo session before re-watching so the device performs a cold tune
         * (fresh tuner lock + new segment file) instead of re-attaching to a stalled pipeline.
@@ -1090,6 +1061,14 @@ object Tablo4thGen {
       , tune: () => Future[A]
       )(implicit ec: scala.concurrent.ExecutionContext): Future[A] =
         Try(release()).fold(Future.failed, identity).recover { case _ => () }.flatMap(_ => tune())
+
+      def coldRetune[A](
+        sessionClosedByTablo: Boolean
+      , release: () => Future[Unit]
+      , tune: () => Future[A]
+      )(implicit ec: scala.concurrent.ExecutionContext): Future[A] =
+        if (sessionClosedByTablo) tune()
+        else releaseThenTune(release, tune)
     }
 
     object SessionManager {
@@ -1511,7 +1490,12 @@ object Tablo4thGen {
               }
             } else {
               val _ = response.entity.discardBytes()
-              Future.failed(Tablo4thGen.Error.SessionFailed(s"session ${method.value} failed: ${response.status.intValue()}"))
+              Future.failed(
+                Tablo4thGen.Error.SessionFailed(
+                  s"session ${method.value} failed: ${response.status.intValue()}"
+                , Some(response.status)
+                )
+              )
             }
           }
         }
@@ -1521,15 +1505,6 @@ object Tablo4thGen {
             case Some(token) =>
               log.debug("[channel] keepalive POST {} leaseId={}", WatchSession.keepalivePath(token), leaseId)
               requestSession(WatchSession.keepalivePath(token), HttpMethods.POST, Some(token))
-            case None =>
-              Future.failed(Tablo4thGen.Error.SessionTokenMissing)
-          }
-
-        def fetchSession(session: WatchSession.Session): Future[WatchSession.Session] =
-          session.token match {
-            case Some(token) =>
-              log.debug("[channel] session GET {} leaseId={}", WatchSession.sessionPath(token), leaseId)
-              requestSession(WatchSession.sessionPath(token), HttpMethods.GET, Some(token))
             case None =>
               Future.failed(Tablo4thGen.Error.SessionTokenMissing)
           }
@@ -1549,8 +1524,7 @@ object Tablo4thGen {
         , streamKillSwitch: AtomicReference[Option[UniqueKillSwitch]]
         , lastSeqRef: java.util.concurrent.atomic.AtomicInteger
         , isRecovery: Boolean
-        , onSegmentReceived: () => Unit
-        , failOnStallPoll: Boolean = false
+        , checkSessionAlive: () => Future[Boolean]
         ): Source[ByteString, ?] = {
           log.info(
             "[4thgen-channel] stream session expires={} keepalive={} playlist={}"
@@ -1565,12 +1539,9 @@ object Tablo4thGen {
               session.playlistUrl
             , leaseId
             , initialSeq = startingSeq
-            , onSeqAdvanced = seq => {
-                lastSeqRef.set(seq)
-                onSegmentReceived()
-              }
+            , onSeqAdvanced = seq => lastSeqRef.set(seq)
             , liveEdgeCount = liveEdgeCount
-            , failOnStallPoll = failOnStallPoll
+            , checkSessionAlive = checkSessionAlive
             )
             .viaMat(KillSwitches.single)(Keep.right)
             .mapMaterializedValue { killSwitch =>
@@ -1584,6 +1555,9 @@ object Tablo4thGen {
           val streamKillSwitch = new AtomicReference[Option[UniqueKillSwitch]](None)
           val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
           val playlistRollover = new AtomicBoolean(false)
+          val sessionClosedByTablo = new AtomicBoolean(false)
+          val probeFailures = new java.util.concurrent.atomic.AtomicInteger(0)
+          val maxProbeFailures = Option(AppContext.config).map(_.stream.hls.pollFailuresMax).getOrElse(4)
           @volatile var keepaliveTask: Option[pekko.actor.Cancellable] = None
           val leaseStopped = new AtomicBoolean(false)
           val tornDown = new AtomicBoolean(false)
@@ -1596,46 +1570,16 @@ object Tablo4thGen {
           }
 
           def scheduleKeepaliveRetry(): Unit =
-            if (!leaseStopped.get())
+            if (!leaseStopped.get()) {
+              keepaliveTask.foreach(_.cancel())
               keepaliveTask = Some(
                 scheduler.scheduleOnce(WatchSession.keepaliveRetrySec.seconds) { runKeepalive() }(ec)
               )
-
-          def runKeepalive(): Unit =
-            if (!leaseStopped.get())
-              keepaliveSession(currentSession.get()).onComplete {
-                case Success(updated) =>
-                  if (!leaseStopped.get()) {
-                    val previous = currentSession.get()
-                    currentSession.set(updated)
-                    log.debug(
-                      "[channel] keepalive ok leaseId={} expires={} keepalive={}"
-                    , leaseId
-                    , updated.expires.map(_.toString).getOrElse("unknown")
-                    , updated.keepalive.map(_.toString).getOrElse("unknown")
-                    )
-                    if (WatchSession.playlistChanged(previous, updated)) {
-                      log.info("[channel] playlist url changed leaseId={}, restarting hls", leaseId)
-                      playlistRollover.set(true)
-                      lastSeqRef.set(0)
-                      streamKillSwitch.get().foreach(_.shutdown())
-                    }
-                    scheduleKeepalive()
-                  }
-                case Failure(ex) =>
-                  if (!leaseStopped.get()) {
-                    log.warn("[channel] keepalive failed leaseId={}", leaseId, ex)
-                    fetchSession(currentSession.get()).onComplete {
-                      case Success(updated) =>
-                        if (!leaseStopped.get()) currentSession.set(updated)
-                      case Failure(_) => ()
-                    }(ec)
-                    scheduleKeepaliveRetry()
-                  }
-              }(ec)
+            }
 
           def scheduleKeepalive(): Unit =
-            if (!leaseStopped.get())
+            if (!leaseStopped.get()) {
+              keepaliveTask.foreach(_.cancel())
               WatchSession.keepaliveDelaySec(currentSession.get()) match {
                 case Some(delaySec) =>
                   keepaliveTask = Some(
@@ -1647,102 +1591,103 @@ object Tablo4thGen {
                     log.debug("[channel] keepalive disabled leaseId={} missing token or interval", leaseId)
                   }
               }
+            }
+
+          def probeSessionAlive(): Future[Boolean] =
+            if (leaseStopped.get()) Future.successful(false)
+            else {
+              val previous = currentSession.get()
+              keepaliveSession(previous).transformWith { result =>
+                if (leaseStopped.get()) Future.successful(false)
+                else {
+                  val (outcome, nextFailures) =
+                    WatchSession.classifyProbeResult(previous, result, probeFailures.get(), maxProbeFailures)
+                  probeFailures.set(nextFailures)
+                  outcome match {
+                    case WatchSession.ProbeOutcome.Alive(updated, changed) =>
+                      currentSession.set(updated)
+                      log.debug(
+                        "[channel] keepalive ok leaseId={} expires={} keepalive={}"
+                      , leaseId
+                      , updated.expires.map(_.toString).getOrElse("unknown")
+                      , updated.keepalive.map(_.toString).getOrElse("unknown")
+                      )
+                      scheduleKeepalive()
+                      if (changed) {
+                        log.info("[channel] playlist url changed leaseId={}, restarting hls", leaseId)
+                        playlistRollover.set(true)
+                        lastSeqRef.set(0)
+                        streamKillSwitch.get().foreach(_.shutdown())
+                      }
+                      Future.successful(true)
+
+                    case WatchSession.ProbeOutcome.TransientFailure =>
+                      log.warn(
+                        "[channel] keepalive transient failure ({}/{}) leaseId={}"
+                      , nextFailures
+                      , maxProbeFailures
+                      , leaseId
+                      )
+                      scheduleKeepaliveRetry()
+                      Future.successful(true)
+
+                    case WatchSession.ProbeOutcome.ClosedByTablo =>
+                      log.warn("[channel] session closed by tablo leaseId={}, triggering cold retune", leaseId)
+                      sessionClosedByTablo.set(true)
+                      streamKillSwitch.get().foreach(_.abort(app.stream.HlsBackend.HlsError.SessionEnded))
+                      Future.successful(false)
+
+                    case WatchSession.ProbeOutcome.ProbeExhausted =>
+                      log.warn(
+                        "[channel] keepalive failures exhausted ({}/{}) leaseId={}, triggering cold retune"
+                      , nextFailures
+                      , maxProbeFailures
+                      , leaseId
+                      )
+                      streamKillSwitch.get().foreach(_.abort(app.stream.HlsBackend.HlsError.SessionEnded))
+                      Future.successful(false)
+                  }
+                }
+              }(ec)
+            }
+
+          def runKeepalive(): Unit = {
+            val _ = probeSessionAlive()
+          }
 
           import app.stream.ResilientHlsSource
           val attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
-          val flapTracker = new AtomicReference[WatchSession.FlapState](
-            WatchSession.FlapState(dataResumedNanos = System.nanoTime())
-          )
-          @volatile var softRetryAttempted: Boolean = false
-
-          val onSegmentReceived: () => Unit = () => {
-            val nowNanos = System.nanoTime()
-            val prev = flapTracker.getAndUpdate(_.onSegmentReceived(nowNanos))
-            if (prev.isStalling) {
-              softRetryAttempted = false
-              log.info("[4thgen-channel] stream data resumed channelId={}", channelId)
-            }
-          }
 
           def streamFactory(): Source[ByteString, ?] = {
             val attempt = attemptCount.incrementAndGet()
             val session = currentSession.get()
-            val nowNanos = System.nanoTime()
             val isRollover = playlistRollover.compareAndSet(true, false)
 
             if ((attempt == 1 || isRollover) && !WatchSession.shouldRefreshSession(session)) {
-              streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = isRollover, onSegmentReceived)
+              streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = isRollover, () => probeSessionAlive())
             } else {
-              val prevFlapState = flapTracker.getAndUpdate(_.onStall(nowNanos))
-              val isFirstStallEntry = !prevFlapState.isStalling
-              val currentFlapState = if (isFirstStallEntry) prevFlapState.onStall(nowNanos) else prevFlapState
-              val consecutiveFlaps = currentFlapState.consecutiveFlaps
-              if (isFirstStallEntry && consecutiveFlaps > 0) {
-                log.warn("[4thgen-channel] retune flap detected channelId={} consecutiveFlaps={}", channelId, consecutiveFlaps)
-              }
-
-              val decision = WatchSession.decideRecovery(
-                flapState = currentFlapState
-              , attempt = attempt
-              , softRetryAttempted = softRetryAttempted
-              , nowNanos = nowNanos
-              , shouldRefreshSession = WatchSession.shouldRefreshSession(session)
+              val closedByTablo = sessionClosedByTablo.getAndSet(false)
+              log.info(
+                "[4thgen-channel] cold recovery retune attempt={} channelId={} closedByTablo={}"
+              , attempt
+              , channelId
+              , closedByTablo
               )
-
-              decision match {
-                case WatchSession.RecoveryDecision.Soft(softTimeout) =>
-                  softRetryAttempted = true
-                  log.info(
-                    "[4thgen-channel] soft recovery retry attempt={} channelId={} elapsedStallMs={}"
-                  , attempt
-                  , channelId
-                  , (nowNanos - currentFlapState.stallStartTimeNanos) / 1000000
-                  )
-                  val stallTimeout = Option(AppContext.config)
-                    .map(_.stream.resilient.stallTimeoutSec.seconds)
-                    .getOrElse(45.seconds)
-                  val softStream = streamFromWatchSession(
-                    session
-                  , streamKillSwitch
-                  , lastSeqRef
-                  , isRecovery = true
-                  , onSegmentReceived = onSegmentReceived
-                  , failOnStallPoll = false
-                  )
-                  softStream.via(ResilientHlsSource.StallWatchdog.flow(softTimeout, stallTimeout, s"4thgen-channel-$channelId-soft"))
-
-                case WatchSession.RecoveryDecision.Cold(flapDelayMs) =>
-                  log.info(
-                    "[4thgen-channel] cold recovery retune attempt={} channelId={} consecutiveFlaps={}"
-                  , attempt
-                  , channelId
-                  , consecutiveFlaps
-                  )
-                  keepaliveTask.foreach(_.cancel())
-                  val oldToken = currentSession.get().token
-                  val tuneFuture = () => {
-                    WatchSession.releaseThenTune(
-                      release = () => oldToken.map(endSession).getOrElse(Future.successful(()))
-                    , tune = () => retuneWatchSession()
-                    ).map { newSession =>
-                      currentSession.set(newSession)
-                      lastSeqRef.set(0)
-                      scheduleKeepalive()
-                      streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true, onSegmentReceived)
-                    }(ec)
-                  }
-
-                  if (flapDelayMs > 0) {
-                    log.warn(
-                      "[4thgen-channel] delaying cold retune by {}ms during flap dampening channelId={}"
-                    , flapDelayMs
-                    , channelId
-                    )
-                    Source.futureSource(after(flapDelayMs.millis, scheduler)(tuneFuture()))
-                  } else {
-                    Source.futureSource(tuneFuture())
-                  }
-              }
+              keepaliveTask.foreach(_.cancel())
+              val oldToken = session.token
+              Source.futureSource(
+                WatchSession.coldRetune(
+                  sessionClosedByTablo = closedByTablo
+                , release = () => oldToken.map(endSession).getOrElse(Future.successful(()))
+                , tune = () => retuneWatchSession()
+                ).map { newSession =>
+                  currentSession.set(newSession)
+                  probeFailures.set(0)
+                  lastSeqRef.set(0)
+                  scheduleKeepalive()
+                  streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true, () => probeSessionAlive())
+                }(ec)
+              )
             }
           }
 

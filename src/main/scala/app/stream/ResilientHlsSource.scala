@@ -41,7 +41,7 @@ object ResilientHlsSource {
     streamFactory: () => Source[ByteString, ?]
   , streamName: String
   , recoveryTimeout: FiniteDuration = AppContext.config.stream.resilient.recoveryTimeoutSec.seconds
-  , stallTimeout: FiniteDuration = AppContext.config.stream.resilient.stallTimeoutSec.seconds
+  , stallTimeout: FiniteDuration = Duration.Zero
   , tuneTimeout: FiniteDuration = AppContext.config.stream.resilient.tuneTimeoutSec.seconds
   , retryDelay: FiniteDuration = AppContext.config.stream.resilient.retryDelaySec.seconds
   , maxRetryDelay: FiniteDuration = AppContext.config.stream.resilient.maxRetryDelaySec.seconds
@@ -136,7 +136,10 @@ object ResilientHlsSource {
         private var inCandidateKeyframe = false
         private var candidateKeyframeCleanPackets = 0
         private val checkInterval = {
-          val minTimeout = if (stallTimeout < tuneTimeout) stallTimeout else tuneTimeout
+          val minTimeout =
+            if (stallTimeout.toNanos > 0 && stallTimeout < tuneTimeout) stallTimeout
+            else if (tuneTimeout.toNanos > 0) tuneTimeout
+            else 1.second
           (minTimeout / 4).max(50.millis).min(250.millis)
         }
 
@@ -237,7 +240,7 @@ object ResilientHlsSource {
           val now = System.nanoTime()
           val elapsedNanos = now - lastPushNanos
           if (started) {
-            if (elapsedNanos > stallTimeout.toNanos) {
+            if (stallTimeout.toNanos > 0 && elapsedNanos > stallTimeout.toNanos) {
               val detail = s"no new data for ${stallTimeout.toSeconds}s"
               log.warn(s"[$streamName] $detail, retuning")
               failStage(new StallTimeoutException(s"$streamName $detail"))

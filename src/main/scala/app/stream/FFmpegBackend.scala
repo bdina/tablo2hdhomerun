@@ -8,6 +8,7 @@ import pekko.util.ByteString
 
 import org.slf4j.LoggerFactory
 
+import scala.concurrent.Future
 import scala.util.{Failure, Success}
 
 object FFmpegBackend extends StreamBackend {
@@ -20,7 +21,7 @@ object FFmpegBackend extends StreamBackend {
   , initialSeq: Int = 0
   , onSeqAdvanced: Int => Unit = _ => ()
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
-  , failOnStallPoll: Boolean = false
+  , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
     Source.lazySource { () =>

@@ -39,7 +39,6 @@ object HlsBackend extends StreamBackend {
     case object SegmentNotReady extends RuntimeException("newest segment not ready") with HlsError
     case object SessionEnded extends RuntimeException("playlist ended (EXT-X-ENDLIST)") with HlsError
     case object PollExhausted extends RuntimeException("playlist poll failures exhausted") with HlsError
-    case object PlaylistStalled extends RuntimeException("playlist stalled on soft recovery") with HlsError
   }
 
   private[stream] def pollOutcomeToFuture(
@@ -59,7 +58,7 @@ object HlsBackend extends StreamBackend {
   , initialSeq: Int = 0
   , onSeqAdvanced: Int => Unit = _ => ()
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
-  , failOnStallPoll: Boolean = false
+  , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -247,6 +246,15 @@ object HlsBackend extends StreamBackend {
             }
             outcome
           }
+          .flatMap { rawOutcome =>
+            HlsPlaylistPoller.resolveStallOutcome(
+              rawOutcome
+            , () => {
+                log.debug("[stream:hls] probing session liveness label={} stallPolls={}", label, state.stallPolls + 1)
+                checkSessionAlive()
+              }
+            )
+          }
           .flatMap { outcome =>
             outcome match {
               case HlsPlaylistPoller.Fail(err) =>
@@ -300,7 +308,7 @@ object HlsBackend extends StreamBackend {
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
           log.debug("[stream:hls] resolved media playlist={}", url)
-          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount, failOnStallPoll))(s => step(s)(mat))
+          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s)(mat))
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
@@ -309,7 +317,7 @@ object HlsBackend extends StreamBackend {
               val segBytes = new java.util.concurrent.atomic.AtomicLong(0L)
               val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
 
-              fetchSegmentSource(seg.url, seg.byteRange)
+              val countedSource = fetchSegmentSource(seg.url, seg.byteRange)
                 .via(MpegTsSync.alignPackets)
                 .map { chunk =>
                   val _ = segBytes.addAndGet(chunk.size)
@@ -318,34 +326,41 @@ object HlsBackend extends StreamBackend {
                 }
                 .watchTermination() { (_, done) =>
                   done.onComplete {
-                    case Success(_) =>
-                      val totalSegBytes = segBytes.get()
-                      lastSeqOut.set(seg.sequence + 1)
-                      onSeqAdvanced(seg.sequence + 1)
-                      log.info(
-                        "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
-                      , label
-                      , seg.sequence
-                      , seg.duration
-                      , totalSegBytes
-                      , gapMs
-                      )
-                      expectedLengthOpt.foreach { expected =>
-                        if (totalSegBytes < expected) {
-                          log.warn(
-                            "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
-                          , label
-                          , seg.sequence
-                          , expected
-                          , totalSegBytes
-                          , LogConfig.truncate(seg.url)
-                          )
-                        }
-                      }
+                    case Success(_) => ()
                     case Failure(ex) =>
                       log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)
                   }(ec)
                 }
+                .concat(
+                  Source.lazySource { () =>
+                    val totalSegBytes = segBytes.get()
+                    lastSeqOut.set(seg.sequence + 1)
+                    log.info(
+                      "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
+                    , label
+                    , seg.sequence
+                    , seg.duration
+                    , totalSegBytes
+                    , gapMs
+                    )
+                    expectedLengthOpt.foreach { expected =>
+                      if (totalSegBytes < expected) {
+                        log.warn(
+                          "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
+                        , label
+                        , seg.sequence
+                        , expected
+                        , totalSegBytes
+                        , LogConfig.truncate(seg.url)
+                        )
+                      }
+                    }
+                    onSeqAdvanced(seg.sequence + 1)
+                    Source.empty[ByteString]
+                  }.mapMaterializedValue(_ => pekko.NotUsed)
+                )
+
+              countedSource
             }
         }
       ).watchTermination() { (_, done) =>

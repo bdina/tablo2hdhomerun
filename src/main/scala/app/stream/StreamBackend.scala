@@ -6,6 +6,8 @@ import pekko.actor.typed.ActorSystem
 import pekko.stream.scaladsl.Source
 import pekko.util.ByteString
 
+import scala.concurrent.Future
+
 import app.AppContext
 import app.config.StreamBackendKind
 
@@ -16,7 +18,7 @@ trait StreamBackend {
   , initialSeq: Int = 0
   , onSeqAdvanced: Int => Unit = _ => ()
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
-  , failOnStallPoll: Boolean = false
+  , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   )(implicit system: ActorSystem[?]): Source[ByteString, ?]
   def name: String
 }
