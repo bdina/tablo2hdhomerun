@@ -527,7 +527,7 @@ object MpegTsSync {
             emitWithOutboundCc(pkt, pid, hasPayload, outputBuilder)
           } else if (updated.videoPid.contains(pid)) {
             val isMpeg2 = updated.videoStreamType.isEmpty || updated.videoStreamType.contains(0x01) || updated.videoStreamType.contains(0x02)
-            val hasOutOfBoundsSlice = !isTei && isMpeg2 && hasPayload && payloadLen > 0 &&
+            val hasOutOfBoundsSlice = !isTei && !pusi && isMpeg2 && hasPayload && payloadLen > 0 &&
               FreezeFramePacer.hasOutOfBoundsMpeg2Slice(arr, payloadOffset, payloadLen, maxSliceRow)
             if (isCcError) {
               totalCcErrors += 1L
@@ -592,10 +592,14 @@ object MpegTsSync {
                   else PacketSize
                 val pktPayloadLen = math.max(0, PacketSize - pktPayloadOffset)
                 if (isMpeg2 && pktPayloadLen > 0) {
-                  if (lockedSeqHeader.isEmpty) {
+                  if (lockedSeqHeader.isEmpty && pusi) {
                     FreezeFramePacer.parseMpeg2SequenceHeader(pkt, pktPayloadOffset, pktPayloadLen).foreach { case (hdr, rows) =>
-                      maxSliceRow = rows
-                      if (candidateSeqHeader.contains(hdr)) lockedSeqHeader = Some(hdr) else candidateSeqHeader = Some(hdr)
+                      if (candidateSeqHeader.exists(c => c.take(7) == hdr.take(7))) {
+                        maxSliceRow = rows
+                        lockedSeqHeader = Some(hdr)
+                      } else {
+                        candidateSeqHeader = Some(hdr)
+                      }
                     }
                   }
                   val effectiveSeqHdr = lockedSeqHeader.orElse(candidateSeqHeader)

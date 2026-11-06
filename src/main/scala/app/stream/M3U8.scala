@@ -27,6 +27,8 @@ object M3U8 {
     var mediaSequence = 0
     var isEndList = false
     var version: Option[Int] = None
+    var pendingDuration: Double = 0.0
+    var pendingTitle: Option[String] = None
     var pendingByteRange: Option[(Long, Long)] = None
     var nextImplicitOffset: Long = 0
     val segmentBuilder = Seq.newBuilder[Segment]
@@ -67,30 +69,13 @@ object M3U8 {
           i += 1
         case M3U8LineParser.LineEvent.Extinf(rest) =>
           val (durationStr, titleOpt) = parseExtinf(rest)
-          val duration = Try(durationStr.toDouble).toOption.getOrElse(0.0)
+          pendingDuration = Try(durationStr.toDouble).toOption.getOrElse(0.0)
+          pendingTitle = titleOpt
           i += 1
-          if (i < events.length) {
-            events(i) match {
-              case M3U8LineParser.LineEvent.ByteRange(v) =>
-                applyByteRange(v)
-                i += 1
-              case _ =>
-            }
-          }
-          if (i < events.length) {
-            events(i) match {
-              case M3U8LineParser.LineEvent.Uri(uri) =>
-                segmentBuilder += Segment(uri = uri, duration = duration, title = titleOpt, byteRange = pendingByteRange)
-                pendingByteRange = None
-                i += 1
-              case _ =>
-                i += 1
-            }
-          } else {
-            i += 1
-          }
         case M3U8LineParser.LineEvent.Uri(uri) =>
-          segmentBuilder += Segment(uri = uri, duration = 0.0, title = None, byteRange = pendingByteRange)
+          segmentBuilder += Segment(uri = uri, duration = pendingDuration, title = pendingTitle, byteRange = pendingByteRange)
+          pendingDuration = 0.0
+          pendingTitle = None
           pendingByteRange = None
           i += 1
         case M3U8LineParser.LineEvent.Unknown =>
