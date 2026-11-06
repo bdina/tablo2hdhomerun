@@ -435,5 +435,57 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     )
     resolved shouldBe HlsPlaylistPoller.Fail(HlsBackend.HlsError.SessionEnded)
   }
+
+  it should "retry 404 Not Found when session probe confirms session is still alive and below maxFetchFailures" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.duration._
+
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 5)
+    val err404 = HlsBackend.HlsError.PlaylistFetchError(org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound)
+    val raw = HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 4, err404)
+    val resolved = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(raw, () => Future.successful(true), state, maxFetchFailures = 4)
+    , 2.seconds
+    )
+    resolved match {
+      case HlsPlaylistPoller.Emit(next, segments) =>
+        val _ = segments shouldBe empty
+        val _ = next.fetchFailures shouldBe 1
+        next.lastAdvanced shouldBe false
+      case HlsPlaylistPoller.Fail(err) =>
+        fail(s"expected Emit retry when session is alive, got Fail($err)")
+    }
+  }
+
+  it should "fail with SessionEnded on 404 Not Found when session probe reports session closed" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.duration._
+
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 5)
+    val err404 = HlsBackend.HlsError.PlaylistFetchError(org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound)
+    val raw = HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 4, err404)
+    val resolved = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(raw, () => Future.successful(false), state, maxFetchFailures = 4)
+    , 2.seconds
+    )
+    resolved shouldBe HlsPlaylistPoller.Fail(HlsBackend.HlsError.SessionEnded)
+  }
+
+  it should "fail on 404 Not Found when maxFetchFailures is reached even if session probe returns true" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.duration._
+
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 5).copy(fetchFailures = 3)
+    val err404 = HlsBackend.HlsError.PlaylistFetchError(org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound)
+    val raw = HlsPlaylistPoller.onFetchError(state, maxFetchFailures = 4, err404)
+    val resolved = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(raw, () => Future.successful(true), state, maxFetchFailures = 4)
+    , 2.seconds
+    )
+    resolved shouldBe HlsPlaylistPoller.Fail(err404)
+  }
 }
 

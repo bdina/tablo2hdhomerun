@@ -292,4 +292,78 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     val _ = finalOutcome shouldBe Tablo4thGen.Channel.WatchSession.ProbeOutcome.ProbeExhausted
     finalFailures shouldBe 4
   }
+
+  "WatchSession.initialTuneTimeout" should "default to 60 seconds when recoveryTimeoutSec is 0 or negative and use configured value when positive" in {
+    val _ = Tablo4thGen.Channel.WatchSession.initialTuneTimeout(0) shouldBe 60.seconds
+    val _ = Tablo4thGen.Channel.WatchSession.initialTuneTimeout(-1) shouldBe 60.seconds
+    Tablo4thGen.Channel.WatchSession.initialTuneTimeout(25) shouldBe 25.seconds
+  }
+
+  "WatchSession.classifyWatch503" should "distinguish tuner exhaustion from signal lock or generic 503 failures" in {
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatch503("""{"error":"No available tuners"}""") shouldBe Tablo4thGen.Error.NoAvailableTuners
+    val signalErr = Tablo4thGen.Channel.WatchSession.classifyWatch503("""{"error":"Weak signal: failed to lock channel"}""")
+    val _ = signalErr shouldBe a[Tablo4thGen.Error.WatchFailed]
+    val _ = signalErr.getMessage should include("Weak signal")
+    val emptyErr = Tablo4thGen.Channel.WatchSession.classifyWatch503("")
+    val _ = emptyErr shouldBe a[Tablo4thGen.Error.WatchFailed]
+    emptyErr.getMessage should include("watch 503")
+  }
+
+  "WatchSession.retryInitialTune" should "stop retrying immediately when cancelled" in {
+    import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+    val cancelled = new AtomicBoolean(false)
+    val attempts = new AtomicInteger(0)
+    val dummyCancellable = new org.apache.pekko.actor.Cancellable {
+      override def cancel(): Boolean = true
+      override def isCancelled: Boolean = false
+    }
+
+    val fut = Tablo4thGen.Channel.WatchSession.retryInitialTune(
+      tune = { n =>
+        val _ = attempts.incrementAndGet()
+        if (n == 2) cancelled.set(true)
+        Future.failed(new RuntimeException(s"fail-$n"))
+      }
+    , onCancelRelease = _ => ()
+    , isCancelled = () => cancelled.get()
+    , scheduleRetry = (_, task) => {
+        task()
+        dummyCancellable
+      }
+    , onRetryTimer = _ => ()
+    , timeoutBudget = 60.seconds
+    , retryDelay = 10.millis
+    )
+
+    val ex = fut.failed.futureValue
+    val _ = ex shouldBe Tablo4thGen.Error.WatchCancelled
+    attempts.get() shouldBe 2
+  }
+
+  it should "release the Tablo session if an in-flight tune succeeds after cancellation" in {
+    import java.util.concurrent.atomic.AtomicBoolean
+    val cancelled = new AtomicBoolean(false)
+    val releasedToken = new java.util.concurrent.atomic.AtomicReference[Option[String]](None)
+    val tunePromise = Promise[Tablo4thGen.Channel.WatchSession.Session]()
+    val dummyCancellable = new org.apache.pekko.actor.Cancellable {
+      override def cancel(): Boolean = true
+      override def isCancelled: Boolean = false
+    }
+
+    val fut = Tablo4thGen.Channel.WatchSession.retryInitialTune(
+      tune = _ => tunePromise.future
+    , onCancelRelease = s => releasedToken.set(s.token)
+    , isCancelled = () => cancelled.get()
+    , scheduleRetry = (_, _) => dummyCancellable
+    , onRetryTimer = _ => ()
+    , timeoutBudget = 60.seconds
+    )
+
+    cancelled.set(true)
+    tunePromise.success(Tablo4thGen.Channel.WatchSession.Session(Some("leaked-tok"), None, Some(165), "http://example.com/pl.m3u8"))
+
+    val ex = fut.failed.futureValue
+    val _ = ex shouldBe Tablo4thGen.Error.WatchCancelled
+    releasedToken.get() shouldBe Some("leaked-tok")
+  }
 }

@@ -285,8 +285,9 @@ object MpegTsSync {
   , onHeadersUpdated: CachedHeaders => Unit = _ => ()
   , freezeThreshold: FiniteDuration = DefaultFreezeThreshold
   , freezeTickInterval: FiniteDuration = DefaultFreezeTickInterval
+  , label: String = ""
   ): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new CacheStage(cachedHeadersRef, onHeadersUpdated, freezeThreshold, freezeTickInterval))
+    Flow.fromGraph(new CacheStage(cachedHeadersRef, onHeadersUpdated, freezeThreshold, freezeTickInterval, label))
 
   def signedPtsDiff(a: Long, b: Long): Long = {
     val raw = (a - b) & FreezeFramePacer.PtsMask
@@ -296,6 +297,7 @@ object MpegTsSync {
   def primeClientSource(
     source: Source[ByteString, NotUsed]
   , cachedHeadersRef: AtomicReference[CachedHeaders]
+  , label: String = ""
   ): Source[ByteString, NotUsed] =
     Source.lazySource { () =>
       val headers = cachedHeadersRef.get()
@@ -306,6 +308,7 @@ object MpegTsSync {
         , audioPids = headers.audioPids
         , audioStreamTypes = headers.audioStreamTypes
         , lockedSeqHeader = headers.lockedSeqHeader
+        , label = label
         )
       )
       if (headers.isEmpty) aligned
@@ -317,6 +320,7 @@ object MpegTsSync {
   , onHeadersUpdated: CachedHeaders => Unit
   , freezeThreshold: FiniteDuration
   , freezeTickInterval: FiniteDuration
+  , label: String
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.out")
@@ -349,6 +353,13 @@ object MpegTsSync {
       private var totalClampedSlices: Long = 0L
       private var totalScrubbedPts: Long = 0L
       private var totalFreezeBursts: Long = 0L
+      private var lastLoggedTei: Long = 0L
+      private var lastLoggedCc: Long = 0L
+      private var lastLoggedClamped: Long = 0L
+      private var lastLoggedScrubbed: Long = 0L
+      private var lastStatsLogNanos: Long = System.nanoTime()
+      private val statsLogIntervalNanos: Long = 30.seconds.toNanos
+      private val labelPrefix: String = if (label.nonEmpty) s" label=$label" else ""
 
       private def nextOutboundCc(pid: Int, hasPayload: Boolean): Int =
         if (hasPayload) {
@@ -773,6 +784,34 @@ object MpegTsSync {
             onHeadersUpdated(updated)
           }
 
+          val hasNewAnomalies =
+            totalTeiPackets > lastLoggedTei ||
+              totalCcErrors > lastLoggedCc ||
+              totalClampedSlices > lastLoggedClamped ||
+              totalScrubbedPts > lastLoggedScrubbed
+          if (hasNewAnomalies) {
+            val now = System.nanoTime()
+            if (now - lastStatsLogNanos >= statsLogIntervalNanos) {
+              log.warn(
+                "[mpegts] transport anomalies{} tei={} (+{}) ccErrors={} (+{}) clampedSlices={} (+{}) scrubbedPts={} (+{})"
+              , labelPrefix
+              , totalTeiPackets
+              , totalTeiPackets - lastLoggedTei
+              , totalCcErrors
+              , totalCcErrors - lastLoggedCc
+              , totalClampedSlices
+              , totalClampedSlices - lastLoggedClamped
+              , totalScrubbedPts
+              , totalScrubbedPts - lastLoggedScrubbed
+              )
+              lastLoggedTei = totalTeiPackets
+              lastLoggedCc = totalCcErrors
+              lastLoggedClamped = totalClampedSlices
+              lastLoggedScrubbed = totalScrubbedPts
+              lastStatsLogNanos = now
+            }
+          }
+
           val result = outputBuilder.result()
           if (result.nonEmpty) {
             push(out, result)
@@ -811,7 +850,8 @@ object MpegTsSync {
           }
           if (totalTeiPackets > 0 || totalCcErrors > 0 || totalClampedSlices > 0 || totalScrubbedPts > 0 || totalFreezeBursts > 0) {
             log.info(
-              "[mpegts] stream ended with transport stats: totalTei={} totalCcErrors={} totalClampedSlices={} totalScrubbedPts={} totalFreezeBursts={}"
+              "[mpegts] stream ended with transport stats:{} totalTei={} totalCcErrors={} totalClampedSlices={} totalScrubbedPts={} totalFreezeBursts={}"
+            , labelPrefix
             , totalTeiPackets
             , totalCcErrors
             , totalClampedSlices
@@ -876,8 +916,9 @@ object MpegTsSync {
   , audioPids: Seq[Int] = Seq.empty
   , audioStreamTypes: Map[Int, Int] = Map.empty
   , lockedSeqHeader: Option[ByteString] = None
+  , label: String = ""
   ): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new AlignToIFrameStage(videoPid, maxDroppedPackets, videoStreamType, audioPids, audioStreamTypes, lockedSeqHeader))
+    Flow.fromGraph(new AlignToIFrameStage(videoPid, maxDroppedPackets, videoStreamType, audioPids, audioStreamTypes, lockedSeqHeader, label))
 
   private final class AlignToIFrameStage(
     videoPid: Option[Int]
@@ -886,6 +927,7 @@ object MpegTsSync {
   , initialAudioPids: Seq[Int]
   , initialAudioStreamTypes: Map[Int, Int]
   , lockedSeqHeader: Option[ByteString]
+  , label: String
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.alignToIFrame.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.alignToIFrame.out")
@@ -893,6 +935,7 @@ object MpegTsSync {
 
     override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
       private val startTimeNanos: Long = System.nanoTime()
+      private val labelPrefix: String = if (label.nonEmpty) s" label=$label" else ""
       private var carry: ByteString = ByteString.empty
       private var isAligned = false
       private var currentVideoPid: Option[Int] = videoPid
@@ -990,7 +1033,7 @@ object MpegTsSync {
                     if (currentVideoPid.isEmpty) currentVideoPid = Some(resolvedVpid)
                     isAligned = true
                     val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
-                    log.info(s"Aligned to I-Frame on PID $resolvedVpid (dropped $droppedPackets leading packets in ${elapsedMs}ms)")
+                    log.info(s"[mpegts]$labelPrefix Aligned to I-Frame on PID $resolvedVpid (dropped $droppedPackets leading packets in ${elapsedMs}ms)")
                     if (isMpeg2 && lockedSeqHeader.isDefined && !FreezeFramePacer.hasMpeg2SequenceHeader(arr, payloadOffset, payloadLen)) {
                       val prevCc = ((arr(pos + 3) & 0x0F) - 1) & 0x0F
                       val _ = outputBuilder ++= FreezeFramePacer.synthesizeSequenceHeaderPacket(resolvedVpid, lockedSeqHeader.get, prevCc)
@@ -1000,7 +1043,7 @@ object MpegTsSync {
                     droppedPackets += 1
                     if (droppedPackets > maxDroppedPackets) {
                       val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
-                      log.warn(s"Max dropped packets ($droppedPackets in ${elapsedMs}ms) exceeded while waiting for I-Frame; forcing alignment")
+                      log.warn(s"[mpegts]$labelPrefix Max dropped packets ($droppedPackets in ${elapsedMs}ms) exceeded while waiting for I-Frame; forcing alignment")
                       isAligned = true
                       alignedAudioPids = knownAudioPids
                       if (isMpeg2 && lockedSeqHeader.isDefined && (payloadLen <= 0 || !FreezeFramePacer.hasMpeg2SequenceHeader(arr, payloadOffset, payloadLen))) {

@@ -32,7 +32,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 - One Tablo player session per channel while any proxy client (or idle grace) holds it
 - Multiplex MPEG-TS to N HDHomeRun clients via `BroadcastHub`
 - Seamless keepalive / playlist change / retune for attached clients (no client reconnect required)
-- Clear logs: `channelId`, `clientId`, `tabloToken` (truncated), attached client count, session state
+- Clear operational logs: human-readable TV channel name + virtual number (`channel=CBS 4.1`, `label=CBS 4.1 (ee905255)`), `channelId`, `clientId`, `tabloToken` (truncated), attached client count, tuner occupancy ratio (`occupied=1/4`), and session state
 
 ## Non-goals (v1)
 
@@ -47,7 +47,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 | Topic | Choice |
 |-------|--------|
 | Hub materialization | Tablo4thGen materializes upstream + `BroadcastHub`, then `CheckIn` |
-| Retune | Control-plane session-presence driven recovery governed by `WatchSession.classifyProbeResult` and `HlsPlaylistPoller.resolveStallOutcome`: when `pls.m3u8` stops advancing, `HlsPlaylistPoller` polls every 500ms and probes `POST /player/sessions/{token}/keepalive?lh=1` every 4th unchanged poll (`~2s`). While the session exists on the Tablo (`200 OK`), the poller continues reading the existing HLS playlist until new segments arrive or the client disconnects (refreshing TTL and resetting the scheduled keepalive timer). When Tablo closes the session (`4xx` on keepalive or `#EXT-X-ENDLIST` / `404` on playlist) or `pollFailuresMax` (default 4) consecutive control-plane/playlist errors occur, `SessionRunner` immediately fires a cold retune (`POST /watch` with reset `lastSeqRef`, skipping `DELETE` when the keepalive probe already confirmed the session is closed); hub stays up |
+| Retune | Control-plane session-presence driven recovery governed by `WatchSession.classifyProbeResult` and `HlsPlaylistPoller.resolveStallOutcome`: when `pls.m3u8` stops advancing or returns `404 Not Found`, `HlsPlaylistPoller` polls every 500ms and probes `POST /player/sessions/{token}/keepalive?lh=1` (every 4th unchanged poll `~2s`, or immediately on playlist `404`). While the session exists on the Tablo (`200 OK`), the poller continues reading/retrying the HLS playlist (up to `pollFailuresMax`, default 4, on `404`, or warm-rolling if the playlist URL changed) until new segments arrive or the client disconnects (refreshing TTL and resetting the scheduled keepalive timer). When Tablo closes the session (`4xx` on keepalive or `#EXT-X-ENDLIST` / `410` on playlist) or `pollFailuresMax` (default 4) consecutive control-plane/playlist errors occur, `SessionRunner` immediately fires a cold retune (`POST /watch` with reset `lastSeqRef`, skipping `DELETE` when the keepalive probe already confirmed the session is closed); hub stays up |
 | Stream priming | Dynamic PAT/PMT & multi-PID discontinuity packets prepended on client attach via `MpegTsSync`; decoupled audio alignment emits audio immediately on first `PUSI=1` with valid syncword; locked Sequence Headers (`lockedSeqHeader`) injected on GOP boundary or forced alignment; native hardware STC timestamp preservation across B-frames (`DefaultFreezeThreshold = Duration.Zero`) with continuous monotonic timeline normalization when active; surgical slice dropping on `TEI`, `CC` errors, and out-of-bounds slice start codes (`hasOutOfBoundsMpeg2Slice`) with `oldAfLen == 0` adaptation field flag safety in `stuffPacketPrefix`; outbound CC rewriting in `MpegTsSync.cacheFlow`; persisted across session lifecycles in `SessionManager.channelHeaderCache` |
 | Client identity | Per-request UUID for Acquire/Release and logging |
 | Scope | 4th gen only |
@@ -571,8 +571,8 @@ the current per-request path, but as **one instance per channel lease**.
 
 | Event | Behavior |
 |-------|----------|
-| Initial watch fails while Opening | Retries with backoff (up to `STREAM_RECOVERY_TIMEOUT_SEC` if > 0, or 60s opening budget) before `AcquireFailed` → `Rejected(Failed(_))`; client receives pre-roll null keepalive |
-| Client releases while Opening | Waiter removed; if all waiters release, Opening is cancelled and tune retries cease |
+| Initial watch fails while Opening | `WatchSession.retryInitialTune` retries with 2s backoff up to `WatchSession.initialTuneTimeout` (`STREAM_RECOVERY_TIMEOUT_SEC` if > 0, or 60s opening budget when `<= 0`) before `AcquireFailed` → `Rejected(Failed(_))`; `WatchSession.classifyWatch503` inspects HTTP 503 response bodies to distinguish tuner exhaustion from weak-signal RF lock failures; client receives pre-roll null keepalive |
+| Client releases while Opening | Waiter removed; if all waiters release, `SessionManager` invokes the `Opening.cancel` handle from `SessionRunner.startCancellable` so `retryInitialTune` ceases immediately (and releases any in-flight Tablo session that completes after cancellation) |
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source (`playlistRollover`); hub stays; clients seamless |
 | Near-expiry retune | New Tablo token inside runner; old token DELETE; hub stays |

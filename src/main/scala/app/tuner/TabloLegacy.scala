@@ -146,6 +146,27 @@ object TabloLegacy {
         implicit val channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
       }
 
+      private val channelLabels = new java.util.concurrent.ConcurrentHashMap[String, String]()
+
+      def formatChannelLabel(obj: ChannelObject): String = {
+        val title = obj.channel.network.map(_.trim).filter(_.nonEmpty)
+          .orElse(Option(obj.channel.call_sign).map(_.trim).filter(_.nonEmpty))
+          .getOrElse(obj.object_id.toString)
+        if (obj.channel.major > 0) s"$title ${obj.channel.major}.${obj.channel.minor}" else title
+      }
+
+      def registerChannel(obj: ChannelObject): String = {
+        val label = formatChannelLabel(obj)
+        val _ = channelLabels.put(obj.object_id.toString, label)
+        label
+      }
+
+      def channelLabel(channelId: String): String =
+        Option(channelLabels.get(channelId)).filter(_.nonEmpty).getOrElse(channelId)
+
+      def streamLabel(channelId: String, streamId: String): String =
+        s"${channelLabel(channelId)} ($streamId)"
+
       object Proxy {
         object Request {
           val baseUrl = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
@@ -163,6 +184,7 @@ object TabloLegacy {
         object Response {
           object ChannelObject {
             def jsValue(obj: ChannelObject): JsValue = {
+              val _ = registerChannel(obj)
               val num = s"${obj.channel.major}.${obj.channel.minor}"
               val url = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/channel/${obj.object_id}"))}"
               val src = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${obj.object_id}/watch"))}"
@@ -897,6 +919,8 @@ object TabloLegacy {
             import app.stream.ResilientHlsSource
 
             val streamId = java.util.UUID.randomUUID.toString.take(8)
+            val channelDisplay = Lineup.channelLabel(channelId.toString)
+            val streamLabel = Lineup.streamLabel(channelId.toString, streamId)
 
             val watchUri =
               AppContext.discover
@@ -952,18 +976,18 @@ object TabloLegacy {
                       nextPlaylistUrl = None
                       StreamBackend().stream(
                         url
-                      , streamId
+                      , streamLabel
                       , initialSeq = lastSeqRef.get()
                       , onSeqAdvanced = seq => lastSeqRef.set(seq)
                       )
                     case None =>
                       Source.futureSource(
                         startWatchSession(checkTuners = false).map { data =>
-                          log.info("[channel] recovered tune playlist={}", data.playlist_url)
+                          log.info("[channel] recovered tune channel={} channelId={} playlist={}", channelDisplay, channelId, data.playlist_url)
                           lastSeqRef.set(0)
                           StreamBackend().stream(
                             data.playlist_url.toString
-                          , streamId
+                          , streamLabel
                           , initialSeq = lastSeqRef.get()
                           , onSeqAdvanced = seq => lastSeqRef.set(seq)
                           , liveEdgeCount = app.stream.HlsPlaylistPoller.recoveryLiveEdgeSegmentCount
@@ -972,22 +996,25 @@ object TabloLegacy {
                       )
                   }
                 }
+                val resStreamName =
+                  if (channelDisplay == channelId.toString) s"legacy-channel-$channelId"
+                  else s"legacy-channel-$channelId ($channelDisplay)"
                 ResilientHlsSource(
                   streamFactory = () => streamFactory(),
-                  streamName = s"legacy-channel-$channelId"
+                  streamName = resStreamName
                 ).watchTermination() { (_, done) =>
                   done.onComplete {
                     case Success(_) =>
-                      log.info("[channel] stream end streamId={} channelId={}", streamId, channelId)
+                      log.info("[channel] stream end channel={} streamId={} channelId={}", channelDisplay, streamId, channelId)
                     case Failure(ex) =>
-                      log.warn("[channel] stream failed streamId={} channelId={}", streamId, channelId, ex)
+                      log.warn("[channel] stream failed channel={} streamId={} channelId={}", channelDisplay, streamId, channelId, ex)
                   }
                 }
               }
 
             onComplete(startWatchSession(checkTuners = true)) {
               case Success(data) =>
-                log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, data.playlist_url)
+                log.info("[channel] tuned channel={} streamId={} channelId={} playlistUrl={}", channelDisplay, streamId, channelId, data.playlist_url)
                 val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
                 complete(
                   HttpEntity.Chunked.fromData(
@@ -996,7 +1023,7 @@ object TabloLegacy {
                   )
                 )
               case Failure(ex) =>
-                log.warn("[channel] stream start failed streamId={} channelId={}", streamId, channelId, ex)
+                log.warn("[channel] stream start failed channel={} streamId={} channelId={}", channelDisplay, streamId, channelId, ex)
                 complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
             }
           }

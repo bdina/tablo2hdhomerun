@@ -174,7 +174,79 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
     val chanType = obj("type")
     val _ = hdVal shouldBe spray.json.JsNumber(1)
     val _ = guideNum shouldBe spray.json.JsString("25.1")
-    chanType shouldBe spray.json.JsString("antenna")
+    val _ = chanType shouldBe spray.json.JsString("antenna")
+    Tablo4thGen.Lineup.channelLabel("S20362_025_01") shouldBe "FOX 25.1"
+  }
+
+  "Lineup.formatChannelLabel" should "format OTA channels with network and major.minor (e.g. ABC 9.1, CBS 4.1)" in {
+    val abc = Tablo4thGen.Lineup.ChannelLineup(
+      identifier = "S20431_009_01",
+      name = "WMURDT1",
+      kind = "ota",
+      ota = Some(Tablo4thGen.Lineup.OtaChannelInfo(9, 1, Some("WMURDT1"), Some("ABC"), None, None, Some(true))),
+      ott = None
+    )
+    val cbs = Tablo4thGen.Lineup.ChannelLineup(
+      identifier = "S20431_004_01",
+      name = "WBZDT1",
+      kind = "ota",
+      ota = Some(Tablo4thGen.Lineup.OtaChannelInfo(4, 1, Some("WBZDT1"), Some("CBS"), None, None, Some(true))),
+      ott = None
+    )
+    val _ = Tablo4thGen.Lineup.formatChannelLabel(abc) shouldBe "ABC 9.1"
+    Tablo4thGen.Lineup.formatChannelLabel(cbs) shouldBe "CBS 4.1"
+  }
+
+  it should "fall back to callSign or channel name when network is absent" in {
+    val subWithCallSign = Tablo4thGen.Lineup.ChannelLineup(
+      identifier = "S20431_004_02",
+      name = "Start TV",
+      kind = "ota",
+      ota = Some(Tablo4thGen.Lineup.OtaChannelInfo(4, 2, Some("WBZDT2"), None, None, None, Some(true))),
+      ott = None
+    )
+    val ottWithoutNumber = Tablo4thGen.Lineup.ChannelLineup(
+      identifier = "ott_ion",
+      name = "ION HD",
+      kind = "ott",
+      ota = None,
+      ott = Some(Tablo4thGen.Lineup.OttChannelInfo(None, None, None, None, None, None, None))
+    )
+    val _ = Tablo4thGen.Lineup.formatChannelLabel(subWithCallSign) shouldBe "WBZDT2 4.2"
+    Tablo4thGen.Lineup.formatChannelLabel(ottWithoutNumber) shouldBe "ION HD"
+  }
+
+  it should "register labels from ChannelLineup and JSON fallback and build streamLabel with leaseId" in {
+    Tablo4thGen.Lineup.clearChannelLabels()
+    val _ = Tablo4thGen.Lineup.channelLabel("unknown_ch") shouldBe "unknown_ch"
+    val _ = Tablo4thGen.Lineup.streamLabel("unknown_ch", "ee905255") shouldBe "unknown_ch (ee905255)"
+
+    val cbs = Tablo4thGen.Lineup.ChannelLineup(
+      identifier = "S20431_004_01",
+      name = "WBZDT1",
+      kind = "ota",
+      ota = Some(Tablo4thGen.Lineup.OtaChannelInfo(4, 1, Some("WBZDT1"), Some("CBS"), None, None, Some(true))),
+      ott = None
+    )
+    val _ = Tablo4thGen.Lineup.registerChannel(cbs) shouldBe "CBS 4.1"
+    val _ = Tablo4thGen.Lineup.channelLabel("S20431_004_01") shouldBe "CBS 4.1"
+    val _ = Tablo4thGen.Lineup.streamLabel("S20431_004_01", "ee905255") shouldBe "CBS 4.1 (ee905255)"
+
+    val jsonChannels = Seq(
+      JsObject(
+        "GuideNumber" -> JsString("4.1"),
+        "GuideName" -> JsString("WBZDT1"),
+        "URL" -> JsString("http://127.0.0.1:8080/channel/S20431_004_01")
+      ),
+      JsObject(
+        "GuideNumber" -> JsString("9.1"),
+        "GuideName" -> JsString("ABC"),
+        "URL" -> JsString("http://127.0.0.1:8080/channel/S20431_009_01")
+      )
+    )
+    Tablo4thGen.Lineup.registerChannelsFromJson(jsonChannels)
+    val _ = Tablo4thGen.Lineup.channelLabel("S20431_004_01") shouldBe "CBS 4.1"
+    Tablo4thGen.Lineup.channelLabel("S20431_009_01") shouldBe "ABC 9.1"
   }
 }
 

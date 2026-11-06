@@ -120,7 +120,7 @@ object HlsBackend extends StreamBackend {
       val segmentRetryDelay = 500.millis
       val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
       def retryAfter(retriesLeft: Int, message: String, nextSource: => Source[ByteString, ?]): Source[ByteString, ?] = {
-        log.warn(s"[stream:hls] $message, retries left: $retriesLeft")
+        log.warn("[stream:hls] segment retry label={} reason={} retriesLeft={}", label, message, retriesLeft)
         Source
           .futureSource(after(segmentRetryDelay, scheduler)(Future.successful(nextSource)))
           .mapMaterializedValue(_ => pekko.NotUsed)
@@ -129,12 +129,12 @@ object HlsBackend extends StreamBackend {
       def attemptFetch(retriesLeft: Int): Source[ByteString, ?] = {
         if (byteRange.isDefined && HlsSegmentFetch.safeByteRange(byteRange).isEmpty) {
           val (offset, length) = byteRange.get
-          log.warn("[stream:hls] skipping segment with invalid byte range offset={} length={} url={}", offset, length, url)
+          log.warn("[stream:hls] skipping segment with invalid byte range label={} offset={} length={} url={}", label, offset, length, url)
           Source.empty[ByteString]
         } else {
           val request = HlsSegmentFetch.safeByteRange(byteRange) match {
             case Some((offset, length)) =>
-              log.debug("[stream:hls] segment range fetch offset={} length={} url={}", offset, length, url)
+              log.debug("[stream:hls] segment range fetch label={} offset={} length={} url={}", label, offset, length, url)
               HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
             case None =>
               HttpRequest(uri = url)
@@ -218,12 +218,13 @@ object HlsBackend extends StreamBackend {
           .map { case (fetchedState, bodyOpt) =>
             bodyOpt match {
               case None =>
-                log.debug("[stream:hls] playlist not-modified lastSeq={}", fetchedState.lastSeq)
+                log.debug("[stream:hls] playlist not-modified label={} lastSeq={}", label, fetchedState.lastSeq)
                 HlsPlaylistPoller.onPlaylistNotModified(fetchedState)
               case Some(body) =>
                 val playlist = M3U8.parse(body)
                 log.debug(
-                  "[stream:hls] playlist version={} target={} mediaSequence={} segments={} pollDelayMs={}"
+                  "[stream:hls] playlist label={} version={} target={} mediaSequence={} segments={} pollDelayMs={}"
+                , label
                 , playlist.version.map(_.toString).getOrElse("unknown")
                 , playlist.targetDuration
                 , playlist.mediaSequence
@@ -241,9 +242,9 @@ object HlsBackend extends StreamBackend {
             val outcome = HlsPlaylistPoller.onFetchError(state, hlsConfig.pollFailuresMax, ex)
             outcome match {
               case HlsPlaylistPoller.Emit(_, _) =>
-                log.warn("[stream:hls] poll failed retrying error={}", ex.getMessage)
+                log.warn("[stream:hls] poll failed retrying label={} error={}", label, ex.getMessage)
               case HlsPlaylistPoller.Fail(_) =>
-                log.warn("[stream:hls] poll failed error={}", ex.getMessage)
+                log.warn("[stream:hls] poll failed label={} error={}", label, ex.getMessage)
             }
             outcome
           }
@@ -251,17 +252,40 @@ object HlsBackend extends StreamBackend {
             HlsPlaylistPoller.resolveStallOutcome(
               rawOutcome
             , () => {
-                log.debug("[stream:hls] probing session liveness label={} stallPolls={}", label, state.stallPolls + 1)
+                log.info(
+                  "[stream:hls] playlist stalled, probing session liveness label={} stallPolls={} lastSeq={}"
+                , label
+                , state.stallPolls + 1
+                , state.lastSeq
+                )
                 checkSessionAlive()
               }
+            , state
+            , hlsConfig.pollFailuresMax
             )
           }
           .flatMap { outcome =>
             outcome match {
               case HlsPlaylistPoller.Fail(err) =>
-                log.warn("[stream:hls] retune reason={}", err.getMessage)
+                log.warn("[stream:hls] retune label={} reason={}", label, err.getMessage)
                 Future.failed(err)
               case HlsPlaylistPoller.Emit(next, segments) =>
+                if (next.fetchFailures > state.fetchFailures && segments.isEmpty) {
+                  log.info(
+                    "[stream:hls] playlist fetch retry ({}/{}) label={}"
+                  , next.fetchFailures
+                  , hlsConfig.pollFailuresMax
+                  , label
+                  )
+                }
+                if (segments.nonEmpty && state.stallPolls >= HlsPlaylistPoller.sessionProbeIntervalPolls) {
+                  log.info(
+                    "[stream:hls] playlist resumed after stall label={} stallPolls={} seq={}"
+                  , label
+                  , state.stallPolls
+                  , segments.head.sequence
+                  )
+                }
                 if (state.lastSeq > 0 && segments.nonEmpty && segments.head.sequence > state.lastSeq) {
                   needsRealign.set(true)
                   log.warn(
@@ -309,7 +333,7 @@ object HlsBackend extends StreamBackend {
       )
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
-          log.debug("[stream:hls] resolved media playlist={}", url)
+          log.debug("[stream:hls] resolved media playlist label={} url={}", label, url)
           Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s)(mat))
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)

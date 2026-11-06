@@ -45,10 +45,10 @@ object FFmpegBackend extends StreamBackend {
         .watchTermination() { (_, done) =>
           done.onComplete {
             case Success(_) =>
-              log.info("[stream:ffmpeg] complete pid={}", process.pid)
+              log.info("[stream:ffmpeg] complete label={} pid={}", label, process.pid)
               process.destroy()
             case Failure(ex) =>
-              log.warn("[stream:ffmpeg] failed pid={}", process.pid, ex)
+              log.warn("[stream:ffmpeg] failed label={} pid={}", label, process.pid, ex)
               process.destroy()
           }
         }
