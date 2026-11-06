@@ -49,12 +49,33 @@ object HlsPlaylistPoller {
   def resolveStallOutcome(
     outcome: Outcome
   , checkSessionAlive: () => Future[Boolean]
+  , state: PollState = PollState("", 0, 0, 0, 0, false)
+  , maxFetchFailures: Int = 4
   )(implicit ec: ExecutionContext): Future[Outcome] =
     outcome match {
       case emit @ Emit(next, segments) if segments.isEmpty && shouldProbeSession(next) =>
         checkSessionAlive().map { alive =>
           if (alive) emit
           else Fail(HlsBackend.HlsError.SessionEnded)
+        }
+      case fail @ Fail(HlsBackend.HlsError.PlaylistFetchError(status))
+          if status == org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound =>
+        checkSessionAlive().map { alive =>
+          val nextFailures = state.fetchFailures + 1
+          if (alive && nextFailures < maxFetchFailures) {
+            Emit(
+              state.copy(
+                fetchFailures = nextFailures
+              , stallPolls = state.stallPolls + 1
+              , lastAdvanced = false
+              )
+            , Seq.empty
+            )
+          } else if (!alive) {
+            Fail(HlsBackend.HlsError.SessionEnded)
+          } else {
+            fail
+          }
         }
       case other =>
         Future.successful(other)

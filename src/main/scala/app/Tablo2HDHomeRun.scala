@@ -106,13 +106,18 @@ object Tablo2HDHomeRun {
 
   def logStartupConfig(config: AppConfig): Unit =
     log.info(
-      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} mediaRoot={}"
+      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} idleGraceSec={} stallTimeoutSec={} tuneTimeoutSec={} recoveryTimeoutSec={} preRollKeepAlive={} mediaRoot={}"
     , appVersion
     , config.tablo.gen.envValue
     , config.tablo.ipHost
     , config.proxy.bindHost
     , config.proxy.bindPort
     , config.stream.backend.envValue
+    , config.proxy.idleGraceSec
+    , config.stream.resilient.stallTimeoutSec
+    , config.stream.resilient.tuneTimeoutSec
+    , config.stream.resilient.recoveryTimeoutSec
+    , config.proxy.enablePreRollKeepAlive
     , config.mediaRoot.getOrElse("none")
     )
 
@@ -154,9 +159,9 @@ object Tablo2HDHomeRun {
         }
         val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
         val sessionManager = context.spawn(
-          app.tuner.Tablo4thGen.Channel.SessionManager(
+          app.tuner.Tablo4thGen.Channel.SessionManager.withCancel(
             startRunner = { (channelId, self) =>
-              app.tuner.Tablo4thGen.Channel.SessionRunner.start(
+              app.tuner.Tablo4thGen.Channel.SessionRunner.startCancellable(
                 channelId = channelId
               , authContext = authContext
               , onCheckIn = (meta, hubSource, teardown, cachedHeaders) =>

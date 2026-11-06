@@ -83,6 +83,7 @@ object ResilientHlsSource {
           , audioPids = audioPidsSupplier()
           , audioStreamTypes = audioStreamTypesSupplier()
           , lockedSeqHeader = lockedSeqHeaderSupplier()
+          , label = streamName
           )
         )
         val prefix = resumePrefixSupplier().getOrElse(MPEGTS_DISCONTINUITY_PACKET)
@@ -322,6 +323,7 @@ object ResilientHlsSource {
               if (enableSlateVideo && elapsed >= slateThreshold.toNanos) {
                 if (!slateActive) {
                   slateActive = true
+                  log.warn(s"[$streamName] real data stalled for ${elapsed / 1000000}ms, emitting slate video")
                 }
                 push(out, slateLoop.nextChunk())
               } else {

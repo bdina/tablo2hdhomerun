@@ -552,5 +552,47 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val _ = probe3.expectMessageType[Response.Attached]
       teardown2.get() shouldBe 0
     }
+
+    "invoke cancel callback when all waiters release during Opening" in {
+      val cancelCalls = new AtomicInteger(0)
+      val runnerCalls = new AtomicInteger(0)
+      val mgr = testKit.spawn(
+        SessionManager.withCancel(
+          startRunner = { (_, _) =>
+            val _ = runnerCalls.incrementAndGet()
+            () => { val _ = cancelCalls.incrementAndGet() }
+          }
+        , totalTuners = 4
+        , idleGrace = 200.millis
+        )
+      )
+
+      val probeA = testKit.createTestProbe[Response.Acquire]()
+      val probeB = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-cancel", "client-a", probeA.ref)
+      mgr ! Request.Acquire("ch-cancel", "client-b", probeB.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        runnerCalls.get() shouldBe 1
+      }
+
+      // First waiter releases: 1 waiter remains, must NOT cancel runner yet
+      mgr ! Request.Release("ch-cancel", "client-a")
+      Thread.sleep(50)
+      val _ = cancelCalls.get() shouldBe 0
+
+      // Second (last) waiter releases: 0 waiters remain, must cancel runner immediately
+      mgr ! Request.Release("ch-cancel", "client-b")
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        cancelCalls.get() shouldBe 1
+      }
+
+      // Subsequent Acquire on the same channel starts a fresh runner
+      val probeC = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-cancel", "client-c", probeC.ref)
+      eventually(timeout(3.seconds), interval(50.millis)) {
+        runnerCalls.get() shouldBe 2
+      }
+    }
   }
 }

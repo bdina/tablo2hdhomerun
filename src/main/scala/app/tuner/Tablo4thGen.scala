@@ -55,6 +55,7 @@ object Tablo4thGen {
     case object NoDevicesFound extends Exception("No devices found in account") with Error
     case class SelectFailed(message: String) extends Exception(s"Select failed: $message") with Error
     case object NoAvailableTuners extends Exception("No available tuners") with Error
+    case object WatchCancelled extends Exception("Watch cancelled") with Error
     case class SessionFailed(message: String, status: Option[StatusCode] = None) extends Exception(message) with Error
     case class SessionDeleteFailed(message: String) extends Exception(message) with Error
     case object SessionTokenMissing extends Exception("Session token missing") with Error
@@ -282,6 +283,65 @@ object Tablo4thGen {
       implicit val channelLineupFormat: JsonFormat[ChannelLineup] = jsonFormat5(ChannelLineup.apply)
     }
 
+    private val channelLabels = new java.util.concurrent.ConcurrentHashMap[String, String]()
+
+    def formatChannelLabel(channel: ChannelLineup): String = {
+      val (major, minor, networkOpt, callSignOpt) = channel.kind match {
+        case "ota" =>
+          val ota = channel.ota.getOrElse(OtaChannelInfo(0, 0, None, None, None, None, None))
+          (ota.major, ota.minor, ota.network, ota.callSign)
+        case "ott" =>
+          val ott = channel.ott.getOrElse(OttChannelInfo(None, None, None, None, None, None, None))
+          (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.network, ott.callSign)
+        case _ =>
+          (0, 0, None, None)
+      }
+      val title = networkOpt.map(_.trim).filter(_.nonEmpty)
+        .orElse(callSignOpt.map(_.trim).filter(_.nonEmpty))
+        .orElse(Option(channel.name).map(_.trim).filter(_.nonEmpty))
+        .getOrElse(channel.identifier)
+      if (major > 0) s"$title $major.$minor" else title
+    }
+
+    def registerChannel(channel: ChannelLineup): String = {
+      val label = formatChannelLabel(channel)
+      if (channel.identifier != null && channel.identifier.nonEmpty && label.nonEmpty) {
+        val _ = channelLabels.put(channel.identifier, label)
+      }
+      label
+    }
+
+    def registerChannelsFromJson(channels: Seq[JsValue]): Unit =
+      channels.foreach { ch =>
+        val _ = Try {
+          val fields = ch.asJsObject.fields
+          val guideNumber = fields.get("GuideNumber").collect { case JsString(s) => s.trim }.filter(s => s.nonEmpty && s != "0.0")
+          val guideName = fields.get("GuideName").collect { case JsString(s) => s.trim }.filter(_.nonEmpty)
+          val channelIdOpt = fields.get("URL").collect { case JsString(u) =>
+            val clean = u.stripSuffix(".m3u8")
+            val idx = clean.lastIndexOf('/')
+            if (idx >= 0 && idx < clean.length - 1) clean.substring(idx + 1)
+            else clean
+          }.filter(_.nonEmpty)
+          for {
+            channelId <- channelIdOpt
+            name <- guideName
+          } {
+            val label = guideNumber.map(num => s"$name $num").getOrElse(name)
+            val _ = channelLabels.putIfAbsent(channelId, label)
+          }
+        }
+      }
+
+    def channelLabel(channelId: String): String =
+      Option(channelLabels.get(channelId)).filter(_.nonEmpty).getOrElse(channelId)
+
+    def streamLabel(channelId: String, leaseId: String): String =
+      s"${channelLabel(channelId)} ($leaseId)"
+
+    def clearChannelLabels(): Unit =
+      channelLabels.clear()
+
     def isHd(kind: String, minor: Int, name: String, callSign: Option[String]): Boolean = {
       val nameUpper = name.toUpperCase
       val callUpper = callSign.map(_.toUpperCase).getOrElse("")
@@ -300,6 +360,7 @@ object Tablo4thGen {
     }
 
     def channelToJsValue(channel: ChannelLineup, baseUrl: Uri): JsValue = {
+      val _ = registerChannel(channel)
       val (major, minor, callSign, source, isHdChannel) = channel.kind match {
         case "ota" =>
           val ota = channel.ota.getOrElse(OtaChannelInfo(0, 0, None, None, None, None, None))
@@ -403,6 +464,7 @@ object Tablo4thGen {
         Behaviors.receiveMessage {
           case Command.Store(channels) =>
             log.info("[lineup] store count={}", channels.size)
+            Lineup.registerChannelsFromJson(channels)
             if (channels.nonEmpty || cache._2.isEmpty) {
               cache = (1.day.fromNow, channels)
             } else {
@@ -763,6 +825,7 @@ object Tablo4thGen {
           } else {
             Unmarshal(response.entity).to[String].flatMap { body =>
               val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
+              channels.foreach(Lineup.registerChannel)
               log.info("[guide] scan channels count={}", channels.size)
 
               val guideFutures = channels.map { channel =>
@@ -964,6 +1027,69 @@ object Tablo4thGen {
       val keepaliveRetrySec: Int = 10
       val watchRetryMax: Int = 2
       val watchRetryDelaySec: Int = 1
+      val initialTuneTimeoutSec: Int = 60
+
+      def initialTuneTimeout(configuredRecoveryTimeoutSec: Int): FiniteDuration =
+        if (configuredRecoveryTimeoutSec > 0) configuredRecoveryTimeoutSec.seconds
+        else initialTuneTimeoutSec.seconds
+
+      def classifyWatch503(body: String): Tablo4thGen.Error = {
+        val trimmed = body.trim
+        val lower = trimmed.toLowerCase
+        if (lower.contains("tuner")) {
+          Tablo4thGen.Error.NoAvailableTuners
+        } else if (trimmed.nonEmpty) {
+          Tablo4thGen.Error.WatchFailed(s"watch 503: ${LogConfig.truncate(trimmed)}")
+        } else {
+          Tablo4thGen.Error.WatchFailed("watch 503: service unavailable (signal lock or tuner busy)")
+        }
+      }
+
+      def retryInitialTune(
+        tune: Int => Future[Session]
+      , onCancelRelease: Session => Unit
+      , isCancelled: () => Boolean
+      , scheduleRetry: (FiniteDuration, () => Unit) => pekko.actor.Cancellable
+      , onRetryTimer: pekko.actor.Cancellable => Unit
+      , timeoutBudget: FiniteDuration
+      , retryDelay: FiniteDuration = 2.seconds
+      , onAttemptFailed: (Int, Throwable, FiniteDuration) => Unit = (_, _, _) => ()
+      )(implicit ec: scala.concurrent.ExecutionContext): Future[Session] = {
+        val promise = scala.concurrent.Promise[Session]()
+        val deadline = System.nanoTime() + timeoutBudget.toNanos
+
+        def attempt(n: Int): Unit =
+          if (isCancelled()) {
+            val _ = promise.tryFailure(Tablo4thGen.Error.WatchCancelled)
+          } else {
+            tune(n).onComplete {
+              case Success(session) =>
+                if (isCancelled()) {
+                  onCancelRelease(session)
+                  val _ = promise.tryFailure(Tablo4thGen.Error.WatchCancelled)
+                } else {
+                  val _ = promise.trySuccess(session)
+                }
+              case Failure(ex) =>
+                if (isCancelled()) {
+                  val _ = promise.tryFailure(Tablo4thGen.Error.WatchCancelled)
+                } else if (timeoutBudget.toNanos > 0 && System.nanoTime() >= deadline) {
+                  val _ = promise.tryFailure(ex)
+                } else {
+                  onAttemptFailed(n, ex, retryDelay)
+                  val timer = scheduleRetry(retryDelay, () => attempt(n + 1))
+                  onRetryTimer(timer)
+                  if (isCancelled()) {
+                    val _ = timer.cancel()
+                    val _ = promise.tryFailure(Tablo4thGen.Error.WatchCancelled)
+                  }
+                }
+            }(ec)
+          }
+
+        attempt(1)
+        promise.future
+      }
 
       case class Session(
         token: Option[String]
@@ -1143,7 +1269,7 @@ object Tablo4thGen {
 
       private object SessionState {
         case class Waiter(clientId: String, replyTo: ActorRef[Response.Acquire])
-        case class Opening(waiters: Vector[Waiter]) extends SessionState
+        case class Opening(waiters: Vector[Waiter], cancel: () => Unit = () => ()) extends SessionState
 
         case class Live(
           meta: TabloSessionMeta
@@ -1170,11 +1296,45 @@ object Tablo4thGen {
         startRunner: (String, ActorRef[Request]) => Unit
       , totalTuners: Int = 4
       , idleGrace: FiniteDuration = defaultIdleGrace
+      ): Behavior[Request] =
+        withCancel(
+          startRunner = { (channelId, self) =>
+            startRunner(channelId, self)
+            () => ()
+          }
+        , totalTuners = totalTuners
+        , idleGrace = idleGrace
+        )
+
+      def withCancel(
+        startRunner: (String, ActorRef[Request]) => () => Unit
+      , totalTuners: Int = 4
+      , idleGrace: FiniteDuration = defaultIdleGrace
       ): Behavior[Request] = Behaviors.setup { context =>
         var sessions = Map.empty[String, SessionState]
         var tuners = totalTuners
 
         def occupied: Int = sessions.size
+
+        def openChannel(channelId: String, clientId: String, replyTo: ActorRef[Response.Acquire]): Unit = {
+          val waiter = SessionState.Waiter(clientId, replyTo)
+          sessions += channelId -> SessionState.Opening(Vector(waiter))
+          context.log.info(
+            "[session] opening channel={} channelId={} clientId={} occupied={}/{}"
+          , Lineup.channelLabel(channelId)
+          , channelId
+          , clientId
+          , occupied
+          , tuners
+          )
+          val cancel = startRunner(channelId, context.self)
+          sessions.get(channelId) match {
+            case Some(opening: SessionState.Opening) =>
+              sessions += channelId -> opening.copy(cancel = cancel)
+            case _ =>
+              ()
+          }
+        }
 
         def attachClient(
           channelId: String
@@ -1190,8 +1350,16 @@ object Tablo4thGen {
               val _ = cachedHeadersRef.compareAndSet(current, fallback)
             }
           }
-          context.log.info("[session] attach channelId={} clientId={} occupied={}", channelId, clientId, occupied)
-          val primed = MpegTsSync.primeClientSource(hubSource, cachedHeadersRef)
+          val chLabel = Lineup.channelLabel(channelId)
+          context.log.info(
+            "[session] attach channel={} channelId={} clientId={} occupied={}/{}"
+          , chLabel
+          , channelId
+          , clientId
+          , occupied
+          , tuners
+          )
+          val primed = MpegTsSync.primeClientSource(hubSource, cachedHeadersRef, label = chLabel)
           replyTo ! Response.Attached(primed)
         }
 
@@ -1205,10 +1373,13 @@ object Tablo4thGen {
           }
           val timer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId))
           context.log.info(
-            "[session] idle-grace channelId={} duration={}s token={}"
+            "[session] idle-grace channel={} channelId={} duration={}s token={} occupied={}/{}"
+          , Lineup.channelLabel(channelId)
           , channelId
           , idleGrace.toSeconds
           , LogConfig.truncate(live.meta.token)
+          , occupied
+          , tuners
           )
           val drainSwitch = {
             import pekko.stream.scaladsl.{Keep, Sink}
@@ -1234,7 +1405,13 @@ object Tablo4thGen {
           Try(teardown()).failed.foreach { ex =>
             context.log.warn("[session] teardown failed channelId={}", channelId, ex)
           }
-          context.log.info("[session] removed channelId={} occupied={}", channelId, occupied)
+          context.log.info(
+            "[session] removed channel={} channelId={} occupied={}/{}"
+          , Lineup.channelLabel(channelId)
+          , channelId
+          , occupied
+          , tuners
+          )
         }
 
         Behaviors.receiveMessage {
@@ -1262,29 +1439,43 @@ object Tablo4thGen {
                   oldestIdle match {
                     case Some((idleChannelId, idle)) =>
                       context.log.info(
-                        "[session] evicting oldest idle-grace channelId={} to accommodate new channelId={} clientId={}"
+                        "[session] evicting oldest idle-grace channel={} channelId={} to accommodate new channel={} channelId={} clientId={}"
+                      , Lineup.channelLabel(idleChannelId)
                       , idleChannelId
+                      , Lineup.channelLabel(channelId)
                       , channelId
                       , clientId
                       )
                       val _ = idle.graceTimer.cancel()
                       teardownAndRemove(idleChannelId, idle.teardown)
-                      sessions += channelId -> SessionState.Opening(Vector(SessionState.Waiter(clientId, replyTo)))
-                      context.log.info("[session] opening channelId={} clientId={} occupied={}", channelId, clientId, occupied)
-                      startRunner(channelId, context.self)
+                      openChannel(channelId, clientId, replyTo)
                     case None =>
+                      val activeChannels = sessions.keys.map(id => s"${Lineup.channelLabel(id)} [$id]").mkString(", ")
+                      context.log.warn(
+                        "[session] no-tuners rejecting channel={} channelId={} clientId={} occupied={}/{} active=[{}]"
+                      , Lineup.channelLabel(channelId)
+                      , channelId
+                      , clientId
+                      , occupied
+                      , tuners
+                      , activeChannels
+                      )
                       replyTo ! Response.Rejected(RejectReason.NoTuners)
                   }
                 } else {
-                  sessions += channelId -> SessionState.Opening(Vector(SessionState.Waiter(clientId, replyTo)))
-                  context.log.info("[session] opening channelId={} clientId={} occupied={}", channelId, clientId, occupied)
-                  startRunner(channelId, context.self)
+                  openChannel(channelId, clientId, replyTo)
                 }
                 Behaviors.same
 
-              case Some(SessionState.Opening(waiters)) =>
-                sessions += channelId -> SessionState.Opening(waiters :+ SessionState.Waiter(clientId, replyTo))
-                context.log.info("[session] enqueue channelId={} clientId={} waiters={}", channelId, clientId, waiters.size + 1)
+              case Some(opening @ SessionState.Opening(waiters, _)) =>
+                sessions += channelId -> opening.copy(waiters = waiters :+ SessionState.Waiter(clientId, replyTo))
+                context.log.info(
+                  "[session] enqueue channel={} channelId={} clientId={} waiters={}"
+                , Lineup.channelLabel(channelId)
+                , channelId
+                , clientId
+                , waiters.size + 1
+                )
                 Behaviors.same
 
               case Some(live: SessionState.Live) =>
@@ -1300,7 +1491,12 @@ object Tablo4thGen {
                 val _ = idle.graceTimer.cancel()
                 idle.drainSwitch.foreach(_.shutdown())
                 sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
-                context.log.info("[session] grace-cancel channelId={} clientId={}", channelId, clientId)
+                context.log.info(
+                  "[session] grace-cancel channel={} channelId={} clientId={}"
+                , Lineup.channelLabel(channelId)
+                , channelId
+                , clientId
+                )
                 attachClient(channelId, clientId, idle.hubSource, idle.cachedHeadersRef, replyTo)
                 Behaviors.same
             }
@@ -1311,18 +1507,37 @@ object Tablo4thGen {
                 val remaining = live.clientIds - clientId
                 if (remaining.nonEmpty) {
                   sessions += channelId -> live.copy(clientIds = remaining)
-                  context.log.info("[session] release channelId={} clientId={} clients={}", channelId, clientId, remaining.size)
+                  context.log.info(
+                    "[session] release channel={} channelId={} clientId={} clients={}"
+                  , Lineup.channelLabel(channelId)
+                  , channelId
+                  , clientId
+                  , remaining.size
+                  )
                 } else {
                   sessions += channelId -> enterIdleGrace(channelId, live.copy(clientIds = Set.empty))
                 }
-              case Some(SessionState.Opening(waiters)) =>
+              case Some(opening @ SessionState.Opening(waiters, cancel)) =>
                 val remaining = waiters.filterNot(_.clientId == clientId)
                 if (remaining.nonEmpty) {
-                  sessions += channelId -> SessionState.Opening(remaining)
-                  context.log.info("[session] opening release channelId={} clientId={} remainingWaiters={}", channelId, clientId, remaining.size)
+                  sessions += channelId -> opening.copy(waiters = remaining)
+                  context.log.info(
+                    "[session] opening release channel={} channelId={} clientId={} remainingWaiters={}"
+                  , Lineup.channelLabel(channelId)
+                  , channelId
+                  , clientId
+                  , remaining.size
+                  )
                 } else {
                   sessions -= channelId
-                  context.log.info("[session] opening cancelled channelId={} all waiters released", channelId)
+                  Try(cancel()).failed.foreach { ex =>
+                    context.log.warn("[session] opening cancel failed channelId={}", channelId, ex)
+                  }
+                  context.log.info(
+                    "[session] opening cancelled channel={} channelId={} all waiters released"
+                  , Lineup.channelLabel(channelId)
+                  , channelId
+                  )
                 }
               case Some(_: SessionState.IdleGrace) =>
                 context.log.debug("[session] release ignored idle-grace channelId={} clientId={}", channelId, clientId)
@@ -1339,10 +1554,18 @@ object Tablo4thGen {
               setCachedHeaders(channelId, headers)
             }
             sessions.get(channelId) match {
-              case Some(SessionState.Opening(waiters)) =>
+              case Some(SessionState.Opening(waiters, _)) =>
                 val clientIds = waiters.map(_.clientId).toSet
                 sessions += channelId -> SessionState.Live(meta, hubSource, teardown, clientIds, cachedHeadersRef)
-                context.log.info("[session] check-in channelId={} token={} clients={}", channelId, LogConfig.truncate(meta.token), clientIds.size)
+                context.log.info(
+                  "[session] check-in channel={} channelId={} token={} clients={} occupied={}/{}"
+                , Lineup.channelLabel(channelId)
+                , channelId
+                , LogConfig.truncate(meta.token)
+                , clientIds.size
+                , occupied
+                , tuners
+                )
                 waiters.foreach(w => attachClient(channelId, w.clientId, hubSource, cachedHeadersRef, w.replyTo))
               case other =>
                 context.log.warn("[session] check-in unexpected state channelId={} state={}", channelId, other)
@@ -1352,9 +1575,15 @@ object Tablo4thGen {
 
           case Command.AcquireFailed(channelId, cause) =>
             sessions.get(channelId) match {
-              case Some(SessionState.Opening(waiters)) =>
+              case Some(SessionState.Opening(waiters, _)) =>
                 sessions -= channelId
-                context.log.warn("[session] acquire-failed channelId={} waiters={}", channelId, waiters.size, cause)
+                context.log.warn(
+                  "[session] acquire-failed channel={} channelId={} waiters={}"
+                , Lineup.channelLabel(channelId)
+                , channelId
+                , waiters.size
+                , cause
+                )
                 rejectWaiters(waiters, RejectReason.Failed(cause))
               case _ =>
                 context.log.warn("[session] acquire-failed ignored channelId={}", channelId, cause)
@@ -1368,7 +1597,7 @@ object Tablo4thGen {
                 if (!headers.isEmpty) {
                   setCachedHeaders(channelId, headers)
                 }
-                context.log.info("[session] grace-expired channelId={}", channelId)
+                context.log.info("[session] grace-expired channel={} channelId={}", Lineup.channelLabel(channelId), channelId)
                 teardownAndRemove(channelId, idle.teardown)
               case _ =>
                 context.log.debug("[session] grace-expired ignored channelId={}", channelId)
@@ -1378,11 +1607,20 @@ object Tablo4thGen {
           case Command.UpstreamEnded(channelId, leaseId) =>
             sessions.get(channelId) match {
               case Some(live: SessionState.Live) if live.meta.leaseId == leaseId =>
-                context.log.warn("[session] upstream-ended channelId={} clients={}", channelId, live.clientIds.size)
+                context.log.warn(
+                  "[session] upstream-ended channel={} channelId={} clients={}"
+                , Lineup.channelLabel(channelId)
+                , channelId
+                , live.clientIds.size
+                )
                 teardownAndRemove(channelId, live.teardown)
               case Some(idle: SessionState.IdleGrace) if idle.meta.leaseId == leaseId =>
                 val _ = idle.graceTimer.cancel()
-                context.log.warn("[session] upstream-ended channelId={} during idle-grace", channelId)
+                context.log.warn(
+                  "[session] upstream-ended channel={} channelId={} during idle-grace"
+                , Lineup.channelLabel(channelId)
+                , channelId
+                )
                 teardownAndRemove(channelId, idle.teardown)
               case _ =>
                 context.log.debug("[session] upstream-ended ignored channelId={} leaseId={}", channelId, leaseId)
@@ -1400,49 +1638,87 @@ object Tablo4thGen {
       , onFailed: Throwable => Unit
       , onUpstreamEnded: String => Unit
       )(implicit system: ActorSystem[?]): Unit = {
+        val _ = startCancellable(channelId, authContext, onCheckIn, onFailed, onUpstreamEnded)
+      }
+
+      def startCancellable(
+        channelId: String
+      , authContext: Auth.AuthContext
+      , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit, AtomicReference[MpegTsSync.CachedHeaders]) => Unit
+      , onFailed: Throwable => Unit
+      , onUpstreamEnded: String => Unit
+      )(implicit system: ActorSystem[?]): () => Unit = {
         implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
         val HttpCtx = Http()
         import org.apache.pekko.actor.typed.scaladsl.adapter._
         val scheduler = system.toClassic.scheduler
         val leaseId = java.util.UUID.randomUUID.toString.take(8)
+        val channelDisplay = Lineup.channelLabel(channelId)
+        val streamLabel = Lineup.streamLabel(channelId, leaseId)
         val watchUri = authContext.deviceUrl.withPath(Uri.Path(s"/guide/channels/$channelId/watch")).withQuery(Uri.Query("lh" -> "1"))
         val deviceId = java.util.UUID.randomUUID.toString
         import Channel.Request.Watch4thGenRequest.JsonProtocol.watch4thGenRequestFormat
         import Channel.Response.JsonProtocol.watch4thGenResponseFormat
         import pekko.http.scaladsl.unmarshalling.Unmarshal
         val watchBody = Request.Watch4thGenRequest.forDevice(deviceId).toJson.compactPrint
+        val cancelled = new AtomicBoolean(false)
+        @volatile var retryTimer: Option[pekko.actor.Cancellable] = None
+        @volatile var activeTeardown: Option[() => Unit] = None
 
-        def watchChannel(attempt: Int = 0): Future[Response.Watch4thGenResponse] = {
-          val headers =
-            Hmac.signedHeaders("POST", s"/guide/channels/$channelId/watch", Some(watchBody), authContext)
-          val request = HttpRequest(
-            method = HttpMethods.POST
-          , uri = watchUri
-          , headers = headers.toList
-          , entity = HttpEntity(ContentTypes.`application/json`, watchBody)
-          )
-          HttpCtx.singleRequest(request).flatMap { response =>
-            log.debug("[channel] watch status={} leaseId={} attempt={}", response.status.intValue(), leaseId, attempt)
-            response.status match {
-              case StatusCodes.ServiceUnavailable if attempt < WatchSession.watchRetryMax =>
+        def watchChannel(attempt: Int = 0): Future[Response.Watch4thGenResponse] =
+          if (cancelled.get()) {
+            Future.failed(Error.WatchCancelled)
+          } else {
+            val headers =
+              Hmac.signedHeaders("POST", s"/guide/channels/$channelId/watch", Some(watchBody), authContext)
+            val request = HttpRequest(
+              method = HttpMethods.POST
+            , uri = watchUri
+            , headers = headers.toList
+            , entity = HttpEntity(ContentTypes.`application/json`, watchBody)
+            )
+            HttpCtx.singleRequest(request).flatMap { response =>
+              log.debug("[channel] watch status={} leaseId={} attempt={}", response.status.intValue(), leaseId, attempt)
+              if (cancelled.get()) {
                 val _ = response.entity.discardBytes()
-                log.debug("[channel] watch 503 retry leaseId={} attempt={}", leaseId, attempt + 1)
-                after(WatchSession.watchRetryDelaySec.seconds, scheduler)(watchChannel(attempt + 1))
-              case StatusCodes.ServiceUnavailable =>
-                val _ = response.entity.discardBytes()
-                Future.failed(Error.NoAvailableTuners)
-              case status if !status.isSuccess() =>
-                Unmarshal(response.entity).to[String].flatMap { body =>
-                  Future.failed(Tablo4thGen.Error.WatchFailed(s"watch failed: ${status.intValue()} ${LogConfig.truncate(body)}"))
+                Future.failed(Error.WatchCancelled)
+              } else {
+                response.status match {
+                  case StatusCodes.ServiceUnavailable if attempt < WatchSession.watchRetryMax =>
+                    Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
+                      log.debug(
+                        "[channel] watch 503 retry leaseId={} attempt={} body={}"
+                      , leaseId
+                      , attempt + 1
+                      , LogConfig.truncate(body.trim)
+                      )
+                      if (cancelled.get()) Future.failed(Error.WatchCancelled)
+                      else after(WatchSession.watchRetryDelaySec.seconds, scheduler)(watchChannel(attempt + 1))
+                    }
+                  case StatusCodes.ServiceUnavailable =>
+                    Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
+                      val err = WatchSession.classifyWatch503(body)
+                      log.warn(
+                        "[channel] watch 503 exhausted leaseId={} channelId={} body={}"
+                      , leaseId
+                      , channelId
+                      , LogConfig.truncate(body.trim)
+                      )
+                      Future.failed(err)
+                    }
+                  case status if !status.isSuccess() =>
+                    Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
+                      Future.failed(Tablo4thGen.Error.WatchFailed(s"watch failed: ${status.intValue()} ${LogConfig.truncate(body.trim)}"))
+                    }
+                  case _ =>
+                    Unmarshal(response.entity).to[String].map { body =>
+                      log.debug("[channel] watch body={} leaseId={}", LogConfig.truncate(body), leaseId)
+                      body.parseJson.convertTo[Response.Watch4thGenResponse]
+                    }
                 }
-              case _ =>
-                Unmarshal(response.entity).to[String].map { body =>
-                  log.debug("[channel] watch body={} leaseId={}", LogConfig.truncate(body), leaseId)
-                  body.parseJson.convertTo[Response.Watch4thGenResponse]
-                }
+              }
             }
           }
-        }
 
         def endSession(token: String): Future[Unit] = {
           val path = WatchSession.sessionPath(token)
@@ -1527,7 +1803,10 @@ object Tablo4thGen {
         , checkSessionAlive: () => Future[Boolean]
         ): Source[ByteString, ?] = {
           log.info(
-            "[4thgen-channel] stream session expires={} keepalive={} playlist={}"
+            "[4thgen-channel] stream session channel={} channelId={} leaseId={} expires={} keepalive={} playlist={}"
+          , channelDisplay
+          , channelId
+          , leaseId
           , session.expires.map(_.toString).getOrElse("unknown")
           , session.keepalive.map(_.toString).getOrElse("unknown")
           , LogConfig.truncate(session.playlistUrl)
@@ -1537,7 +1816,7 @@ object Tablo4thGen {
           StreamBackend()
             .stream(
               session.playlistUrl
-            , leaseId
+            , streamLabel
             , initialSeq = startingSeq
             , onSeqAdvanced = seq => lastSeqRef.set(seq)
             , liveEdgeCount = liveEdgeCount
@@ -1607,14 +1886,15 @@ object Tablo4thGen {
                     case WatchSession.ProbeOutcome.Alive(updated, changed) =>
                       currentSession.set(updated)
                       log.debug(
-                        "[channel] keepalive ok leaseId={} expires={} keepalive={}"
+                        "[channel] keepalive ok channel={} leaseId={} expires={} keepalive={}"
+                      , channelDisplay
                       , leaseId
                       , updated.expires.map(_.toString).getOrElse("unknown")
                       , updated.keepalive.map(_.toString).getOrElse("unknown")
                       )
                       scheduleKeepalive()
                       if (changed) {
-                        log.info("[channel] playlist url changed leaseId={}, restarting hls", leaseId)
+                        log.info("[channel] playlist url changed channel={} leaseId={}, restarting hls", channelDisplay, leaseId)
                         playlistRollover.set(true)
                         lastSeqRef.set(0)
                         streamKillSwitch.get().foreach(_.shutdown())
@@ -1623,25 +1903,27 @@ object Tablo4thGen {
 
                     case WatchSession.ProbeOutcome.TransientFailure =>
                       log.warn(
-                        "[channel] keepalive transient failure ({}/{}) leaseId={}"
+                        "[channel] keepalive transient failure ({}/{}) channel={} leaseId={}"
                       , nextFailures
                       , maxProbeFailures
+                      , channelDisplay
                       , leaseId
                       )
                       scheduleKeepaliveRetry()
                       Future.successful(true)
 
                     case WatchSession.ProbeOutcome.ClosedByTablo =>
-                      log.warn("[channel] session closed by tablo leaseId={}, triggering cold retune", leaseId)
+                      log.warn("[channel] session closed by tablo channel={} leaseId={}, triggering cold retune", channelDisplay, leaseId)
                       sessionClosedByTablo.set(true)
                       streamKillSwitch.get().foreach(_.abort(app.stream.HlsBackend.HlsError.SessionEnded))
                       Future.successful(false)
 
                     case WatchSession.ProbeOutcome.ProbeExhausted =>
                       log.warn(
-                        "[channel] keepalive failures exhausted ({}/{}) leaseId={}, triggering cold retune"
+                        "[channel] keepalive failures exhausted ({}/{}) channel={} leaseId={}, triggering cold retune"
                       , nextFailures
                       , maxProbeFailures
+                      , channelDisplay
                       , leaseId
                       )
                       streamKillSwitch.get().foreach(_.abort(app.stream.HlsBackend.HlsError.SessionEnded))
@@ -1668,9 +1950,11 @@ object Tablo4thGen {
             } else {
               val closedByTablo = sessionClosedByTablo.getAndSet(false)
               log.info(
-                "[4thgen-channel] cold recovery retune attempt={} channelId={} closedByTablo={}"
+                "[4thgen-channel] cold recovery retune attempt={} channel={} channelId={} leaseId={} closedByTablo={}"
               , attempt
+              , channelDisplay
               , channelId
+              , leaseId
               , closedByTablo
               )
               keepaliveTask.foreach(_.cancel())
@@ -1698,10 +1982,14 @@ object Tablo4thGen {
             val _ = headersReadyPromise.trySuccess(())
           }
 
+          val resStreamName =
+            if (channelDisplay == channelId) s"4thgen-channel-$channelId"
+            else s"4thgen-channel-$channelId ($channelDisplay)"
+
           val ((outerKillSwitch, upstreamDone), hubSource) =
             ResilientHlsSource(
               streamFactory = () => streamFactory()
-            , streamName = s"4thgen-channel-$channelId"
+            , streamName = resStreamName
             , resumePrefixSupplier = () => Some(cachedHeadersRef.get().syncPrefix)
             , videoPidSupplier = () => cachedHeadersRef.get().videoPid
             , videoStreamTypeSupplier = () => cachedHeadersRef.get().videoStreamType
@@ -1709,12 +1997,16 @@ object Tablo4thGen {
             , audioStreamTypesSupplier = () => cachedHeadersRef.get().audioStreamTypes
             , lockedSeqHeaderSupplier = () => cachedHeadersRef.get().lockedSeqHeader
             )
-              .via(MpegTsSync.cacheFlow(cachedHeadersRef, updated => {
-                SessionManager.setCachedHeaders(channelId, updated)
-                if (updated.pat.isDefined && updated.pmt.isDefined) {
-                  val _ = headersReadyPromise.trySuccess(())
+              .via(MpegTsSync.cacheFlow(
+                cachedHeadersRef
+              , updated => {
+                  SessionManager.setCachedHeaders(channelId, updated)
+                  if (updated.pat.isDefined && updated.pmt.isDefined) {
+                    val _ = headersReadyPromise.trySuccess(())
+                  }
                 }
-              }))
+              , label = streamLabel
+              ))
               .viaMat(KillSwitches.single)(Keep.right)
               .watchTermination()(Keep.both)
               .toMat(BroadcastHub.sink[ByteString](SessionManager.BroadcastHubBufferSize))(Keep.both)
@@ -1722,7 +2014,8 @@ object Tablo4thGen {
 
           scheduleKeepalive()
           log.info(
-            "[channel] tuned leaseId={} channelId={} expires={} keepalive={}"
+            "[channel] tuned channel={} leaseId={} channelId={} expires={} keepalive={}"
+          , channelDisplay
           , leaseId
           , channelId
           , firstSession.expires.map(_.toString).getOrElse("unknown")
@@ -1742,8 +2035,12 @@ object Tablo4thGen {
               cancelKeepalive()
               outerKillSwitch.shutdown()
               endSessionIfNeeded(currentSession.get().token, None)
-              log.info("[channel] teardown leaseId={} channelId={}", leaseId, channelId)
+              log.info("[channel] teardown channel={} leaseId={} channelId={}", channelDisplay, leaseId, channelId)
             }
+          }
+          activeTeardown = Some(teardown)
+          if (cancelled.get()) {
+            teardown()
           }
 
           val _ = scheduler.scheduleOnce(1500.millis) {
@@ -1768,7 +2065,7 @@ object Tablo4thGen {
           upstreamDone.onComplete { result =>
             lifecycleLock.synchronized {
               if (!tornDown.get()) {
-                log.warn("[channel] upstream ended leaseId={} channelId={} result={}", leaseId, channelId, result)
+                log.warn("[channel] upstream ended channel={} leaseId={} channelId={} result={}", channelDisplay, leaseId, channelId, result)
                 teardown()
                 if (checkedIn) {
                   onUpstreamEnded(leaseId)
@@ -1785,47 +2082,52 @@ object Tablo4thGen {
           }(ec)
         }
 
-        val recoveryTimeout = Option(AppContext.config).map(_.stream.resilient.recoveryTimeoutSec.seconds).getOrElse(0.seconds)
-        val deadline = System.nanoTime() + recoveryTimeout.toNanos
+        val configuredRecoverySec = Option(AppContext.config).map(_.stream.resilient.recoveryTimeoutSec).getOrElse(0)
+        val initialTuneBudget = WatchSession.initialTuneTimeout(configuredRecoverySec)
         val retryDelay = 2.seconds
 
-        def attemptTune(attempt: Int): Unit = {
-          if (attempt == 1) {
-            log.info("[4thgen-channel] guide/channels/{}/watch (POST) - {}", channelId, watchUri)
-          } else {
-            log.info("[4thgen-channel] guide/channels/{}/watch (POST) attempt={} - {}", channelId, attempt, watchUri)
-          }
-          watchChannel().onComplete {
-            case Failure(ex) =>
-              handleTuneFailure(attempt, ex)
-            case Success(data) =>
-              WatchSession.fromResponse(data) match {
-                case Left(message) =>
-                  handleTuneFailure(attempt, Tablo4thGen.Error.WatchFailed(message))
-                case Right(firstSession) =>
-                  firstSession.token match {
-                    case None =>
-                      handleTuneFailure(attempt, Tablo4thGen.Error.SessionTokenMissing)
-                    case Some(token) =>
-                      onTuneSuccess(firstSession, token)
-                  }
-              }
-          }(ec)
-        }
-
-        def handleTuneFailure(attempt: Int, ex: Throwable): Unit = {
-          if (recoveryTimeout.toNanos > 0 && System.nanoTime() >= deadline) {
-            log.warn("[4thgen-channel] initial tune failed after {}s recovery timeout channelId={}", recoveryTimeout.toSeconds, channelId, ex)
-            onFailed(ex)
-          } else {
-            log.info("[4thgen-channel] initial tune attempt={} failed ({}), retrying in {}s...", attempt, ex.getMessage, retryDelay.toSeconds)
-            val _ = scheduler.scheduleOnce(retryDelay) {
-              attemptTune(attempt + 1)
+        val tuneFuture = WatchSession.retryInitialTune(
+          tune = { attempt =>
+            if (attempt == 1) {
+              log.info("[4thgen-channel] guide/channels/{}/watch (POST) channel={} leaseId={} - {}", channelId, channelDisplay, leaseId, watchUri)
+            } else {
+              log.info("[4thgen-channel] guide/channels/{}/watch (POST) channel={} leaseId={} attempt={} - {}", channelId, channelDisplay, leaseId, attempt, watchUri)
+            }
+            retuneWatchSession().flatMap { session =>
+              if (session.token.isDefined) Future.successful(session)
+              else Future.failed(Tablo4thGen.Error.SessionTokenMissing)
             }(ec)
           }
-        }
+        , onCancelRelease = session => endSessionIfNeeded(session.token, None)
+        , isCancelled = () => cancelled.get()
+        , scheduleRetry = (delay, task) => scheduler.scheduleOnce(delay)(task())(ec)
+        , onRetryTimer = timer => retryTimer = Some(timer)
+        , timeoutBudget = initialTuneBudget
+        , retryDelay = retryDelay
+        , onAttemptFailed = (attempt, ex, delay) =>
+            log.info("[4thgen-channel] initial tune channel={} leaseId={} attempt={} failed ({}), retrying in {}s...", channelDisplay, leaseId, attempt, ex.getMessage, delay.toSeconds)
+        )(ec)
 
-        attemptTune(1)
+        tuneFuture.onComplete {
+          case Success(firstSession) =>
+            firstSession.token.foreach(token => onTuneSuccess(firstSession, token))
+          case Failure(Error.WatchCancelled) =>
+            ()
+          case Failure(ex) =>
+            if (!cancelled.get()) {
+              log.warn("[4thgen-channel] initial tune failed after {}s opening timeout channel={} channelId={} leaseId={}", initialTuneBudget.toSeconds, channelDisplay, channelId, leaseId, ex)
+              onFailed(ex)
+            }
+        }(ec)
+
+        () => {
+          if (cancelled.compareAndSet(false, true)) {
+            retryTimer.foreach(_.cancel())
+            retryTimer = None
+            activeTeardown.foreach(_.apply())
+            log.info("[4thgen-channel] tune cancelled channel={} leaseId={} channelId={}", channelDisplay, leaseId, channelId)
+          }
+        }
       }
     }
 
@@ -1938,6 +2240,7 @@ object Tablo4thGen {
 
       def streamChannel(channelId: String): pekko.http.scaladsl.server.Route = {
         val clientId = java.util.UUID.randomUUID.toString
+        val channelDisplay = Lineup.channelLabel(channelId)
         val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
         val contentType = pekko.http.scaladsl.model.ContentType(`video/mp2t`)
 
@@ -1970,7 +2273,8 @@ object Tablo4thGen {
                   case Failure(ex) => s"failed: ${ex.getMessage}"
                 }
                 log.info(
-                  "[channel] client disconnected channelId={} clientId={} durationMs={} bytes={} outcome={}"
+                  "[channel] client disconnected channel={} channelId={} clientId={} durationMs={} bytes={} outcome={}"
+                , Lineup.channelLabel(channelId)
                 , channelId
                 , clientId
                 , durationMs
@@ -1987,19 +2291,19 @@ object Tablo4thGen {
         if (!preRollEnabled) {
           onComplete(acquireFut) {
             case Success(SessionManager.Response.Attached(source)) =>
-              log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
+              log.info("[channel] attached channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
               val tracked = trackClientStream(channelId, clientId, source)
               respondWithHeaders(streamingHeaders) {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }
             case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners)) =>
-              log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+              log.info("[channel] no available tuners channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
               complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
             case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex))) =>
-              log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+              log.warn("[channel] acquire failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
               complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
             case Failure(ex) =>
-              log.warn("[channel] acquire ask failed channelId={} clientId={}", channelId, clientId, ex)
+              log.warn("[channel] acquire ask failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
               complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
           }
         } else {
@@ -2011,28 +2315,28 @@ object Tablo4thGen {
 
           onComplete(initialDecision) {
             case Success(Some(SessionManager.Response.Attached(source))) =>
-              log.info("[channel] fast-attached channelId={} clientId={}", channelId, clientId)
+              log.info("[channel] fast-attached channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
               val tracked = trackClientStream(channelId, clientId, source)
               respondWithHeaders(streamingHeaders) {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }
             case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners))) =>
-              log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+              log.info("[channel] no available tuners channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
               complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
             case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)))) =>
-              log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+              log.warn("[channel] acquire failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
               complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
             case Success(None) =>
-              log.info("[channel] pre-roll keepalive active channelId={} clientId={}", channelId, clientId)
+              log.info("[channel] pre-roll keepalive active channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
               val realSourceFut: Future[Source[ByteString, NotUsed]] = acquireFut.flatMap {
                 case SessionManager.Response.Attached(source) =>
-                  log.info("[channel] attached channelId={} clientId={}", channelId, clientId)
+                  log.info("[channel] attached channel={} channelId={} clientId={}", Lineup.channelLabel(channelId), channelId, clientId)
                   Future.successful(source)
                 case SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners) =>
-                  log.info("[channel] no available tuners channelId={} clientId={}", channelId, clientId)
+                  log.info("[channel] no available tuners channel={} channelId={} clientId={}", Lineup.channelLabel(channelId), channelId, clientId)
                   Future.failed(new RuntimeException("No available tuners"))
                 case SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)) =>
-                  log.warn("[channel] acquire failed channelId={} clientId={}", channelId, clientId, ex)
+                  log.warn("[channel] acquire failed channel={} channelId={} clientId={}", Lineup.channelLabel(channelId), channelId, clientId, ex)
                   Future.failed(ex)
               }(ec)
 
@@ -2045,7 +2349,7 @@ object Tablo4thGen {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }
             case Failure(ex) =>
-              log.warn("[channel] initialDecision failed channelId={} clientId={}", channelId, clientId, ex)
+              log.warn("[channel] initialDecision failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
               complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
           }
         }
