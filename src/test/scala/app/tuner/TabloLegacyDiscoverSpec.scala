@@ -64,26 +64,4 @@ class TabloLegacyDiscoverSpec extends AnyFlatSpec with Matchers {
     val _ = proxied.authority.host.address().shouldBe("10.0.0.2")
     proxied.toString.should(include("9090"))
   }
-
-  "TabloLegacy.Lineup" should "format and register human-readable channel labels" in {
-    val chObj = TabloLegacy.Lineup.ChannelObject(
-      object_id = 12345,
-      path = "/guide/channels/12345",
-      channel = TabloLegacy.Lineup.ChannelInfo(
-        call_sign = "WMUR-DT",
-        call_sign_src = "WMUR-DT",
-        major = 9,
-        minor = 1,
-        network = Some("ABC"),
-        resolution = "hd_1080",
-        favourite = true,
-        tms_station_id = "100",
-        tms_affiliate_id = "200",
-        source = "antenna"
-      )
-    )
-    val _ = TabloLegacy.Lineup.registerChannel(chObj) shouldBe "ABC 9.1"
-    val _ = TabloLegacy.Lineup.channelLabel("12345") shouldBe "ABC 9.1"
-    TabloLegacy.Lineup.streamLabel("12345", "a1b2c3d4") shouldBe "ABC 9.1 (a1b2c3d4)"
-  }
 }

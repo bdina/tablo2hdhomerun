@@ -66,7 +66,6 @@ object HlsBackend extends StreamBackend {
     val http = Http(system.toClassic)
     val bytesOut = new java.util.concurrent.atomic.AtomicLong(0L)
     val lastSeqOut = new java.util.concurrent.atomic.AtomicInteger(initialSeq)
-    val needsRealign = new java.util.concurrent.atomic.AtomicBoolean(false)
     val hlsConfig = AppContext.config.stream.hls
     val heartbeatSec = hlsConfig.heartbeatSec
     var heartbeatTask: Option[org.apache.pekko.actor.Cancellable] = None
@@ -287,7 +286,6 @@ object HlsBackend extends StreamBackend {
                   )
                 }
                 if (state.lastSeq > 0 && segments.nonEmpty && segments.head.sequence > state.lastSeq) {
-                  needsRealign.set(true)
                   log.warn(
                     "[stream:hls] sequence gap detected label={} expected={} received={} gap={}"
                   , label
@@ -342,7 +340,6 @@ object HlsBackend extends StreamBackend {
               val gapMs = (segStartNanos - lastArrivalNanos.getAndSet(segStartNanos)) / 1000000L
               val segBytes = new java.util.concurrent.atomic.AtomicLong(0L)
               val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
-              val _ = needsRealign.compareAndSet(true, false)
 
               val countedSource = fetchSegmentSource(seg.url, seg.byteRange)
                 .map { chunk =>
@@ -369,7 +366,6 @@ object HlsBackend extends StreamBackend {
                       )
                       expectedLengthOpt.foreach { expected =>
                         if (totalSegBytes < expected) {
-                          needsRealign.set(true)
                           log.warn(
                             "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
                           , label
@@ -382,7 +378,6 @@ object HlsBackend extends StreamBackend {
                       }
                       onSeqAdvanced(seg.sequence + 1)
                     case Failure(ex) =>
-                      needsRealign.set(true)
                       log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)
                   }(ec)
                 }

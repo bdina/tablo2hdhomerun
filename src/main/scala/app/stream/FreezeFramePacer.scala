@@ -568,9 +568,10 @@ object FreezeFramePacer {
     var offset = 0
     val totalPesLen = pesBytes.length
     var isFirst = true
+    val pkt = new Array[Byte](PacketSize)
 
     while (offset < totalPesLen) {
-      val pkt = Array.fill[Byte](PacketSize)(0xFF.toByte)
+      Arrays.fill(pkt, 0xFF.toByte)
       val cc = nextCc() & 0x0F
       pkt(0) = 0x47.toByte
       val pusiBit = if (isFirst) 0x40 else 0x00
@@ -619,7 +620,7 @@ object FreezeFramePacer {
           }
         }
       }
-      val _ = b ++= ByteString.fromArray(pkt)
+      val _ = b.putBytes(pkt, 0, PacketSize)
       isFirst = false
     }
     b.result()

@@ -1820,5 +1820,35 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = out(2).slice(4, 8) shouldBe ByteString(0x00, 0x00, 0x01, 0x41)
       out(2).slice(8, 12) shouldBe ByteString(0x00, 0x00, 0x01, 0x44)
     }
+
+    "cacheFlow should skip redundant CachedHeaders allocations when PAT/PMT repeat with only CC changes" in {
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val updatesCount = new java.util.concurrent.atomic.AtomicInteger(0)
+
+      def withCc(pkt: ByteString, cc: Int): ByteString = {
+        val arr = pkt.toArray
+        arr(3) = ((arr(3) & 0xF0) | (cc & 0x0F)).toByte
+        ByteString.fromArray(arr)
+      }
+
+      val pat0 = withCc(buildPatPacket(0x0100), 0)
+      val pmt0 = withCc(buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0101, videoPid = 0x0101), 0)
+      val pat1 = withCc(pat0, 1)
+      val pmt1 = withCc(pmt0, 1)
+      val pat2 = withCc(pat0, 2)
+      val pmt2 = withCc(pmt0, 2)
+
+      val chunks = List(pat0 ++ pmt0, pat1 ++ pmt1, pat2 ++ pmt2)
+      val out = Source(chunks)
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, _ => { val _ = updatesCount.incrementAndGet() }))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 3
+      val _ = updatesCount.get() shouldBe 1
+      val _ = (out(0)(3) & 0x0F) shouldBe 0
+      val _ = (out(1)(3) & 0x0F) shouldBe 1
+      (out(2)(3) & 0x0F) shouldBe 2
+    }
   }
 }
