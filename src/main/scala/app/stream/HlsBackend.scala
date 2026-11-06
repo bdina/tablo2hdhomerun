@@ -318,47 +318,45 @@ object HlsBackend extends StreamBackend {
               val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
 
               val countedSource = fetchSegmentSource(seg.url, seg.byteRange)
-                .via(MpegTsSync.alignPackets)
                 .map { chunk =>
                   val _ = segBytes.addAndGet(chunk.size)
+                  chunk
+                }
+                .via(MpegTsSync.alignPackets)
+                .map { chunk =>
                   val _ = bytesOut.addAndGet(chunk.size)
                   chunk
                 }
                 .watchTermination() { (_, done) =>
                   done.onComplete {
-                    case Success(_) => ()
+                    case Success(_) =>
+                      val totalSegBytes = segBytes.get()
+                      lastSeqOut.set(seg.sequence + 1)
+                      log.info(
+                        "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
+                      , label
+                      , seg.sequence
+                      , seg.duration
+                      , totalSegBytes
+                      , gapMs
+                      )
+                      expectedLengthOpt.foreach { expected =>
+                        if (totalSegBytes < expected) {
+                          log.warn(
+                            "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
+                          , label
+                          , seg.sequence
+                          , expected
+                          , totalSegBytes
+                          , LogConfig.truncate(seg.url)
+                          )
+                        }
+                      }
+                      onSeqAdvanced(seg.sequence + 1)
                     case Failure(ex) =>
                       log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)
                   }(ec)
                 }
-                .concat(
-                  Source.lazySource { () =>
-                    val totalSegBytes = segBytes.get()
-                    lastSeqOut.set(seg.sequence + 1)
-                    log.info(
-                      "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
-                    , label
-                    , seg.sequence
-                    , seg.duration
-                    , totalSegBytes
-                    , gapMs
-                    )
-                    expectedLengthOpt.foreach { expected =>
-                      if (totalSegBytes < expected) {
-                        log.warn(
-                          "[stream:hls] segment short read label={} seq={} expected={} received={} url={}"
-                        , label
-                        , seg.sequence
-                        , expected
-                        , totalSegBytes
-                        , LogConfig.truncate(seg.url)
-                        )
-                      }
-                    }
-                    onSeqAdvanced(seg.sequence + 1)
-                    Source.empty[ByteString]
-                  }.mapMaterializedValue(_ => pekko.NotUsed)
-                )
 
               countedSource
             }

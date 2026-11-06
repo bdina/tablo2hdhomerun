@@ -1764,5 +1764,61 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       // 6 live single-packet video frames were offered; deficit catch-up must have synthesized additional video packets
       videoPacketCount should be > 6
     }
+
+    "cacheFlow should not let mid-PES 0xB3 bytes lower maxSliceRow or drop bottom 1080i slices (rows 65-68)" in {
+      val videoPid = 0x0101
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(videoPid = Some(videoPid), videoStreamType = Some(0x02))
+      )
+
+      // 1080i keyframe packet (PUSI = 1, maxSliceRow = 68)
+      val keyframe1 = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+
+      // Mid-PES packet (PUSI = 0) containing a false 00 00 01 B3 with 720p dimensions (1280x720 -> row 45)
+      val falseMidPesSeqPkt = {
+        val arr = Array.fill[Byte](188)(0xAA.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = ((videoPid >> 8) & 0x1F).toByte // PUSI = 0
+        arr(2) = (videoPid & 0xFF).toByte
+        arr(3) = 0x12.toByte
+        arr(4) = 0x00.toByte
+        arr(5) = 0x00.toByte
+        arr(6) = 0x01.toByte
+        arr(7) = 0xB3.toByte
+        arr(8) = 0x50.toByte // 1280
+        arr(9) = 0x02.toByte
+        arr(10) = 0xD0.toByte // 720 (45 rows)
+        ByteString(arr)
+      }
+
+      // Mid-PES packet (PUSI = 0) containing bottom 1080i slices at rows 65 (0x41) and 68 (0x44)
+      val bottomSlicesPkt = {
+        val arr = Array.fill[Byte](188)(0xAA.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = ((videoPid >> 8) & 0x1F).toByte // PUSI = 0
+        arr(2) = (videoPid & 0xFF).toByte
+        arr(3) = 0x13.toByte
+        arr(4) = 0x00.toByte
+        arr(5) = 0x00.toByte
+        arr(6) = 0x01.toByte
+        arr(7) = 0x41.toByte // row 65
+        arr(8) = 0x00.toByte
+        arr(9) = 0x00.toByte
+        arr(10) = 0x01.toByte
+        arr(11) = 0x44.toByte // row 68
+        ByteString(arr)
+      }
+
+      val out = Source(List(keyframe1, falseMidPesSeqPkt, bottomSlicesPkt))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 3
+      // Bottom slices packet must NOT be dropped as null packet or have rows 65/68 clamped
+      val _ = out(2) should not be MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(2).slice(4, 8) shouldBe ByteString(0x00, 0x00, 0x01, 0x41)
+      out(2).slice(8, 12) shouldBe ByteString(0x00, 0x00, 0x01, 0x44)
+    }
   }
 }

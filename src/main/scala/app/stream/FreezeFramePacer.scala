@@ -151,7 +151,8 @@ object FreezeFramePacer {
 
   def parseMpeg2SequenceHeader(arr: Array[Byte], offset: Int, len: Int): Option[(ByteString, Int)] = {
     if (offset < 0 || len < 12 || offset + len > arr.length) return None
-    val end = offset + len - 12
+    val limit = offset + len
+    val end = limit - 12
     var i = offset
     var result: Option[(ByteString, Int)] = None
     while (i <= end && result.isEmpty) {
@@ -162,9 +163,37 @@ object FreezeFramePacer {
         val horizontalSize = ((arr(i + 4) & 0xFF) << 4) | ((arr(i + 5) & 0xF0) >> 4)
         val verticalSize = ((arr(i + 5) & 0x0F) << 8) | (arr(i + 6) & 0xFF)
         if (horizontalSize >= 160 && horizontalSize <= 1920 &&
-            verticalSize >= 120 && verticalSize <= 1088) {
+            verticalSize >= 120 && verticalSize <= 1088 &&
+            horizontalSize % 16 == 0 &&
+            (verticalSize % 16 == 0 || verticalSize == 1080)) {
           val maxSliceRow = math.max(1, math.min(175, (verticalSize + 15) / 16))
-          result = Some((ByteString.fromArray(arr, i, 12), maxSliceRow))
+          val extCandidateOffsets = Array(i + 12, i + 76, i + 140)
+          var extOffset = -1
+          var k = 0
+          while (k < extCandidateOffsets.length && extOffset < 0) {
+            val cand = extCandidateOffsets(k)
+            if (cand + 10 <= limit &&
+                arr(cand) == 0x00.toByte &&
+                arr(cand + 1) == 0x00.toByte &&
+                arr(cand + 2) == 0x01.toByte &&
+                (arr(cand + 3) & 0xFF) == 0xB5 &&
+                (arr(cand + 4) & 0xF0) == 0x10) {
+              extOffset = cand
+            }
+            k += 1
+          }
+          val hdrBytes = if (extOffset == i + 12) {
+            ByteString.fromArray(arr, i, 22)
+          } else if (extOffset > i + 12) {
+            val combined = new Array[Byte](22)
+            System.arraycopy(arr, i, combined, 0, 12)
+            combined(11) = (combined(11) & 0xFC).toByte
+            System.arraycopy(arr, extOffset, combined, 12, 10)
+            ByteString.fromArray(combined)
+          } else {
+            ByteString.fromArray(arr, i, 12)
+          }
+          result = Some((hdrBytes, maxSliceRow))
         }
       }
       i += 1
@@ -194,8 +223,9 @@ object FreezeFramePacer {
   }
 
   def synthesizeSequenceHeaderPacket(videoPid: Int, seqHeader: ByteString, cc: Int = 0): ByteString = {
-    val seqBytes = if (seqHeader.length >= 12) seqHeader.take(12).toArray else seqHeader.toArray
     val pesHdr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte, 0x00.toByte, 0x80.toByte, 0x00.toByte, 0x00.toByte)
+    val maxSeqLen = PacketSize - 6 - pesHdr.length
+    val seqBytes = if (seqHeader.length > maxSeqLen) seqHeader.take(maxSeqLen).toArray else seqHeader.toArray
     val totalPayload = pesHdr.length + seqBytes.length
     val pkt = Array.fill[Byte](PacketSize)(0xFF.toByte)
     pkt(0) = 0x47.toByte
@@ -227,10 +257,19 @@ object FreezeFramePacer {
           arr(i + 1) == 0x00.toByte &&
           arr(i + 2) == 0x01.toByte) {
         val code = arr(i + 3) & 0xFF
-        if (code == 0xB3) {
+        if (code >= 0xE0 && code <= 0xEF) {
+          if (i + 9 <= end) {
+            val pesHdrDataLen = arr(i + 8) & 0xFF
+            i = math.min(end, i + 9 + pesHdrDataLen)
+          } else {
+            i = end
+          }
+        } else if (code == 0xB2) {
+          i = end
+        } else if (code == 0xB3) {
           if (i + 12 <= end && lockedSeqHeader.isDefined) {
             val locked = lockedSeqHeader.get
-            if (locked.length == 12) {
+            if (locked.length >= 12 && (locked.length == 12 || (arr(i + 11) & 0x03) == (locked(11) & 0x03))) {
               var differs = false
               var k = 0
               while (k < 12) {
@@ -238,17 +277,18 @@ object FreezeFramePacer {
                 k += 1
               }
               if (differs) {
-                val _ = locked.copyToArray(arr, i)
+                val _ = locked.take(12).copyToArray(arr, i)
               }
             }
           }
-          i += 4
+          val hasIntraQuant = i + 12 <= end && (arr(i + 11) & 0x02) != 0
+          i += (if (hasIntraQuant) 76 else 12)
         } else if (code >= 0x01 && code <= 0xAF && code > maxSliceRow) {
           arr(i + 2) = 0x00.toByte
           clamped += 1
           i += 3
         } else {
-          i += 1
+          i += 4
         }
       } else {
         i += 1
@@ -268,22 +308,26 @@ object FreezeFramePacer {
     } else {
       val end = payloadOffset + payloadLen - 4
       var i = payloadOffset
-      var found = false
-      while (i <= end && !found) {
+      var hasOutOfBounds = false
+      var hasStructuralHeader = false
+      while (i <= end && !hasStructuralHeader) {
         if (arr(i) == 0x00.toByte &&
             arr(i + 1) == 0x00.toByte &&
             arr(i + 2) == 0x01.toByte) {
           val code = arr(i + 3) & 0xFF
-          if (code >= 0x01 && code <= 0xAF && code > maxSliceRow) {
-            found = true
+          if (code == 0x00 || code == 0xB2 || code == 0xB3 || code == 0xB5 || code == 0xB8 || (code >= 0xE0 && code <= 0xEF)) {
+            hasStructuralHeader = true
+          } else if (code >= 0x01 && code <= 0xAF && code > maxSliceRow) {
+            hasOutOfBounds = true
+            i += 4
           } else {
-            i += 1
+            i += 4
           }
         } else {
           i += 1
         }
       }
-      found
+      hasOutOfBounds && !hasStructuralHeader
     }
   }
 
@@ -308,7 +352,7 @@ object FreezeFramePacer {
           arr(i + 2) == 0x01.toByte) {
         val code = arr(i + 3) & 0xFF
         if (isMpeg1Or2) {
-          if ((code >= 0x01 && code <= maxSliceRow) || code == 0xB3 || code == 0xB8 || code == 0x00) {
+          if ((code >= 0x01 && code <= maxSliceRow) || code == 0xB3 || code == 0xB5 || code == 0xB8 || code == 0x00) {
             found = i
           } else {
             i += 1

@@ -217,14 +217,80 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
         0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
         0x00.toByte, 0x00.toByte, 0x01.toByte, 0x00.toByte
       )
-      FreezeFramePacer.hasOutOfBoundsMpeg2Slice(nonSliceCodesPayload, 0, nonSliceCodesPayload.length, 68) shouldBe false
+      val _ = FreezeFramePacer.hasOutOfBoundsMpeg2Slice(nonSliceCodesPayload, 0, nonSliceCodesPayload.length, 68) shouldBe false
+
+      val userDataWithHighCode = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB2.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x65.toByte
+      )
+      FreezeFramePacer.hasOutOfBoundsMpeg2Slice(userDataWithHighCode, 0, userDataWithHighCode.length, 68) shouldBe false
+    }
+
+    "capture 22-byte sequence header + sequence_extension and strip quantizer matrix flags when separated by matrix" in {
+      val arr = Array.fill[Byte](128)(0xAA.toByte)
+      // 12-byte sequence header at offset 0 with load_intra_quantizer_matrix = 1 (bit 1 of byte 11 = 0x02)
+      arr(0) = 0x00.toByte
+      arr(1) = 0x00.toByte
+      arr(2) = 0x01.toByte
+      arr(3) = 0xB3.toByte
+      arr(4) = 0x78.toByte
+      arr(5) = 0x04.toByte
+      arr(6) = 0x38.toByte
+      arr(7) = 0x34.toByte
+      arr(8) = 0x12.toByte
+      arr(9) = 0x34.toByte
+      arr(10) = 0x56.toByte
+      arr(11) = 0x02.toByte
+      // 64-byte intra quantizer matrix at offsets 12..75, followed by 10-byte sequence_extension at offset 76
+      arr(76) = 0x00.toByte
+      arr(77) = 0x00.toByte
+      arr(78) = 0x01.toByte
+      arr(79) = 0xB5.toByte
+      arr(80) = 0x14.toByte // extension_start_code_identifier = 1 (sequence_extension), MP@HL
+      arr(81) = 0x82.toByte // progressive_sequence = 0 (interlaced)
+      arr(82) = 0x00.toByte
+      arr(83) = 0x01.toByte
+      arr(84) = 0x00.toByte
+      arr(85) = 0x00.toByte
+
+      val parsed = FreezeFramePacer.parseMpeg2SequenceHeader(arr, 0, arr.length)
+      val _ = parsed.isDefined shouldBe true
+      val (hdr, maxRow) = parsed.get
+      val _ = maxRow shouldBe 68
+      val _ = hdr.length shouldBe 22
+      val _ = (hdr(11) & 0x03) shouldBe 0
+      val _ = hdr.slice(12, 16) shouldBe ByteString(0x00, 0x00, 0x01, 0xB5.toByte)
+
+      val synthPkt = FreezeFramePacer.synthesizeSequenceHeaderPacket(0x0100, hdr, cc = 3)
+      val _ = synthPkt.length shouldBe 188
+      val reParsed = FreezeFramePacer.parseMpeg2SequenceHeader(synthPkt.toArray, 0, 188)
+      reParsed shouldBe Some((hdr, 68))
+    }
+
+    "reject non-16-aligned dimensions in parseMpeg2SequenceHeader and skip user_data in sanitizeMpeg2Payload" in {
+      val invalidDim = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+        0x3F.toByte, 0x53.toByte, 0xFB.toByte, 0x00.toByte,
+        0x00.toByte, 0x00.toByte, 0x00.toByte, 0x00.toByte
+      )
+      val _ = FreezeFramePacer.parseMpeg2SequenceHeader(invalidDim, 0, invalidDim.length) shouldBe None
+
+      val userDataPayload = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB2.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x65.toByte
+      )
+      val clamped = FreezeFramePacer.sanitizeMpeg2Payload(userDataPayload, 0, userDataPayload.length, 68, None)
+      val _ = clamped shouldBe 0
+      userDataPayload(6) shouldBe 0x01.toByte
     }
   }
 
   "FreezeFramePacer slice offset & packet prefix stuffing" should {
     "find first valid video slice offset for MPEG-2" in {
       val arr = Array[Byte](0xFF.toByte, 0xFE.toByte, 0x00.toByte, 0x00.toByte, 0x01.toByte, 0x14.toByte, 0x00.toByte)
-      FreezeFramePacer.findFirstValidVideoSliceOffset(arr, 0, arr.length, Some(0x02), 68) shouldBe 2
+      val _ = FreezeFramePacer.findFirstValidVideoSliceOffset(arr, 0, arr.length, Some(0x02), 68) shouldBe 2
+      val extArr = Array[Byte](0xFF.toByte, 0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte, 0x14.toByte)
+      FreezeFramePacer.findFirstValidVideoSliceOffset(extArr, 0, extArr.length, Some(0x02), 68) shouldBe 1
     }
 
     "find first valid video slice offset for H.264 IDR" in {

@@ -222,19 +222,29 @@ class M3U8Spec extends AnyFlatSpec with Matchers {
       """#EXTM3U
         |#EXT-X-UNKNOWN:foo
         |#EXT-X-TARGETDURATION:10
-        |#EXTINF:10.0,
+        |#EXTINF:10.0,First
         |#EXT-X-DISCONTINUITY
+        |#EXT-X-PROGRAM-DATE-TIME:2020-01-01T00:00:00Z
+        |#EXT-X-BYTERANGE:1400600@5836832
         |seg0.ts
         |#EXT-X-KEY:METHOD=NONE
-        |#EXTINF:10.0,
+        |#EXTINF:8.5,Second
+        |#EXT-X-BYTERANGE:1400600@7237432
+        |#EXT-X-PROGRAM-DATE-TIME:2020-01-01T00:00:10Z
         |seg1.ts
-        |#EXT-X-PROGRAM-DATE-TIME:2020-01-01T00:00:00Z
+        |#EXT-X-PROGRAM-DATE-TIME:2020-01-01T00:00:20Z
         |""".stripMargin
     val p = M3U8.parse(raw)
     val _ = p.targetDuration shouldBe 10
     val _ = p.segments should have size 2
     val _ = p.segments(0).uri shouldBe "seg0.ts"
-    p.segments(1).uri shouldBe "seg1.ts"
+    val _ = p.segments(0).duration shouldBe 10.0
+    val _ = p.segments(0).title shouldBe Some("First")
+    val _ = p.segments(0).byteRange shouldBe Some((5836832L, 1400600L))
+    val _ = p.segments(1).uri shouldBe "seg1.ts"
+    val _ = p.segments(1).duration shouldBe 8.5
+    val _ = p.segments(1).title shouldBe Some("Second")
+    p.segments(1).byteRange shouldBe Some((7237432L, 1400600L))
   }
 
   it should "ignore blank lines and trim whitespace" in {
