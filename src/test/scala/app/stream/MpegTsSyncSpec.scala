@@ -2008,5 +2008,45 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = (((out(5)(1) & 0x1F) << 8) | (out(5)(2) & 0xFF)) shouldBe videoPid
       (out(5)(3) & 0x0F) shouldBe 1
     }
+
+    "cacheFlow should ignore single corrupted PAT/PMT packets and require 2 consecutive identical packets before updating locked PIDs" in {
+      val pmtPid = 0x0100
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val pat = buildPatPacket(pmtPid)
+      val goodPmt = buildFullPmtPacketWithAudio(pmtPid, videoPid, videoPid, 0x02, audioPid, 0x81)
+      // Single bit-flipped PMT packet advertising bogus audioPid 0x0999
+      val corruptedSinglePmt = buildFullPmtPacketWithAudio(pmtPid, videoPid, videoPid, 0x02, 0x0999, 0x81)
+      val audio1 = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1)
+      val audio2 = buildAudioPesPacket(audioPid, pts = 92880L, cc = 2)
+
+      val out1 = Source(List(pat, goodPmt, corruptedSinglePmt, audio1, audio2))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, latestMetricsRef = Some(latestMetricsRef)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out1.length shouldBe 5
+      // Single corrupted PMT must be rejected and restored to goodPmt (with continuous CC = 1)
+      val _ = cachedHeadersRef.get().audioPids shouldBe Seq(audioPid)
+      val restoredPmt = out1(2)
+      val _ = (restoredPmt(3) & 0x0F) shouldBe 1
+      val _ = restoredPmt.drop(4) shouldBe goodPmt.drop(4)
+      // Audio frames on 0x0102 must still be tracked cleanly
+      val _ = latestMetricsRef.get().audioFramesTotal shouldBe 2L
+      val _ = latestMetricsRef.get().audioFramesClean shouldBe 2L
+
+      // Now send 2 consecutive identical updated PMT packets with new audioPid 0x0105
+      val updatedPmt1 = withCc(buildFullPmtPacketWithAudio(pmtPid, videoPid, videoPid, 0x02, 0x0105, 0x81), cc = 2)
+      val updatedPmt2 = withCc(buildFullPmtPacketWithAudio(pmtPid, videoPid, videoPid, 0x02, 0x0105, 0x81), cc = 3)
+      val _ = Source(List(pat, goodPmt, updatedPmt1, updatedPmt2))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      cachedHeadersRef.get().audioPids shouldBe Seq(0x0105)
+    }
   }
 }
