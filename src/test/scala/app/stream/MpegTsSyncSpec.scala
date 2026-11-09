@@ -1850,5 +1850,101 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = (out(1)(3) & 0x0F) shouldBe 1
       (out(2)(3) & 0x0F) shouldBe 2
     }
+
+    "cacheFlow should compute 100% signal and symbol quality metrics for clean video and audio frames" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+      val hlsCollector = new StreamMetrics.HlsCollector()
+      hlsCollector.onSegmentCompleted(gapMs = 1950L, isShortRead = false)
+
+      val vFrame1 = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+      val vFrame2 = buildVideoPesPacket(videoPid, pts = 93003L, cc = 2, isKeyframe = false, sliceRow = Some(1))
+      val vFrame3 = buildVideoPesPacket(videoPid, pts = 96006L, cc = 3, isKeyframe = false, sliceRow = Some(1))
+      val aFrame1 = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1)
+      val aFrame2 = buildAudioPesPacket(audioPid, pts = 94500L, cc = 2)
+
+      val _ = Source(List(pat, pmt, vFrame1, aFrame1, vFrame2, aFrame2, vFrame3))
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , label = "metrics-clean-test"
+          , metricsInterval = 30.seconds
+          , hlsCollector = Some(hlsCollector)
+          , latestMetricsRef = Some(latestMetricsRef)
+          )
+        )
+        .runWith(Sink.seq)
+        .futureValue
+
+      val snap = latestMetricsRef.get()
+      val _ = snap.signalQualityPct shouldBe 100.0
+      val _ = snap.symbolQualityPct shouldBe 100.0
+      val _ = snap.videoFramesClean shouldBe 3L
+      val _ = snap.videoFramesTotal shouldBe 3L
+      val _ = snap.audioFramesClean shouldBe 2L
+      val _ = snap.audioFramesTotal shouldBe 2L
+      val _ = snap.keyframes shouldBe 1L
+      val _ = snap.tei shouldBe 0L
+      val _ = snap.ccErr shouldBe 0L
+      val _ = snap.sliceDrops shouldBe 0L
+      val _ = snap.ptsScrubs shouldBe 0L
+      val _ = snap.ptsAdvanceSec shouldBe (6006.0 / 90000.0 +- 0.001)
+      snap.hls.segs shouldBe 1
+    }
+
+    "cacheFlow should degrade signalQualityPct and symbolQualityPct when frames experience TEI, CC errors, and slice drops" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      // Frame 1: clean keyframe (cc=1)
+      val vFrame1 = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+      // Frame 2: starts at cc=2 (PUSI=1), then suffers a CC jump to cc=7 on its continuation packet
+      val vFrame2Start = buildVideoPesPacket(videoPid, pts = 93003L, cc = 2, isKeyframe = false, sliceRow = Some(1))
+      val vFrame2ContCcGap = buildVideoPesPacket(videoPid, pts = 93003L, pusi = false, cc = 7, sliceRow = Some(2))
+      // Frame 3: starts at cc=8 (PUSI=1), then has an out-of-range slice row 0x60 (> maxSliceRow 68) on continuation cc=9
+      val vFrame3Start = buildVideoPesPacket(videoPid, pts = 96006L, cc = 8, isKeyframe = false, sliceRow = Some(1))
+      val vFrame3BadSlice = buildVideoPesPacket(videoPid, pts = 96006L, pusi = false, cc = 9, sliceRow = Some(0x60))
+      // Audio Frame 1: clean (cc=1)
+      val aFrame1 = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1)
+      // Audio Frame 2: TEI packet (cc=2)
+      val aFrame2Tei = {
+        val arr = buildAudioPesPacket(audioPid, pts = 92880L, cc = 2).toArray
+        arr(1) = (arr(1) | 0x80).toByte
+        ByteString(arr)
+      }
+
+      val _ = Source(List(pat, pmt, vFrame1, vFrame2Start, vFrame2ContCcGap, vFrame3Start, vFrame3BadSlice, aFrame1, aFrame2Tei))
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , label = "metrics-corrupt-test"
+          , metricsInterval = 30.seconds
+          , latestMetricsRef = Some(latestMetricsRef)
+          )
+        )
+        .runWith(Sink.seq)
+        .futureValue
+
+      val snap = latestMetricsRef.get()
+      // 3 video frames: 1 clean (vFrame1), 2 corrupt (vFrame2 CC gap, vFrame3 bad slice) => 33.33%
+      // 2 audio frames: 1 clean (aFrame1), 1 corrupt (aFrame2Tei) => 50.0%
+      val _ = snap.videoFramesTotal shouldBe 3L
+      val _ = snap.videoFramesClean shouldBe 1L
+      val _ = snap.audioFramesTotal shouldBe 2L
+      val _ = snap.audioFramesClean shouldBe 1L
+      val _ = snap.tei shouldBe 1L
+      val _ = snap.ccErr should be >= 1L
+      val _ = snap.sliceDrops shouldBe 1L
+      val _ = snap.signalQualityPct shouldBe ((0.8 * (100.0 / 3.0) + 0.2 * 50.0) +- 0.1)
+      snap.symbolQualityPct should be < 100.0
+    }
   }
 }

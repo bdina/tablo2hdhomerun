@@ -63,6 +63,38 @@ paths:
               schema:
                 $ref: '#/components/schemas/DiscoverResponse'
 
+  /status.json:
+    get:
+      operationId: getTunerStatus
+      summary: Per-tuner status and signal quality metrics
+      description: |
+        Returns a JSON array of tuner status objects (`tuner0` .. `tuner{N-1}`) compatible with the
+        SiliconDust HDHomeRun `/status.json` HTTP API. Idle tuners contain only `Resource`; active tuners
+        include tuned channel identity (`VctNumber`, `VctName`), signal/feed/symbol quality percentages
+        (`SignalStrengthPercent`, `SignalQualityPercent`, `SymbolQualityPercent`), and stream throughput
+        (`NetworkRate` in bits per second).
+      tags:
+        - Discovery
+      responses:
+        '200':
+          description: Array of tuner status objects
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/TunerStatus'
+              example:
+                - Resource: tuner0
+                  VctNumber: "2.1"
+                  VctName: CBS
+                  SignalStrengthPercent: 100
+                  SignalQualityPercent: 100
+                  SymbolQualityPercent: 100
+                  NetworkRate: 6620000
+                  TargetIP: http
+                - Resource: tuner1
+
   /lineup.json:
     get:
       operationId: getLineup
@@ -373,3 +405,48 @@ components:
           description: Available signal sources
           default: [Antenna]
           example: [Antenna]
+
+    TunerStatus:
+      type: object
+      description: SiliconDust HDHomeRun per-tuner status entry
+      required:
+        - Resource
+      properties:
+        Resource:
+          type: string
+          description: Tuner resource identifier (`tuner0`, `tuner1`, ...)
+          example: tuner0
+        VctNumber:
+          type: string
+          description: Tuned virtual channel number (omitted when idle)
+          example: "2.1"
+        VctName:
+          type: string
+          description: Tuned virtual channel call sign or name (omitted when idle)
+          example: CBS
+        SignalStrengthPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Real-time media clock feed completeness percentage (0-100, omitted when idle)
+          example: 100
+        SignalQualityPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Clean video/audio PES frame integrity percentage (0-100, omitted when idle)
+          example: 100
+        SymbolQualityPercent:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Clean elementary MPEG-TS packet percentage (0-100, omitted when idle)
+          example: 100
+        NetworkRate:
+          type: integer
+          description: Real MPEG-TS network bit rate in bits per second (omitted when idle)
+          example: 6620000
+        TargetIP:
+          type: string
+          description: Streaming target indicator (omitted when idle)
+          example: http

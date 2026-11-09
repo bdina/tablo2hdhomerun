@@ -70,6 +70,7 @@ final case class StreamConfig(
   backend: StreamBackendKind
 , resilient: ResilientHlsConfig
 , hls: HlsStreamConfig
+, metricsIntervalSec: Int = 30
 )
 
 final case class LoggingConfig(
@@ -138,6 +139,7 @@ object AppConfig {
       backend = getStreamBackend(get)
     , resilient = resilient
     , hls = hls
+    , metricsIntervalSec = getInt(get, "STREAM_METRICS_INTERVAL_SEC", 30)
     )
     val logging = LoggingConfig(
       logLevel = get("LOG_LEVEL")

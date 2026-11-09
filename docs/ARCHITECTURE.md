@@ -171,7 +171,8 @@ Streams fan out to subscribers via a 1024-element `BroadcastHub` buffer. When ne
                                                   ┌─────────────────────────────────────────┐
                                                   │ MpegTsSync.cacheFlow                    │
                                                   │ (Slice Recovery, Outbound CC Rewriting, │
-                                                  │  Audio Syncword, Timeline Normalizer)   │
+                                                  │  Audio Syncword, Timeline Normalizer,   │
+                                                  │  StreamMetrics.WindowSnapshot)          │
                                                   └─────────────────────────────────────────┘
                                                                        │
                                                                        ▼
@@ -269,6 +270,7 @@ Streams fan out to subscribers via a 1024-element `BroadcastHub` buffer. When ne
 | `TABLO_PORT` | `8887` (4th gen) / `8885` (legacy) | Tablo device API port |
 | `PROXY_IP` | `127.0.0.1` | IP address for the proxy to bind to |
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
+| `STREAM_METRICS_INTERVAL_SEC` | `30` | Interval in seconds for periodic `[stream:metrics]` operational INFO logs (`<= 0` disables periodic logs while keeping `/status.json` snapshots updated) |
 | `STREAM_STALL_TIMEOUT_SEC` | `45` | Resilient stall timeout configuration in seconds (`0` disables byte-stall watchdog; 4th-gen HLS uses control-plane keepalive session probing) |
 | `STREAM_TUNE_TIMEOUT_SEC` | `20` | Max seconds to wait for tune / cold start data |
 | `STREAM_RETRY_DELAY_SEC` | `1` | Delay in seconds between retune attempts |
@@ -340,9 +342,12 @@ tablo2hdhomerun/
 │   │   │   ├── HlsPlaylistPoller.scala  # Adaptive HLS polling & session-presence probing
 │   │   │   ├── HlsSegmentFetch.scala    # Byte-range segment fetch validation
 │   │   │   ├── M3U8.scala               # M3U8 playlist parser
-│   │   │   ├── MpegTsSync.scala         # Slice recovery, CC rewriting, I-frame alignment
-│   │   │   └── ResilientHlsSource.scala # Outer stream supervisor & keepalive
+│   │   │   ├── MpegTsSync.scala         # Slice recovery, CC rewriting, I-frame alignment, stream metrics
+│   │   │   ├── ResilientHlsSource.scala # Outer stream supervisor & keepalive
+│   │   │   └── StreamMetrics.scala      # Signal/feed/symbol quality snapshot & HLS collector
 │   │   └── tuner/                       # Tablo legacy & 4th gen implementations
+│   │       ├── HDHomeRunDiscovery.scala # UDP 65001 broadcast discovery responder
+│   │       ├── HDHomeRunStatus.scala    # SiliconDust GET /status.json tuner telemetry model
 │   │       ├── Tablo4thGen.scala        # 4th gen API, SessionManager, WatchSession
 │   │       └── TabloLegacy.scala        # Legacy Tablo API
 │   └── resources/META-INF/

@@ -194,6 +194,7 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 
 | Variable | Default | Description |
 | :--- | :--- | :--- |
+| `STREAM_METRICS_INTERVAL_SEC` | `30` | Interval in seconds for periodic `[stream:metrics]` operational `INFO` logs (`<= 0` disables periodic logging) |
 | `STREAM_STALL_TIMEOUT_SEC` | `45` | Resilient stall timeout configuration in seconds (`0` disables byte-stall watchdog; 4th-gen HLS uses control-plane keepalive session probing) |
 | `STREAM_TUNE_TIMEOUT_SEC` | `20` | Max seconds to wait for initial or retuned data |
 | `STREAM_RETRY_DELAY_SEC` | `1` | Initial delay in seconds between retune attempts |
@@ -203,6 +204,22 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 | `STREAM_RECOVERY_LIVE_EDGE_SEGMENTS` | `3` | Number of live-edge segments (~7.5s cushion) fetched upon stream recovery to prime player/transcoder buffers |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat DEBUG logs |
 | `STREAM_HLS_POLL_FAILURES_MAX` | `4` | Consecutive playlist fetch or keepalive probe failures before retune |
+
+### Operational Stream Quality Metrics (`[stream:metrics]` & `GET /status.json`)
+
+While a channel is tuned, `MpegTsSync.cacheFlow` and `StreamMetrics.HlsCollector` continuously measure transport, elementary frame, media clock, and HLS segment delivery health over a rolling window (default `30s`, configurable via `STREAM_METRICS_INTERVAL_SEC`).
+
+Every 30 seconds (and on stream completion), an `INFO` log line is emitted:
+
+```text
+[stream:metrics] channel="CBS 2.1 (a1b2c3d4)" windowSec=30.0 signalQualityPct=100.0 feedQualityPct=100.0 symbolQualityPct=100.0 bitrateMbps=6.62 fps=59.94 ptsAdvanceSec=30.0 avSkewMs=-12 videoFrames=1798/1798 audioFrames=937/937 keyframes=30 tei=0 ccErr=0 sliceDrops=0 ptsScrubs=0 syncLossBytes=0 keepalivePct=0.0 segs=15 maxGapMs=1980 shortReads=0 seqGaps=0 segRetries=0 stallPolls=0 retunes=0
+```
+
+- **`signalQualityPct` (`0.0–100.0%`)**: Percentage of decoded video PES frames (80% weight) and audio PES frames (20% weight) delivered completely intact without `TEI`, continuity counter (`CC`) discontinuities, out-of-bounds MPEG-2 slice drops, or invalid audio syncwords.
+- **`feedQualityPct` (`0.0–100.0%`)**: Real-time media clock completeness (`ptsAdvanceSec / windowSec`), with a 1-segment (`2.0s`) burst boundary tolerance so healthy segmented HLS delivery reports `100.0%`. Drops when upstream stalls or experiences Failure Mode E2 trickle collapse.
+- **`symbolQualityPct` (`0.0–100.0%`)**: Percentage of elementary stream MPEG-TS packets free of transport errors (`TEI`, `CC` jumps, slice drops, or syncword misses).
+- **Co-existence with `[mpegts] transport anomalies`**: The periodic `[stream:metrics]` `INFO` log co-exists with the 30s `[mpegts] transport anomalies` `WARN` log, which fires only when transport errors occur.
+- **SiliconDust HDHomeRun `GET /status.json`**: Live per-tuner metrics are also exposed via `GET /status.json`, mapping `feedQualityPct` to `SignalStrengthPercent`, `signalQualityPct` to `SignalQualityPercent`, `symbolQualityPct` to `SymbolQualityPercent`, and real MPEG-TS throughput to `NetworkRate` (bps).
 
 ### 4th Generation Variables
 
@@ -325,6 +342,7 @@ docker run -d \
 | Endpoint | Response Type | Description |
 |----------|---------------|-------------|
 | `GET /discover.json` | JSON | HDHomeRun device metadata (`DeviceID`, `TunerCount`, `BaseURL`, etc.) |
+| `GET /status.json` | JSON | SiliconDust HDHomeRun per-tuner status array (`Resource`, `VctNumber`, `VctName`, `SignalStrengthPercent`, `SignalQualityPercent`, `SymbolQualityPercent`, `NetworkRate`, `TargetIP`) |
 | `GET /lineup.json` | JSON | HDHomeRun channel lineup array with GuideName/GuideNumber |
 | `GET /lineup_status.json` | JSON | Channel scan status (`ScanInProgress`, `ScanPossible`, `Source`) |
 | `POST /lineup.post?scan=start` | Empty / 200 OK | Trigger channel lineup refresh / scan |

@@ -164,6 +164,7 @@ object TabloLegacy {
           object ChannelObject {
             def jsValue(obj: ChannelObject): JsValue = {
               val num = s"${obj.channel.major}.${obj.channel.minor}"
+              val _ = Channel.registerVctInfo(obj.object_id.toString, num, obj.channel.call_sign)
               val url = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/channel/${obj.object_id}"))}"
               val src = s"${AppContext.discover.BaseURL.withPath(Uri.Path(s"/guide/channels/${obj.object_id}/watch"))}"
               JsObject(
@@ -818,6 +819,22 @@ object TabloLegacy {
     }
 
     object Channel {
+      import java.util.concurrent.ConcurrentHashMap
+      import java.util.concurrent.atomic.AtomicReference
+      import scala.jdk.CollectionConverters._
+
+      private val legacyVctInfo = new ConcurrentHashMap[String, (String, String)]()
+      private val activeStreams = new ConcurrentHashMap[String, (String, AtomicReference[app.stream.StreamMetrics.WindowSnapshot])]()
+
+      def registerVctInfo(channelId: String, vctNumber: String, vctName: String): Unit = {
+        val _ = legacyVctInfo.put(channelId, (vctNumber, vctName))
+      }
+
+      def clearActiveStreams(): Unit = {
+        activeStreams.clear()
+        legacyVctInfo.clear()
+      }
+
       object Request {
         case class WatchRequest(
           bandwidth: Int = 1000
@@ -868,10 +885,28 @@ object TabloLegacy {
       }
 
       val route =
+        path("status.json") {
+          get {
+            val totalTuners =
+              if (AppContext.discover != null && AppContext.discover.TunerCount > 0) AppContext.discover.TunerCount
+              else 2
+            val active = activeStreams.values().asScala.toSeq.map { case (chId, ref) =>
+              val (vctNum, vctName) = Option(legacyVctInfo.get(chId)).getOrElse((chId, s"Channel $chId"))
+              HDHomeRunStatus.ActiveTunerInfo(
+                channelId = chId
+              , vctNumber = vctNum
+              , vctName = vctName
+              , snapshot = ref.get()
+              )
+            }
+            val json = HDHomeRunStatus.buildStatusArray(totalTuners, active).compactPrint
+            complete(HttpEntity(ContentTypes.`application/json`, json))
+          }
+        } ~
         path("channel" / LongNumber) { channelId =>
           get {
             import Response.JsonProtocol._
-            import app.stream.ResilientHlsSource
+            import app.stream.{MpegTsSync, ResilientHlsSource, StreamMetrics}
 
             val streamId = java.util.UUID.randomUUID.toString.take(8)
 
@@ -923,6 +958,13 @@ object TabloLegacy {
               Source.lazySource { () =>
                 var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
                 val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
+                val hlsCollector = new StreamMetrics.HlsCollector()
+                val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+                val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+                val metricsInterval =
+                  Option(AppContext.config).map(_.stream.metricsIntervalSec.seconds).getOrElse(30.seconds)
+                val _ = activeStreams.put(streamId, (channelId.toString, latestMetricsRef))
+
                 def streamFactory() = {
                   nextPlaylistUrl match {
                     case Some(url) =>
@@ -932,6 +974,7 @@ object TabloLegacy {
                       , streamId
                       , initialSeq = lastSeqRef.get()
                       , onSeqAdvanced = seq => lastSeqRef.set(seq)
+                      , metricsCollector = Some(hlsCollector)
                       )
                     case None =>
                       Source.futureSource(
@@ -942,22 +985,34 @@ object TabloLegacy {
                           , streamId
                           , initialSeq = lastSeqRef.get()
                           , onSeqAdvanced = seq => lastSeqRef.set(seq)
+                          , metricsCollector = Some(hlsCollector)
                           )
                         }
                       )
                   }
                 }
                 ResilientHlsSource(
-                  streamFactory = () => streamFactory(),
-                  streamName = s"legacy-channel-$channelId"
-                ).watchTermination() { (_, done) =>
-                  done.onComplete {
-                    case Success(_) =>
-                      log.info("[channel] stream end streamId={} channelId={}", streamId, channelId)
-                    case Failure(ex) =>
-                      log.warn("[channel] stream failed streamId={} channelId={}", streamId, channelId, ex)
+                  streamFactory = () => streamFactory()
+                , streamName = s"legacy-channel-$channelId"
+                , metricsCollector = Some(hlsCollector)
+                )
+                  .via(MpegTsSync.cacheFlow(
+                    cachedHeadersRef
+                  , label = s"legacy-channel-$channelId ($streamId)"
+                  , metricsInterval = metricsInterval
+                  , hlsCollector = Some(hlsCollector)
+                  , latestMetricsRef = Some(latestMetricsRef)
+                  ))
+                  .watchTermination() { (_, done) =>
+                    done.onComplete {
+                      case Success(_) =>
+                        val _ = activeStreams.remove(streamId)
+                        log.info("[channel] stream end streamId={} channelId={}", streamId, channelId)
+                      case Failure(ex) =>
+                        val _ = activeStreams.remove(streamId)
+                        log.warn("[channel] stream failed streamId={} channelId={}", streamId, channelId, ex)
+                    }
                   }
-                }
               }
 
             onComplete(startWatchSession(checkTuners = true)) {

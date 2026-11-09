@@ -59,6 +59,7 @@ object HlsBackend extends StreamBackend {
   , onSeqAdvanced: Int => Unit = _ => ()
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
+  , metricsCollector: Option[StreamMetrics.HlsCollector] = None
   )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
     implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -119,6 +120,7 @@ object HlsBackend extends StreamBackend {
       val segmentRetryDelay = 500.millis
       val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
       def retryAfter(retriesLeft: Int, message: String, nextSource: => Source[ByteString, ?]): Source[ByteString, ?] = {
+        metricsCollector.foreach(_.onSegmentRetry())
         log.warn("[stream:hls] segment retry label={} reason={} retriesLeft={}", label, message, retriesLeft)
         Source
           .futureSource(after(segmentRetryDelay, scheduler)(Future.successful(nextSource)))
@@ -269,6 +271,9 @@ object HlsBackend extends StreamBackend {
                 log.warn("[stream:hls] retune label={} reason={}", label, err.getMessage)
                 Future.failed(err)
               case HlsPlaylistPoller.Emit(next, segments) =>
+                if (next.stallPolls > state.stallPolls) {
+                  metricsCollector.foreach(_.onStallPoll())
+                }
                 if (next.fetchFailures > state.fetchFailures && segments.isEmpty) {
                   log.info(
                     "[stream:hls] playlist fetch retry ({}/{}) label={}"
@@ -286,12 +291,14 @@ object HlsBackend extends StreamBackend {
                   )
                 }
                 if (state.lastSeq > 0 && segments.nonEmpty && segments.head.sequence > state.lastSeq) {
+                  val gap = segments.head.sequence - state.lastSeq
+                  metricsCollector.foreach(_.onSequenceGap(gap))
                   log.warn(
                     "[stream:hls] sequence gap detected label={} expected={} received={} gap={}"
                   , label
                   , state.lastSeq
                   , segments.head.sequence
-                  , segments.head.sequence - state.lastSeq
+                  , gap
                   )
                 }
                 if (segments.nonEmpty && !state.loggedFirstSegment) {
@@ -364,6 +371,7 @@ object HlsBackend extends StreamBackend {
                       , totalSegBytes
                       , gapMs
                       )
+                      val isShortRead = expectedLengthOpt.exists(expected => totalSegBytes < expected)
                       expectedLengthOpt.foreach { expected =>
                         if (totalSegBytes < expected) {
                           log.warn(
@@ -376,6 +384,7 @@ object HlsBackend extends StreamBackend {
                           )
                         }
                       }
+                      metricsCollector.foreach(_.onSegmentCompleted(gapMs, isShortRead))
                       onSeqAdvanced(seg.sequence + 1)
                     case Failure(ex) =>
                       log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)

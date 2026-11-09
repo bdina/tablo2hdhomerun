@@ -32,7 +32,7 @@ the `BroadcastHub`, then checks the hub into SessionManager for reuse.
 - One Tablo player session per channel while any proxy client (or idle grace) holds it
 - Multiplex MPEG-TS to N HDHomeRun clients via `BroadcastHub`
 - Seamless keepalive / playlist change / retune for attached clients (no client reconnect required)
-- Clear operational logs: human-readable TV channel name + virtual number (`channel=CBS 4.1`, `label=CBS 4.1 (ee905255)`), `channelId`, `clientId`, `tabloToken` (truncated), attached client count, tuner occupancy ratio (`occupied=1/4`), and session state
+- Clear operational logs: human-readable TV channel name + virtual number (`channel=CBS 4.1`, `label=CBS 4.1 (ee905255)`), `channelId`, `clientId`, `tabloToken` (truncated), attached client count, tuner occupancy ratio (`occupied=1/4`), session state, and periodic `[stream:metrics]` operational telemetry (`signalQualityPct`, `feedQualityPct`, `symbolQualityPct`, `bitrateMbps`, `fps`, `ptsAdvanceSec`, `avSkewMs`, `videoFrames`, `audioFrames`, `keyframes`, transport anomaly counters, and HLS segment delivery stats) exposed both in logs and via `GET /status.json` (`Request.GetTunerStatuses`)
 
 ## Non-goals (v1)
 
