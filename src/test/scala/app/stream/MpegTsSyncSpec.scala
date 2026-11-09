@@ -1963,9 +1963,50 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = snap.audioFramesClean shouldBe 1L
       val _ = snap.tei shouldBe 1L
       val _ = snap.ccErr should be >= 1L
-      val _ = snap.sliceDrops shouldBe 1L
+      val _ = snap.sliceDrops shouldBe 2L
       val _ = snap.signalQualityPct shouldBe ((0.8 * (100.0 / 3.0) + 0.2 * 50.0) +- 0.1)
       snap.symbolQualityPct should be < 100.0
+    }
+
+    "cacheFlow should not splice PUSI=0 slices onto previous frame after a CC gap or dropped PUSI=1 packet" in {
+      val videoPid = 0x0101
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(videoPid = Some(videoPid), videoStreamType = Some(0x02))
+      )
+
+      val iFrameStart = buildVideoPesPacket(videoPid, pts = 90000L, pusi = true, cc = 1, isKeyframe = true)
+      // CC jump from 1 -> 5 on a PUSI=0 packet carrying a valid slice row 4 (missing P-frame PUSI=1 picture header in gap)
+      val ccGapMidFrameWithSlice = buildVideoPesPacket(videoPid, pts = 90000L, pusi = false, cc = 5, sliceRow = Some(4))
+      // Subsequent PUSI=0 packet also carrying a valid slice row 8
+      val trailingMidFrameWithSlice = buildVideoPesPacket(videoPid, pts = 90000L, pusi = false, cc = 6, sliceRow = Some(8))
+      // Next P-frame PUSI=1 packet with an out-of-bounds slice row 0x60 (> 68)
+      val badPusiFrame = buildVideoPesPacket(videoPid, pts = 93003L, pusi = true, cc = 7, sliceRow = Some(0x60))
+      // PUSI=0 continuation of the dropped badPusiFrame carrying valid slice row 2
+      val orphanSliceAfterBadPusi = buildVideoPesPacket(videoPid, pts = 93003L, pusi = false, cc = 8, sliceRow = Some(2))
+      // Clean PUSI=1 frame start with valid slice row 1
+      val cleanPusiRecovery = buildVideoPesPacket(videoPid, pts = 96006L, pusi = true, cc = 9, sliceRow = Some(1))
+
+      val out = Source(
+        List(
+          iFrameStart
+        , ccGapMidFrameWithSlice
+        , trailingMidFrameWithSlice
+        , badPusiFrame
+        , orphanSliceAfterBadPusi
+        , cleanPusiRecovery
+        )
+      ).via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 6
+      val _ = (out(0)(3) & 0x0F) shouldBe 0
+      val _ = out(1) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(2) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(3) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(4) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = (((out(5)(1) & 0x1F) << 8) | (out(5)(2) & 0xFF)) shouldBe videoPid
+      (out(5)(3) & 0x0F) shouldBe 1
     }
   }
 }
