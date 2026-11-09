@@ -71,6 +71,7 @@ final case class StreamConfig(
 , resilient: ResilientHlsConfig
 , hls: HlsStreamConfig
 , metricsIntervalSec: Int = 30
+, freezeThresholdSec: Int = 10
 )
 
 final case class LoggingConfig(
@@ -140,6 +141,7 @@ object AppConfig {
     , resilient = resilient
     , hls = hls
     , metricsIntervalSec = getInt(get, "STREAM_METRICS_INTERVAL_SEC", 30)
+    , freezeThresholdSec = getInt(get, "STREAM_FREEZE_THRESHOLD_SEC", 10)
     )
     val logging = LoggingConfig(
       logLevel = get("LOG_LEVEL")

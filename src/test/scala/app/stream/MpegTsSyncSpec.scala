@@ -1488,11 +1488,12 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
           )
         )
 
-      // Test with default freezeThreshold (Duration.Zero)
-      val _ = verifyStream(MpegTsSync.cacheFlow(newHeadersRef()))
+      // Test with disabled freezeThreshold (Duration.Zero)
+      val _ = verifyStream(MpegTsSync.cacheFlow(newHeadersRef(), freezeThreshold = Duration.Zero))
 
-      // Test with freezeThreshold = 10.seconds (active timestamp normalization)
-      verifyStream(MpegTsSync.cacheFlow(newHeadersRef(), freezeThreshold = 10.seconds))
+      // Test with default freezeThreshold (10.seconds, active timestamp normalization)
+      val _ = MpegTsSync.DefaultFreezeThreshold shouldBe 10.seconds
+      verifyStream(MpegTsSync.cacheFlow(newHeadersRef()))
     }
 
     "cacheFlow should synthesize freeze-frame video and audio during upstream stalls and resume on live keyframe" in {
