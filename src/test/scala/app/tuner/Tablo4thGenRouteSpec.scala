@@ -67,6 +67,37 @@ trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with Scalat
         )
         replyTo ! Some(meta)
         Behaviors.same
+      case Tablo4thGen.Channel.SessionManager.Request.GetTunerStatuses(replyTo) =>
+        val snap = app.stream.StreamMetrics.WindowSnapshot.compute(
+          windowSec = 30.0
+        , realPackets = 124500L
+        , nullPackets = 0L
+        , elementaryPackets = 120000L
+        , errorPackets = 0L
+        , videoFramesClean = 1800L
+        , videoFramesTotal = 1800L
+        , audioFramesClean = 900L
+        , audioFramesTotal = 900L
+        , keyframes = 30L
+        , tei = 0L
+        , ccErr = 0L
+        , sliceDrops = 0L
+        , ptsScrubs = 0L
+        , syncLossBytes = 0L
+        , ptsAdvanceTicks = 30L * 90000L
+        , avSkewMs = 0L
+        , hls = app.stream.StreamMetrics.HlsWindowStats()
+        )
+        val active = Seq(
+          HDHomeRunStatus.ActiveTunerInfo(
+            channelId = "chan-1"
+          , vctNumber = "4.1"
+          , vctName = "WUSA-HD"
+          , snapshot = snap
+          )
+        )
+        replyTo ! HDHomeRunStatus.buildTunerStatuses(2, active)
+        Behaviors.same
       case _ =>
         Behaviors.same
     }
@@ -180,6 +211,26 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
   "GET /auto/v4.1" should "return 503 Service Unavailable when tuners are exhausted" in {
     Get("/auto/v4.1") ~> routes(rejectNoTuners = true) ~> check {
       status shouldBe StatusCodes.ServiceUnavailable
+    }
+  }
+
+  "GET /status.json" should "return 200 OK with SiliconDust HDHomeRun tuner status array" in {
+    Get("/status.json") ~> routes() ~> check {
+      val _ = status shouldBe StatusCodes.OK
+      val arr = responseAs[String].parseJson.asInstanceOf[JsArray].elements
+      val _ = arr.size shouldBe 2
+      val t0 = arr(0).asJsObject.fields
+      val _ = t0("Resource") shouldBe JsString("tuner0")
+      val _ = t0("VctNumber") shouldBe JsString("4.1")
+      val _ = t0("VctName") shouldBe JsString("WUSA-HD")
+      val _ = t0("SignalStrengthPercent") shouldBe JsNumber(100)
+      val _ = t0("SignalQualityPercent") shouldBe JsNumber(100)
+      val _ = t0("SymbolQualityPercent") shouldBe JsNumber(100)
+      val _ = t0.contains("NetworkRate") shouldBe true
+
+      val t1 = arr(1).asJsObject.fields
+      val _ = t1.keySet shouldBe Set("Resource")
+      t1("Resource") shouldBe JsString("tuner1")
     }
   }
 }

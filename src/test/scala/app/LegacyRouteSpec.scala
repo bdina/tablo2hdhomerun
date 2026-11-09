@@ -49,7 +49,7 @@ trait LegacyRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRo
     AppContext.initialize(config, discover)
     AppContext.initialize(typedSystem)
     val stubLineup = createStubLineupActor()
-    Response.Discover.route ~ Lineup.route(stubLineup) ~ Favicon.route
+    Response.Discover.route ~ Lineup.route(stubLineup) ~ Channel.route ~ Favicon.route
   }
 }
 
@@ -102,6 +102,16 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
   "POST /lineup.post?scan=abort" should "return 200 OK" in {
     Post("/lineup.post?scan=abort") ~> legacyRoutes ~> check {
       status shouldBe StatusCodes.OK
+    }
+  }
+
+  "GET /status.json" should "return 200 OK and tuner array in Legacy mode" in {
+    Channel.clearActiveStreams()
+    Get("/status.json") ~> legacyRoutes ~> check {
+      val _ = status shouldBe StatusCodes.OK
+      val arr = responseAs[String].parseJson.asInstanceOf[JsArray].elements
+      val _ = arr.size shouldBe 2
+      arr(0).asJsObject.fields("Resource") shouldBe JsString("tuner0")
     }
   }
 }

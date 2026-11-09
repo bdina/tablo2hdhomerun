@@ -106,13 +106,14 @@ object Tablo2HDHomeRun {
 
   def logStartupConfig(config: AppConfig): Unit =
     log.info(
-      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} idleGraceSec={} stallTimeoutSec={} tuneTimeoutSec={} recoveryTimeoutSec={} preRollKeepAlive={} mediaRoot={}"
+      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} metricsIntervalSec={} idleGraceSec={} stallTimeoutSec={} tuneTimeoutSec={} recoveryTimeoutSec={} preRollKeepAlive={} mediaRoot={}"
     , appVersion
     , config.tablo.gen.envValue
     , config.tablo.ipHost
     , config.proxy.bindHost
     , config.proxy.bindPort
     , config.stream.backend.envValue
+    , config.stream.metricsIntervalSec
     , config.proxy.idleGraceSec
     , config.stream.resilient.stallTimeoutSec
     , config.stream.resilient.tuneTimeoutSec

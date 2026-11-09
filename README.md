@@ -17,6 +17,7 @@ Our goal is to allow you to leave a fringe channel playing all day in Plex compl
 - Live TV streaming via MPEG-TS with cold-start keepalive to eliminate client timeouts
 - Resilient HLS session management with automatic tuner recovery, zero seen-content replay at live edge, and idle grace retention
 - Plex-optimized stream resilience: keeps clients playing with frozen video during background tuner re-tunes, preventing fatal playback error modals
+- Periodic stream quality operational logging (`[stream:metrics]`) and SiliconDust HDHomeRun `GET /status.json` tuner telemetry endpoint (`SignalStrengthPercent`, `SignalQualityPercent`, `SymbolQualityPercent`, `NetworkRate`)
 - XMLTV program guide generation
 - Channel lineup in HDHomeRun format
 - Docker support with native image builds
@@ -102,6 +103,7 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | `STREAM_BACKEND` | `hls` | Live stream backend: `hls` or `ffmpeg` |
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit MPEG-TS null packets during cold tune to prevent client timeouts |
 | `SESSION_IDLE_GRACE_SEC` | `180` | Idle grace period (in seconds) to retain tuner session |
+| `STREAM_METRICS_INTERVAL_SEC` | `30` | Periodic `[stream:metrics]` operational log interval in seconds (`<= 0` disables periodic logs) |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `0` | Total outage duration before ending stream (`0` = indefinite while viewer is tuned) |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 
@@ -110,9 +112,11 @@ docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 | Endpoint | Description |
 |----------|-------------|
 | `GET /discover.json` | Device discovery metadata |
+| `GET /status.json` | Per-tuner signal/feed/symbol quality and network bitrate status |
 | `GET /lineup.json` | Channel lineup |
 | `GET /lineup_status.json` | Scan status |
 | `GET /channel/{id}` | Live MPEG-TS stream |
+| `GET /auto/v{major}.{minor}` | Live MPEG-TS stream by virtual channel number |
 | `GET /guide.xml` | XMLTV program guide |
 
 ## Documentation

@@ -30,6 +30,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.preRollIntervalMs shouldBe 100
     val _ = config.proxy.preRollPackets shouldBe 7
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
+    val _ = config.stream.metricsIntervalSec shouldBe 30
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 45
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 20
     val _ = config.stream.resilient.retryDelaySec shouldBe 1
@@ -58,8 +59,10 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "SESSION_IDLE_GRACE_SEC" -> "60",
       "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
       "STREAM_PRE_ROLL_PACKETS" -> "14",
-      "STREAM_RECOVERY_LIVE_EDGE_SEGMENTS" -> "5"
+      "STREAM_RECOVERY_LIVE_EDGE_SEGMENTS" -> "5",
+      "STREAM_METRICS_INTERVAL_SEC" -> "15"
     )).config
+    val _ = config.stream.metricsIntervalSec shouldBe 15
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 12
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
     val _ = config.stream.resilient.retryDelaySec shouldBe 2

@@ -283,7 +283,10 @@ object Tablo4thGen {
       implicit val channelLineupFormat: JsonFormat[ChannelLineup] = jsonFormat5(ChannelLineup.apply)
     }
 
+    final case class VctInfo(vctNumber: String, vctName: String)
+
     private val channelLabels = new java.util.concurrent.ConcurrentHashMap[String, String]()
+    private val channelVctInfo = new java.util.concurrent.ConcurrentHashMap[String, VctInfo]()
 
     def formatChannelLabel(channel: ChannelLineup): String = {
       val (major, minor, networkOpt, callSignOpt) = channel.kind match {
@@ -307,6 +310,21 @@ object Tablo4thGen {
       val label = formatChannelLabel(channel)
       if (channel.identifier != null && channel.identifier.nonEmpty && label.nonEmpty) {
         val _ = channelLabels.put(channel.identifier, label)
+        val (major, minor, callSignOpt) = channel.kind match {
+          case "ota" =>
+            val ota = channel.ota.getOrElse(OtaChannelInfo(0, 0, None, None, None, None, None))
+            (ota.major, ota.minor, ota.callSign)
+          case "ott" =>
+            val ott = channel.ott.getOrElse(OttChannelInfo(None, None, None, None, None, None, None))
+            (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign)
+          case _ =>
+            (0, 0, None)
+        }
+        val vctNumber = if (major > 0) s"$major.$minor" else "0.0"
+        val vctName = callSignOpt.map(_.trim).filter(_.nonEmpty)
+          .orElse(Option(channel.name).map(_.trim).filter(_.nonEmpty))
+          .getOrElse(channel.identifier)
+        val _ = channelVctInfo.put(channel.identifier, VctInfo(vctNumber, vctName))
       }
       label
     }
@@ -329,6 +347,8 @@ object Tablo4thGen {
           } {
             val label = guideNumber.map(num => s"$name $num").getOrElse(name)
             val _ = channelLabels.putIfAbsent(channelId, label)
+            val vctNum = guideNumber.getOrElse("0.0")
+            val _ = channelVctInfo.putIfAbsent(channelId, VctInfo(vctNum, name))
           }
         }
       }
@@ -336,11 +356,29 @@ object Tablo4thGen {
     def channelLabel(channelId: String): String =
       Option(channelLabels.get(channelId)).filter(_.nonEmpty).getOrElse(channelId)
 
+    def vctInfo(channelId: String): VctInfo =
+      Option(channelVctInfo.get(channelId)).getOrElse {
+        val lbl = channelLabel(channelId)
+        val lastSpace = lbl.lastIndexOf(' ')
+        if (lastSpace > 0) {
+          val candidateNum = lbl.substring(lastSpace + 1)
+          if (candidateNum.nonEmpty && candidateNum.forall(c => c.isDigit || c == '.')) {
+            VctInfo(candidateNum, lbl.substring(0, lastSpace))
+          } else {
+            VctInfo(channelId, lbl)
+          }
+        } else {
+          VctInfo(channelId, lbl)
+        }
+      }
+
     def streamLabel(channelId: String, leaseId: String): String =
       s"${channelLabel(channelId)} ($leaseId)"
 
-    def clearChannelLabels(): Unit =
+    def clearChannelLabels(): Unit = {
       channelLabels.clear()
+      channelVctInfo.clear()
+    }
 
     def isHd(kind: String, minor: Int, name: String, callSign: Option[String]): Boolean = {
       val nameUpper = name.toUpperCase
@@ -1224,6 +1262,7 @@ object Tablo4thGen {
         case class Release(channelId: String, clientId: String) extends Request
         case class SetTotalTuners(total: Int) extends Request
         case class GetSessionMeta(channelId: String, replyTo: ActorRef[Option[TabloSessionMeta]]) extends Request
+        case class GetTunerStatuses(replyTo: ActorRef[Seq[HDHomeRunStatus.TunerStatus]]) extends Request
       }
 
       sealed trait Response
@@ -1246,6 +1285,8 @@ object Tablo4thGen {
       , keepalive: Option[Int]
       , playlistUrl: String
       , leaseId: String = ""
+      , metricsRef: AtomicReference[ app.stream.StreamMetrics.WindowSnapshot ] =
+          new AtomicReference(app.stream.StreamMetrics.WindowSnapshot.initial)
       )
 
       sealed trait Command extends Request
@@ -1415,6 +1456,25 @@ object Tablo4thGen {
         }
 
         Behaviors.receiveMessage {
+          case Request.GetTunerStatuses(replyTo) =>
+            val activeInfos = sessions.toSeq.sortBy(_._1).map {
+              case (chId, state) =>
+                val vct = Lineup.vctInfo(chId)
+                val snap = state match {
+                  case live: SessionState.Live => live.meta.metricsRef.get()
+                  case idle: SessionState.IdleGrace => idle.meta.metricsRef.get()
+                  case _: SessionState.Opening => app.stream.StreamMetrics.WindowSnapshot.initial
+                }
+                HDHomeRunStatus.ActiveTunerInfo(
+                  channelId = chId
+                , vctNumber = vct.vctNumber
+                , vctName = vct.vctName
+                , snapshot = snap
+                )
+            }
+            replyTo ! HDHomeRunStatus.buildTunerStatuses(tuners, activeInfos)
+            Behaviors.same
+
           case Request.GetSessionMeta(channelId, replyTo) =>
             val metaOpt = sessions.get(channelId).flatMap {
               case live: SessionState.Live => Some(live.meta)
@@ -1664,6 +1724,10 @@ object Tablo4thGen {
         val cancelled = new AtomicBoolean(false)
         @volatile var retryTimer: Option[pekko.actor.Cancellable] = None
         @volatile var activeTeardown: Option[() => Unit] = None
+        val hlsCollector = new app.stream.StreamMetrics.HlsCollector()
+        val latestMetricsRef = new AtomicReference[app.stream.StreamMetrics.WindowSnapshot](
+          app.stream.StreamMetrics.WindowSnapshot.initial
+        )
 
         def watchChannel(attempt: Int = 0): Future[Response.Watch4thGenResponse] =
           if (cancelled.get()) {
@@ -1821,6 +1885,7 @@ object Tablo4thGen {
             , onSeqAdvanced = seq => lastSeqRef.set(seq)
             , liveEdgeCount = liveEdgeCount
             , checkSessionAlive = checkSessionAlive
+            , metricsCollector = Some(hlsCollector)
             )
             .viaMat(KillSwitches.single)(Keep.right)
             .mapMaterializedValue { killSwitch =>
@@ -1986,6 +2051,9 @@ object Tablo4thGen {
             if (channelDisplay == channelId) s"4thgen-channel-$channelId"
             else s"4thgen-channel-$channelId ($channelDisplay)"
 
+          val metricsInterval =
+            Option(AppContext.config).map(_.stream.metricsIntervalSec.seconds).getOrElse(30.seconds)
+
           val ((outerKillSwitch, upstreamDone), hubSource) =
             ResilientHlsSource(
               streamFactory = () => streamFactory()
@@ -1996,6 +2064,7 @@ object Tablo4thGen {
             , audioPidsSupplier = () => cachedHeadersRef.get().audioPids
             , audioStreamTypesSupplier = () => cachedHeadersRef.get().audioStreamTypes
             , lockedSeqHeaderSupplier = () => cachedHeadersRef.get().lockedSeqHeader
+            , metricsCollector = Some(hlsCollector)
             )
               .via(MpegTsSync.cacheFlow(
                 cachedHeadersRef
@@ -2006,6 +2075,9 @@ object Tablo4thGen {
                   }
                 }
               , label = streamLabel
+              , metricsInterval = metricsInterval
+              , hlsCollector = Some(hlsCollector)
+              , latestMetricsRef = Some(latestMetricsRef)
               ))
               .viaMat(KillSwitches.single)(Keep.right)
               .watchTermination()(Keep.both)
@@ -2028,6 +2100,7 @@ object Tablo4thGen {
           , keepalive = firstSession.keepalive
           , playlistUrl = firstSession.playlistUrl
           , leaseId = leaseId
+          , metricsRef = latestMetricsRef
           )
 
           val teardown: () => Unit = () => {
@@ -2355,6 +2428,35 @@ object Tablo4thGen {
         }
       }
 
+      path("status.json") {
+        options {
+          respondWithHeaders(corsHeaders) {
+            complete(StatusCodes.OK)
+          }
+        } ~
+        get {
+          implicit val statusTimeout: Timeout = Timeout(3.seconds)
+          val statusFut = getOrFetchTotalTuners().flatMap { tuners =>
+            sessionManager ! SessionManager.Request.SetTotalTuners(tuners)
+            sessionManager.ask[Seq[HDHomeRunStatus.TunerStatus]](replyTo =>
+              SessionManager.Request.GetTunerStatuses(replyTo)
+            )(statusTimeout, system.scheduler)
+          }
+          onComplete(statusFut) {
+            case Success(statuses) =>
+              import HDHomeRunStatus.tunerStatusFormat
+              val json = statuses.toJson.compactPrint
+              respondWithHeaders(corsHeaders) {
+                complete(HttpEntity(ContentTypes.`application/json`, json))
+              }
+            case Failure(ex) =>
+              log.warn("[status] failed to query tuner statuses", ex)
+              respondWithHeaders(corsHeaders) {
+                complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to query tuner status"))
+              }
+          }
+        }
+      } ~
       path("channel" / Segment / "segment" / Remaining) { (channelId, encodedSegment) =>
         options {
           respondWithHeaders(corsHeaders) {

@@ -280,6 +280,12 @@ object MpegTsSync {
 
   val DefaultFreezeThreshold: FiniteDuration = Duration.Zero
   val DefaultFreezeTickInterval: FiniteDuration = 100.millis
+  val DefaultMetricsInterval: FiniteDuration = 30.seconds
+
+  def configuredMetricsInterval: FiniteDuration =
+    scala.util.Try(app.AppContext.config.stream.metricsIntervalSec).toOption
+      .map(sec => if (sec <= 0) Duration.Zero else sec.seconds)
+      .getOrElse(DefaultMetricsInterval)
 
   def cacheFlow(
     cachedHeadersRef: AtomicReference[CachedHeaders]
@@ -287,8 +293,22 @@ object MpegTsSync {
   , freezeThreshold: FiniteDuration = DefaultFreezeThreshold
   , freezeTickInterval: FiniteDuration = DefaultFreezeTickInterval
   , label: String = ""
+  , metricsInterval: FiniteDuration = configuredMetricsInterval
+  , hlsCollector: Option[StreamMetrics.HlsCollector] = None
+  , latestMetricsRef: Option[AtomicReference[StreamMetrics.WindowSnapshot]] = None
   ): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new CacheStage(cachedHeadersRef, onHeadersUpdated, freezeThreshold, freezeTickInterval, label))
+    Flow.fromGraph(
+      new CacheStage(
+        cachedHeadersRef
+      , onHeadersUpdated
+      , freezeThreshold
+      , freezeTickInterval
+      , label
+      , metricsInterval
+      , hlsCollector
+      , latestMetricsRef
+      )
+    )
 
   def signedPtsDiff(a: Long, b: Long): Long = {
     val raw = (a - b) & FreezeFramePacer.PtsMask
@@ -339,6 +359,9 @@ object MpegTsSync {
   , freezeThreshold: FiniteDuration
   , freezeTickInterval: FiniteDuration
   , label: String
+  , metricsInterval: FiniteDuration
+  , hlsCollector: Option[StreamMetrics.HlsCollector]
+  , latestMetricsRef: Option[AtomicReference[StreamMetrics.WindowSnapshot]]
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.out")
@@ -379,6 +402,158 @@ object MpegTsSync {
       private var lastStatsLogNanos: Long = System.nanoTime()
       private val statsLogIntervalNanos: Long = 30.seconds.toNanos
       private val labelPrefix: String = if (label.nonEmpty) s" label=$label" else ""
+
+      private var windowStartNanos: Long = System.nanoTime()
+      private var windowRealPackets: Long = 0L
+      private var windowNullPackets: Long = 0L
+      private var windowElementaryPackets: Long = 0L
+      private var windowErrorPackets: Long = 0L
+      private var windowVideoFramesClean: Long = 0L
+      private var windowVideoFramesTotal: Long = 0L
+      private var currentVideoFrameStarted: Boolean = false
+      private var currentVideoFrameCorrupt: Boolean = false
+      private var windowAudioFramesClean: Long = 0L
+      private var windowAudioFramesTotal: Long = 0L
+      private var currentAudioFrameStarted: Set[Int] = Set.empty
+      private var currentAudioFrameCorrupt: Set[Int] = Set.empty
+      private var windowKeyframes: Long = 0L
+      private var windowTei: Long = 0L
+      private var windowCcErr: Long = 0L
+      private var windowSliceDrops: Long = 0L
+      private var windowPtsScrubs: Long = 0L
+      private var windowSyncLossBytes: Long = 0L
+      private var windowPtsAdvanceTicks: Long = 0L
+      private var lastContinuousVideoPts: Long = -1L
+      private var pendingMetricOutlierPts: Option[Long] = None
+      private var latestVideoPts: Long = -1L
+      private var latestAudioPts: Long = -1L
+      private var initialSnapshotPublished: Boolean = false
+
+      private def recordInputPts(arr: Array[Byte], pktOffset: Int, isVideo: Boolean): Unit = {
+        val pesOff = FreezeFramePacer.findPesHeaderOffset(arr, pktOffset)
+        if (pesOff >= 0) {
+          FreezeFramePacer.readPtsDts(arr, pesOff, pktOffset + PacketSize).foreach { case (inPts, _) =>
+            if (isVideo) {
+              latestVideoPts = inPts
+              if (lastContinuousVideoPts >= 0L) {
+                val delta = signedPtsDiff(inPts, lastContinuousVideoPts)
+                if (delta > 0L && delta <= FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                  windowPtsAdvanceTicks += delta
+                  lastContinuousVideoPts = inPts
+                  pendingMetricOutlierPts = None
+                } else if (delta < -FreezeFramePacer.RebaseThresholdTicks || delta > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                  if (pendingMetricOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)) {
+                    lastContinuousVideoPts = inPts
+                    pendingMetricOutlierPts = None
+                  } else {
+                    pendingMetricOutlierPts = Some(inPts)
+                    if (freezeThreshold.toNanos <= 0L) {
+                      totalScrubbedPts += 1L
+                      windowPtsScrubs += 1L
+                    }
+                  }
+                } else {
+                  pendingMetricOutlierPts = None
+                }
+              } else {
+                lastContinuousVideoPts = inPts
+              }
+            } else {
+              latestAudioPts = inPts
+            }
+          }
+        }
+      }
+
+      private def computeAvSkewMs(): Long =
+        if (latestVideoPts >= 0L && latestAudioPts >= 0L) {
+          val diffTicks = signedPtsDiff(latestVideoPts, latestAudioPts)
+          if (math.abs(diffTicks) <= 900000L) (diffTicks * 1000L) / 90000L else 0L
+        } else 0L
+
+      private def finalizeOpenFrames(): Unit = {
+        if (currentVideoFrameStarted) {
+          windowVideoFramesTotal += 1L
+          if (!currentVideoFrameCorrupt) {
+            windowVideoFramesClean += 1L
+          }
+          currentVideoFrameStarted = false
+          currentVideoFrameCorrupt = false
+        }
+        currentAudioFrameStarted.foreach { apid =>
+          windowAudioFramesTotal += 1L
+          if (!currentAudioFrameCorrupt.contains(apid)) {
+            windowAudioFramesClean += 1L
+          }
+        }
+        currentAudioFrameStarted = Set.empty
+        currentAudioFrameCorrupt = Set.empty
+      }
+
+      private def buildCurrentWindowSnapshot(nowNanos: Long, resetHls: Boolean): StreamMetrics.WindowSnapshot = {
+        val elapsedSec = math.max(0.001, (nowNanos - windowStartNanos).toDouble / 1000000000.0)
+        val hlsStats = hlsCollector match {
+          case Some(c) => if (resetHls) c.snapshotAndResetWindow() else c.currentWindowStats()
+          case None => StreamMetrics.HlsWindowStats()
+        }
+        val openVideoTotal = if (!resetHls && currentVideoFrameStarted) 1L else 0L
+        val openVideoClean = if (!resetHls && currentVideoFrameStarted && !currentVideoFrameCorrupt) 1L else 0L
+        val openAudioTotal = if (!resetHls) currentAudioFrameStarted.size.toLong else 0L
+        val openAudioClean =
+          if (!resetHls) currentAudioFrameStarted.count(apid => !currentAudioFrameCorrupt.contains(apid)).toLong
+          else 0L
+
+        StreamMetrics.WindowSnapshot.compute(
+          windowSec = elapsedSec
+        , realPackets = windowRealPackets
+        , nullPackets = windowNullPackets
+        , elementaryPackets = windowElementaryPackets
+        , errorPackets = windowErrorPackets
+        , videoFramesClean = windowVideoFramesClean + openVideoClean
+        , videoFramesTotal = windowVideoFramesTotal + openVideoTotal
+        , audioFramesClean = windowAudioFramesClean + openAudioClean
+        , audioFramesTotal = windowAudioFramesTotal + openAudioTotal
+        , keyframes = windowKeyframes
+        , tei = windowTei
+        , ccErr = windowCcErr
+        , sliceDrops = windowSliceDrops
+        , ptsScrubs = windowPtsScrubs
+        , syncLossBytes = windowSyncLossBytes
+        , ptsAdvanceTicks = windowPtsAdvanceTicks
+        , avSkewMs = computeAvSkewMs()
+        , hls = hlsStats
+        )
+      }
+
+      private def resetWindowCounters(nowNanos: Long): Unit = {
+        windowStartNanos = nowNanos
+        windowRealPackets = 0L
+        windowNullPackets = 0L
+        windowElementaryPackets = 0L
+        windowErrorPackets = 0L
+        windowVideoFramesClean = 0L
+        windowVideoFramesTotal = 0L
+        windowAudioFramesClean = 0L
+        windowAudioFramesTotal = 0L
+        windowKeyframes = 0L
+        windowTei = 0L
+        windowCcErr = 0L
+        windowSliceDrops = 0L
+        windowPtsScrubs = 0L
+        windowSyncLossBytes = 0L
+        windowPtsAdvanceTicks = 0L
+      }
+
+      private def emitMetricsWindow(nowNanos: Long, logOutput: Boolean): Unit = {
+        finalizeOpenFrames()
+        val snap = buildCurrentWindowSnapshot(nowNanos, resetHls = true)
+        latestMetricsRef.foreach(_.set(snap))
+        initialSnapshotPublished = true
+        if (logOutput) {
+          log.info(snap.formatLogLine(label))
+        }
+        resetWindowCounters(nowNanos)
+      }
 
       private def nextOutboundCc(pid: Int, hasPayload: Boolean): Int =
         if (hasPayload) {
@@ -423,6 +598,7 @@ object MpegTsSync {
                     } else {
                       pendingOutlierPts = Some(inPts)
                       totalScrubbedPts += 1L
+                      windowPtsScrubs += 1L
                       (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks) & FreezeFramePacer.PtsMask
                     }
                   } else if (diffFromOut < -FreezeFramePacer.RebaseThresholdTicks || diffFromOut > FreezeFramePacer.RebaseThresholdTicks) {
@@ -447,6 +623,7 @@ object MpegTsSync {
                 val mappedPts = (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
                 if (lastOutputPts >= 0 && math.abs(signedPtsDiff(mappedPts, lastOutputPts)) > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
                   totalScrubbedPts += 1L
+                  windowPtsScrubs += 1L
                   lastOutputPts
                 } else {
                   mappedPts
@@ -494,10 +671,21 @@ object MpegTsSync {
           pid > 0 && pid != NullPid && pid != PatPid && pid != detectedPmtPid
 
         if (pid == NullPid) {
+          windowNullPackets += 1L
           if (!freezeActive) {
             val _ = outputBuilder ++= MPEGTS_NULL_PACKET
           }
         } else {
+          windowRealPackets += 1L
+          if (isElementaryPid) {
+            windowElementaryPackets += 1L
+          }
+          if (isDiscontinuity && updated.videoPid.contains(pid)) {
+            lastContinuousVideoPts = -1L
+            latestVideoPts = -1L
+            latestAudioPts = -1L
+            pendingMetricOutlierPts = None
+          }
           val isCcError =
             if (isTei || !isElementaryPid) {
               false
@@ -513,6 +701,10 @@ object MpegTsSync {
               false
             }
 
+          if (isElementaryPid && (isTei || isCcError)) {
+            windowErrorPackets += 1L
+          }
+
           val payloadOffset =
             if (afc == 1) pos + 4
             else if (afc == 3) pos + 5 + (arr(pos + 4) & 0xFF)
@@ -521,10 +713,27 @@ object MpegTsSync {
 
           if (isTei) {
             totalTeiPackets += 1L
+            windowTei += 1L
             if (updated.videoPid.contains(pid)) {
               droppingVideoSlice = true
+              if (pusi && currentVideoFrameStarted) {
+                windowVideoFramesTotal += 1L
+                if (!currentVideoFrameCorrupt) {
+                  windowVideoFramesClean += 1L
+                }
+              }
+              currentVideoFrameStarted = true
+              currentVideoFrameCorrupt = true
             } else if (updated.audioPids.contains(pid)) {
               droppingAudioPids += pid
+              if (pusi && currentAudioFrameStarted.contains(pid)) {
+                windowAudioFramesTotal += 1L
+                if (!currentAudioFrameCorrupt.contains(pid)) {
+                  windowAudioFramesClean += 1L
+                }
+              }
+              currentAudioFrameStarted += pid
+              currentAudioFrameCorrupt += pid
             } else if (isElementaryPid) {
               droppingOtherPids += pid
             }
@@ -559,12 +768,28 @@ object MpegTsSync {
             val isMpeg2 = updated.videoStreamType.isEmpty || updated.videoStreamType.contains(0x01) || updated.videoStreamType.contains(0x02)
             val hasOutOfBoundsSlice = !isTei && !pusi && isMpeg2 && hasPayload && payloadLen > 0 &&
               FreezeFramePacer.hasOutOfBoundsMpeg2Slice(arr, payloadOffset, payloadLen, maxSliceRow)
+            val hasVideoPesStart = pusi && FreezeFramePacer.findPesHeaderOffset(arr, pos) >= 0
+            if (hasVideoPesStart && !freezeActive) {
+              if (currentVideoFrameStarted) {
+                windowVideoFramesTotal += 1L
+                if (!currentVideoFrameCorrupt) {
+                  windowVideoFramesClean += 1L
+                }
+              }
+              currentVideoFrameStarted = true
+              currentVideoFrameCorrupt = isCcError || hasOutOfBoundsSlice
+            } else if (!freezeActive && (isCcError || hasOutOfBoundsSlice)) {
+              currentVideoFrameStarted = true
+              currentVideoFrameCorrupt = true
+            }
             if (isCcError) {
               totalCcErrors += 1L
+              windowCcErr += 1L
               droppingVideoSlice = true
             }
             if (hasOutOfBoundsSlice) {
               totalClampedSlices += 1L
+              windowSliceDrops += 1L
               droppingVideoSlice = true
             }
             val isKeyStart = hasPayload && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
@@ -573,6 +798,10 @@ object MpegTsSync {
                 freezeActive = false
                 droppingVideoSlice = false
                 seenLiveKeyframe = true
+                if (!currentVideoFrameStarted) {
+                  currentVideoFrameStarted = true
+                  currentVideoFrameCorrupt = isCcError || hasOutOfBoundsSlice
+                }
               } else {
                 val _ = outputBuilder ++= MPEGTS_NULL_PACKET
               }
@@ -581,7 +810,7 @@ object MpegTsSync {
             if (!freezeActive) {
               var sliceStuffTargetOffset = -1
               if (droppingVideoSlice && !hasOutOfBoundsSlice) {
-                if (pusi && FreezeFramePacer.findPesHeaderOffset(arr, pos) >= 0) {
+                if (hasVideoPesStart) {
                   droppingVideoSlice = false
                 } else if (!pusi && hasPayload && payloadLen > 0) {
                   val validSliceOff = FreezeFramePacer.findFirstValidVideoSliceOffset(arr, payloadOffset, payloadLen, updated.videoStreamType, maxSliceRow)
@@ -595,6 +824,11 @@ object MpegTsSync {
               }
 
               if (droppingVideoSlice) {
+                currentVideoFrameStarted = true
+                currentVideoFrameCorrupt = true
+                if (!hasOutOfBoundsSlice) {
+                  windowSliceDrops += 1L
+                }
                 FreezeFramePacer.readPcrBase(arr, pos) match {
                   case Some(rawPcr) =>
                     val normPcr = if (freezeThreshold.toNanos > 0) (rawPcr + ptsDeltaTicks) & FreezeFramePacer.PtsMask else rawPcr
@@ -606,6 +840,7 @@ object MpegTsSync {
               } else {
                 if (isKeyStart) {
                   seenLiveKeyframe = true
+                  windowKeyframes += 1L
                 }
                 val now = System.nanoTime()
                 if (pusi || isKeyStart) {
@@ -635,8 +870,15 @@ object MpegTsSync {
                   if (effectiveSeqHdr.isDefined && updated.lockedSeqHeader != effectiveSeqHdr) {
                     updated = updated.copy(lockedSeqHeader = effectiveSeqHdr)
                   }
-                  totalClampedSlices += FreezeFramePacer.sanitizeMpeg2Payload(arr, pktPayloadOffset, pktPayloadLen, maxSliceRow, lockedSeqHeader).toLong
+                  val clamped = FreezeFramePacer.sanitizeMpeg2Payload(arr, pktPayloadOffset, pktPayloadLen, maxSliceRow, lockedSeqHeader).toLong
+                  if (clamped > 0L) {
+                    totalClampedSlices += clamped
+                    windowSliceDrops += clamped
+                    currentVideoFrameStarted = true
+                    currentVideoFrameCorrupt = true
+                  }
                 }
+                recordInputPts(arr, pos, isVideo = true)
                 normalizePacketTimestamps(arr, pos, isVideo = true)
                 if (lastOutputPts >= 0) {
                   if (mediaClockAnchorPts < 0) {
@@ -661,12 +903,32 @@ object MpegTsSync {
               val streamTypeOpt = updated.audioStreamTypes.get(pid)
               if (isCcError) {
                 totalCcErrors += 1L
+                windowCcErr += 1L
                 droppingAudioPids += pid
+                currentAudioFrameStarted += pid
+                currentAudioFrameCorrupt += pid
               }
               if (droppingAudioPids.contains(pid)) {
                 if (pusi && hasPayload && payloadLen > 0 && FreezeFramePacer.hasValidAudioSyncword(arr, payloadOffset, payloadLen, streamTypeOpt)) {
                   droppingAudioPids -= pid
                 }
+              }
+              if (pusi && hasPayload && payloadLen > 0) {
+                if (currentAudioFrameStarted.contains(pid)) {
+                  windowAudioFramesTotal += 1L
+                  if (!currentAudioFrameCorrupt.contains(pid)) {
+                    windowAudioFramesClean += 1L
+                  }
+                }
+                currentAudioFrameStarted += pid
+                if (droppingAudioPids.contains(pid) || isCcError) {
+                  currentAudioFrameCorrupt += pid
+                } else {
+                  currentAudioFrameCorrupt -= pid
+                }
+              } else if (droppingAudioPids.contains(pid)) {
+                currentAudioFrameStarted += pid
+                currentAudioFrameCorrupt += pid
               }
               if (droppingAudioPids.contains(pid)) {
                 val _ = outputBuilder ++= MPEGTS_NULL_PACKET
@@ -676,6 +938,9 @@ object MpegTsSync {
                     val _ = learnedAudioFormats.put(pid, fmt)
                   }
                 }
+                if (updated.audioPids.headOption.contains(pid)) {
+                  recordInputPts(arr, pos, isVideo = false)
+                }
                 normalizePacketTimestamps(arr, pos, isVideo = false)
                 emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
               }
@@ -683,6 +948,7 @@ object MpegTsSync {
           } else {
             if (isCcError) {
               totalCcErrors += 1L
+              windowCcErr += 1L
               if (pusi) droppingOtherPids -= pid else droppingOtherPids += pid
             } else if (droppingOtherPids.contains(pid) && pusi) {
               droppingOtherPids -= pid
@@ -699,14 +965,19 @@ object MpegTsSync {
       }
 
       override def preStart(): Unit = {
+        windowStartNanos = System.nanoTime()
         if (freezeThreshold.toNanos > 0 && freezeTickInterval.toNanos > 0) {
           scheduleWithFixedDelay("freeze-pacer", freezeTickInterval, freezeTickInterval)
+        }
+        if (metricsInterval.toNanos > 0) {
+          scheduleWithFixedDelay("metrics-logger", metricsInterval, metricsInterval)
         }
       }
 
       override protected def onTimer(timerKey: Any): Unit = {
-        val _ = timerKey
-        if (isAvailable(out) && seenLiveKeyframe && freezeThreshold.toNanos > 0) {
+        if (timerKey == "metrics-logger") {
+          emitMetricsWindow(System.nanoTime(), logOutput = true)
+        } else if (isAvailable(out) && seenLiveKeyframe && freezeThreshold.toNanos > 0) {
           val now = System.nanoTime()
           val headers = cachedHeadersRef.get()
           headers.videoPid.foreach { vpid =>
@@ -786,9 +1057,12 @@ object MpegTsSync {
             } else {
               val nextSync = findNextSync(arr, pos + 1, len)
               if (nextSync >= 0) {
+                windowSyncLossBytes += (nextSync - pos).toLong
                 pos = nextSync
               } else {
-                pos = len - PacketSize + 1
+                val nextPos = len - PacketSize + 1
+                windowSyncLossBytes += math.max(0, nextPos - pos).toLong
+                pos = nextPos
               }
             }
           }
@@ -801,6 +1075,12 @@ object MpegTsSync {
           if (updated != prev) {
             cachedHeadersRef.set(updated)
             onHeadersUpdated(updated)
+          }
+
+          if (!initialSnapshotPublished && latestMetricsRef.isDefined && windowRealPackets >= 100L) {
+            initialSnapshotPublished = true
+            val interim = buildCurrentWindowSnapshot(System.nanoTime(), resetHls = false)
+            latestMetricsRef.foreach(_.set(interim))
           }
 
           val hasNewAnomalies =
@@ -854,8 +1134,13 @@ object MpegTsSync {
                 pos += PacketSize
               } else {
                 val next = findNextSync(arr, pos + 1, arr.length)
-                if (next >= 0) pos = next
-                else pos = arr.length
+                if (next >= 0) {
+                  windowSyncLossBytes += (next - pos).toLong
+                  pos = next
+                } else {
+                  windowSyncLossBytes += (arr.length - pos).toLong
+                  pos = arr.length
+                }
               }
             }
             val prev = cachedHeadersRef.get()
@@ -867,6 +1152,9 @@ object MpegTsSync {
             if (result.nonEmpty) {
               emit(out, result)
             }
+          }
+          if (windowRealPackets > 0L || windowNullPackets > 0L) {
+            emitMetricsWindow(System.nanoTime(), logOutput = metricsInterval.toNanos > 0L)
           }
           if (totalTeiPackets > 0 || totalCcErrors > 0 || totalClampedSlices > 0 || totalScrubbedPts > 0 || totalFreezeBursts > 0) {
             log.info(

@@ -594,5 +594,76 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
         runnerCalls.get() shouldBe 2
       }
     }
+
+    "report active and idle tuner statuses via GetTunerStatuses" in {
+      import app.stream.StreamMetrics
+      Tablo4thGen.Lineup.clearChannelLabels()
+      Tablo4thGen.Lineup.registerChannelsFromJson(Seq(
+        spray.json.JsObject(
+          "GuideNumber" -> spray.json.JsString("2.1"),
+          "GuideName" -> spray.json.JsString("CBS-HD"),
+          "URL" -> spray.json.JsString("http://127.0.0.1:8080/channel/ch-status-1")
+        )
+      ))
+
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager(
+        startRunner = { (_, self) => selfRef.set(self) }
+      , totalTuners = 2
+      , idleGrace = 5.seconds
+      )
+
+      val statusProbe = testKit.createTestProbe[Seq[HDHomeRunStatus.TunerStatus]]()
+      mgr ! Request.GetTunerStatuses(statusProbe.ref)
+      val idleStatuses = statusProbe.receiveMessage()
+      val _ = idleStatuses.size shouldBe 2
+      val _ = idleStatuses(0).Resource shouldBe "tuner0"
+      val _ = idleStatuses(0).VctNumber shouldBe None
+      val _ = idleStatuses(1).Resource shouldBe "tuner1"
+      val _ = idleStatuses(1).VctNumber shouldBe None
+
+      val acquireProbe = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-status-1", "client-1", acquireProbe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+
+      val snap = StreamMetrics.WindowSnapshot.compute(
+        windowSec = 10.0
+      , realPackets = 50000L
+      , nullPackets = 0L
+      , elementaryPackets = 48000L
+      , errorPackets = 480L
+      , videoFramesClean = 588L
+      , videoFramesTotal = 600L // 98%
+      , audioFramesClean = 300L
+      , audioFramesTotal = 300L // 100%
+      , keyframes = 10L
+      , tei = 0L
+      , ccErr = 5L
+      , sliceDrops = 0L
+      , ptsScrubs = 0L
+      , syncLossBytes = 0L
+      , ptsAdvanceTicks = 10L * 90000L
+      , avSkewMs = -5L
+      , hls = StreamMetrics.HlsWindowStats()
+      )
+      val metricsRef = new AtomicReference(snap)
+      val sessionMeta = meta().copy(metricsRef = metricsRef)
+      selfRef.get() ! Command.CheckIn("ch-status-1", sessionMeta, hubSource, () => ())
+      val _ = acquireProbe.expectMessageType[Response.Attached]
+
+      mgr ! Request.GetTunerStatuses(statusProbe.ref)
+      val liveStatuses = statusProbe.receiveMessage()
+      val _ = liveStatuses.size shouldBe 2
+      val _ = liveStatuses(0).Resource shouldBe "tuner0"
+      val _ = liveStatuses(0).VctNumber shouldBe Some("2.1")
+      val _ = liveStatuses(0).VctName shouldBe Some("CBS-HD")
+      val _ = liveStatuses(0).SignalStrengthPercent shouldBe Some(100)
+      val _ = liveStatuses(0).SignalQualityPercent shouldBe Some(98)
+      val _ = liveStatuses(0).SymbolQualityPercent shouldBe Some(99)
+      val _ = liveStatuses(0).NetworkRate shouldBe Some(snap.networkRateBps)
+      liveStatuses(1).VctNumber shouldBe None
+    }
   }
 }

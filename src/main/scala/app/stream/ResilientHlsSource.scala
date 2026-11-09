@@ -54,6 +54,7 @@ object ResilientHlsSource {
   , audioStreamTypesSupplier: () => Map[Int, Int] = () => Map.empty
   , lockedSeqHeaderSupplier: () => Option[ByteString] = () => None
   , keyframeTimeout: FiniteDuration = Duration.Zero
+  , metricsCollector: Option[StreamMetrics.HlsCollector] = None
   ): Source[ByteString, ?] = {
     val effectiveMax = if (maxRetryDelay < retryDelay) retryDelay else maxRetryDelay
     val effectiveKeyframeTimeout = keyframeTimeout
@@ -62,7 +63,10 @@ object ResilientHlsSource {
     RestartSource.withBackoff(restartSettings) { () =>
       val n = attempts.incrementAndGet()
       if (n == 1) log.info(s"[$streamName] stream connect attempt=$n")
-      else log.warn(s"[$streamName] stream recovery retune attempt=$n")
+      else {
+        metricsCollector.foreach(_.onRetune())
+        log.warn(s"[$streamName] stream recovery retune attempt=$n")
+      }
       val inner = streamFactory().via(
         StallWatchdog.flow(
           tuneTimeout = tuneTimeout
