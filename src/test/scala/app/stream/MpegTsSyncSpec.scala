@@ -1353,34 +1353,54 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       (recoveredAudio(3) & 0x0F) shouldBe 1 // audioValidPusi continuous CC = 1
     }
 
-    "cacheFlow should scrub single-packet PTS outliers jumping > 2s to lastOutputPts + 3003" in {
+    "cacheFlow should scrub single-packet PTS outliers jumping > 2s to lastOutputPts + 3003 even when freezeThreshold is Duration.Zero" in {
       val videoPid = 0x0101
+      val audioPid = 0x0102
       val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
-        MpegTsSync.CachedHeaders(videoPid = Some(videoPid), videoStreamType = Some(0x02))
+        MpegTsSync.CachedHeaders(
+          videoPid = Some(videoPid)
+        , videoStreamType = Some(0x02)
+        , audioPids = Seq(audioPid)
+        , audioStreamTypes = Map(audioPid -> 0x81)
+        )
       )
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
 
       val v1 = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1)
+      val a1 = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1)
       val v2 = buildVideoPesPacket(videoPid, pts = 93003L, cc = 2)
       // Outlier jump of +406,997 ticks (> 180,000 ticks = 2s)
       val vOutlier = buildVideoPesPacket(videoPid, pts = 500000L, cc = 3)
       val v4 = buildVideoPesPacket(videoPid, pts = 96006L, cc = 4)
 
-      val out = Source.single(v1 ++ v2 ++ vOutlier ++ v4)
-        .via(MpegTsSync.cacheFlow(cachedHeadersRef, freezeThreshold = 10.seconds))
+      val out = Source.single(v1 ++ a1 ++ v2 ++ vOutlier ++ v4)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = Duration.Zero
+          , latestMetricsRef = Some(latestMetricsRef)
+          )
+        )
         .runWith(Sink.fold(ByteString.empty)(_ ++ _))
         .futureValue
 
-      val _ = out.length shouldBe (188 * 4)
+      val _ = out.length shouldBe (188 * 5)
       val p1Pts = FreezeFramePacer.readPtsDts(out.slice(0, 188).toArray, 4, 188).map(_._1)
-      val p2Pts = FreezeFramePacer.readPtsDts(out.slice(188, 376).toArray, 4, 188).map(_._1)
-      val p3Pts = FreezeFramePacer.readPtsDts(out.slice(376, 564).toArray, 4, 188).map(_._1)
-      val p4Pts = FreezeFramePacer.readPtsDts(out.slice(564, 752).toArray, 4, 188).map(_._1)
+      val a1Pts = FreezeFramePacer.readPtsDts(out.slice(188, 376).toArray, 4, 188).map(_._1)
+      val p2Pts = FreezeFramePacer.readPtsDts(out.slice(376, 564).toArray, 4, 188).map(_._1)
+      val p3Pts = FreezeFramePacer.readPtsDts(out.slice(564, 752).toArray, 4, 188).map(_._1)
+      val p4Pts = FreezeFramePacer.readPtsDts(out.slice(752, 940).toArray, 4, 188).map(_._1)
 
       val _ = p1Pts shouldBe Some(90000L)
+      val _ = a1Pts shouldBe Some(90000L)
       val _ = p2Pts shouldBe Some(93003L)
-      // Outlier scrubbed to 93003L + 3003L = 96006L
+      // Outlier scrubbed in-place to 93003L + 3003L = 96006L even with freezeThreshold = Duration.Zero
       val _ = p3Pts shouldBe Some(96006L)
-      p4Pts shouldBe Some(96006L)
+      val _ = p4Pts shouldBe Some(96006L)
+
+      val snap = latestMetricsRef.get()
+      val _ = snap.ptsScrubs shouldBe 1L
+      snap.avSkewMs shouldBe ((6006L * 1000L) / 90000L)
     }
 
     "cacheFlow should rebase timestamps across confirmed PTS reset to maintain strict monotonic PTS" in {
