@@ -379,6 +379,7 @@ object MpegTsSync {
       private val lastInCcByPid = Array.fill[Byte](8192)((-1).toByte)
       private val outboundCcByPid = Array.fill[Byte](8192)((-1).toByte)
       private var droppingVideoSlice: Boolean = false
+      private var requireVideoPesStart: Boolean = false
       private var droppingAudioPids: Set[Int] = Set.empty
       private var droppingOtherPids: Set[Int] = Set.empty
       private var maxSliceRow: Int = FreezeFramePacer.DefaultMaxSliceRow
@@ -715,6 +716,9 @@ object MpegTsSync {
             windowTei += 1L
             if (updated.videoPid.contains(pid)) {
               droppingVideoSlice = true
+              if (pusi) {
+                requireVideoPesStart = true
+              }
               if (pusi && currentVideoFrameStarted) {
                 windowVideoFramesTotal += 1L
                 if (!currentVideoFrameCorrupt) {
@@ -765,9 +769,17 @@ object MpegTsSync {
             emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
           } else if (updated.videoPid.contains(pid)) {
             val isMpeg2 = updated.videoStreamType.isEmpty || updated.videoStreamType.contains(0x01) || updated.videoStreamType.contains(0x02)
-            val hasOutOfBoundsSlice = !isTei && !pusi && isMpeg2 && hasPayload && payloadLen > 0 &&
-              FreezeFramePacer.hasOutOfBoundsMpeg2Slice(arr, payloadOffset, payloadLen, maxSliceRow)
-            val hasVideoPesStart = pusi && FreezeFramePacer.findPesHeaderOffset(arr, pos) >= 0
+            val pesOff = if (pusi) FreezeFramePacer.findPesHeaderOffset(arr, pos) else -1
+            val hasVideoPesStart = pusi && pesOff >= 0
+            val esPayloadOffset =
+              if (hasVideoPesStart && pesOff + 9 <= pos + PacketSize) {
+                math.min(pos + PacketSize, pesOff + 9 + (arr(pesOff + 8) & 0xFF))
+              } else {
+                payloadOffset
+              }
+            val esPayloadLen = math.max(0, (pos + PacketSize) - esPayloadOffset)
+            val hasOutOfBoundsSlice = !isTei && isMpeg2 && hasPayload && esPayloadLen > 0 &&
+              FreezeFramePacer.hasOutOfBoundsMpeg2Slice(arr, esPayloadOffset, esPayloadLen, maxSliceRow)
             if (hasVideoPesStart && !freezeActive) {
               if (currentVideoFrameStarted) {
                 windowVideoFramesTotal += 1L
@@ -785,11 +797,15 @@ object MpegTsSync {
               totalCcErrors += 1L
               windowCcErr += 1L
               droppingVideoSlice = true
+              requireVideoPesStart = true
             }
             if (hasOutOfBoundsSlice) {
               totalClampedSlices += 1L
               windowSliceDrops += 1L
               droppingVideoSlice = true
+              if (pusi) {
+                requireVideoPesStart = true
+              }
             }
             val isKeyStart = hasPayload && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
             if (freezeActive) {
@@ -803,6 +819,7 @@ object MpegTsSync {
                 freezeActive = false
                 freezeTicksCount = 0
                 droppingVideoSlice = false
+                requireVideoPesStart = false
                 seenLiveKeyframe = true
                 if (!currentVideoFrameStarted) {
                   currentVideoFrameStarted = true
@@ -816,9 +833,10 @@ object MpegTsSync {
             if (!freezeActive) {
               var sliceStuffTargetOffset = -1
               if (droppingVideoSlice && !hasOutOfBoundsSlice) {
-                if (hasVideoPesStart) {
+                if (hasVideoPesStart || isKeyStart) {
                   droppingVideoSlice = false
-                } else if (!pusi && hasPayload && payloadLen > 0) {
+                  requireVideoPesStart = false
+                } else if (!pusi && !requireVideoPesStart && !isCcError && hasPayload && payloadLen > 0) {
                   val validSliceOff = FreezeFramePacer.findFirstValidVideoSliceOffset(arr, payloadOffset, payloadLen, updated.videoStreamType, maxSliceRow)
                   if (validSliceOff >= 0) {
                     droppingVideoSlice = false
