@@ -278,9 +278,14 @@ object MpegTsSync {
     } else None
   }
 
-  val DefaultFreezeThreshold: FiniteDuration = Duration.Zero
+  val DefaultFreezeThreshold: FiniteDuration = 10.seconds
   val DefaultFreezeTickInterval: FiniteDuration = 100.millis
   val DefaultMetricsInterval: FiniteDuration = 30.seconds
+
+  def configuredFreezeThreshold: FiniteDuration =
+    scala.util.Try(app.AppContext.config.stream.freezeThresholdSec).toOption
+      .map(sec => if (sec <= 0) Duration.Zero else sec.seconds)
+      .getOrElse(DefaultFreezeThreshold)
 
   def configuredMetricsInterval: FiniteDuration =
     scala.util.Try(app.AppContext.config.stream.metricsIntervalSec).toOption
@@ -290,7 +295,7 @@ object MpegTsSync {
   def cacheFlow(
     cachedHeadersRef: AtomicReference[CachedHeaders]
   , onHeadersUpdated: CachedHeaders => Unit = _ => ()
-  , freezeThreshold: FiniteDuration = DefaultFreezeThreshold
+  , freezeThreshold: FiniteDuration = configuredFreezeThreshold
   , freezeTickInterval: FiniteDuration = DefaultFreezeTickInterval
   , label: String = ""
   , metricsInterval: FiniteDuration = configuredMetricsInterval
@@ -795,7 +800,14 @@ object MpegTsSync {
             val isKeyStart = hasPayload && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
             if (freezeActive) {
               if (isKeyStart) {
+                log.info(
+                  "[mpegts] live keyframe resumed after freeze-frame pacing{} silenceMs={} bursts={}"
+                , labelPrefix
+                , (System.nanoTime() - lastLiveDataNanos) / 1000000L
+                , freezeTicksCount
+                )
                 freezeActive = false
+                freezeTicksCount = 0
                 droppingVideoSlice = false
                 seenLiveKeyframe = true
                 if (!currentVideoFrameStarted) {
@@ -992,6 +1004,14 @@ object MpegTsSync {
             val isSilent = videoSilenceNanos >= freezeThreshold.toNanos
             val isDeficit = ptsDeficitTicks >= thresholdTicks && videoSilenceNanos >= freezeTickInterval.toNanos
             if (isSilent || isDeficit) {
+              if (!freezeActive) {
+                log.info(
+                  "[mpegts] freeze-frame pacing activated{} silenceMs={} ptsDeficitMs={}"
+                , labelPrefix
+                , videoSilenceNanos / 1000000L
+                , (ptsDeficitTicks * 1000L) / 90000L
+                )
+              }
               freezeActive = true
               totalFreezeBursts += 1L
               val b = ByteString.newBuilder
