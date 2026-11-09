@@ -376,6 +376,8 @@ object MpegTsSync {
       private var carry: ByteString = ByteString.empty
       private var detectedPmtPid: Int = -1
       private var parsedPmt: Boolean = false
+      private var candidatePat: Option[ByteString] = None
+      private var candidatePmt: Option[ByteString] = None
       private val lastInCcByPid = Array.fill[Byte](8192)((-1).toByte)
       private val outboundCcByPid = Array.fill[Byte](8192)((-1).toByte)
       private var droppingVideoSlice: Boolean = false
@@ -742,31 +744,86 @@ object MpegTsSync {
             }
             val _ = outputBuilder ++= MPEGTS_NULL_PACKET
           } else if (pid == PatPid) {
-            if (detectedPmtPid < 0 || !sameTablePacket(updated.pat, arr, pos)) {
-              val patPacket = ByteString.fromArray(arr, pos, PacketSize)
-              extractPmtPid(arr, pos).foreach { pmtPid =>
-                detectedPmtPid = pmtPid
+            if (detectedPmtPid < 0 || updated.pat.isEmpty) {
+              extractPmtPid(arr, pos) match {
+                case Some(pmtPid) =>
+                  val patPacket = ByteString.fromArray(arr, pos, PacketSize)
+                  detectedPmtPid = pmtPid
+                  candidatePat = None
+                  updated = updated.copy(pat = Some(patPacket))
+                case None => ()
               }
-              updated = updated.copy(pat = Some(patPacket))
+              emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+            } else if (sameTablePacket(updated.pat, arr, pos)) {
+              candidatePat = None
+              emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+            } else {
+              extractPmtPid(arr, pos) match {
+                case Some(pmtPid) if sameTablePacket(candidatePat, arr, pos) =>
+                  val patPacket = ByteString.fromArray(arr, pos, PacketSize)
+                  detectedPmtPid = pmtPid
+                  candidatePat = None
+                  updated = updated.copy(pat = Some(patPacket))
+                  emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+                case Some(_) =>
+                  candidatePat = Some(ByteString.fromArray(arr, pos, PacketSize))
+                  val goodPat = updated.pat.get.toArray
+                  emitWithOutboundCc(goodPat, 0, pid, hasPayload = true, outputBuilder)
+                case None =>
+                  candidatePat = None
+                  val goodPat = updated.pat.get.toArray
+                  emitWithOutboundCc(goodPat, 0, pid, hasPayload = true, outputBuilder)
+              }
             }
-            emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
           } else if (pid == detectedPmtPid) {
-            if (!parsedPmt || !sameTablePacket(updated.pmt, arr, pos)) {
-              parsedPmt = true
-              val pmtPacket = ByteString.fromArray(arr, pos, PacketSize)
+            if (!parsedPmt || updated.pmt.isEmpty) {
               val streamPids = extractPmtStreamPids(arr, pos)
-              val nextAudioPids = streamPids.map(_.audioPids).filter(_.nonEmpty).getOrElse(updated.audioPids)
-              val nextAudioStreamTypes = updated.audioStreamTypes ++ streamPids.map(_.audioStreamTypes).getOrElse(Map.empty)
-              updated = updated.copy(
-                pmt = Some(pmtPacket)
-              , pcrPid = streamPids.flatMap(_.pcrPid).orElse(updated.pcrPid)
-              , videoPid = streamPids.flatMap(_.videoPid).orElse(updated.videoPid)
-              , videoStreamType = streamPids.flatMap(_.videoStreamType).orElse(updated.videoStreamType)
-              , audioPids = nextAudioPids
-              , audioStreamTypes = nextAudioStreamTypes
-              )
+              if (streamPids.isDefined) {
+                parsedPmt = true
+                candidatePmt = None
+                val pmtPacket = ByteString.fromArray(arr, pos, PacketSize)
+                val nextAudioPids = streamPids.map(_.audioPids).filter(_.nonEmpty).getOrElse(updated.audioPids)
+                val nextAudioStreamTypes = updated.audioStreamTypes ++ streamPids.map(_.audioStreamTypes).getOrElse(Map.empty)
+                updated = updated.copy(
+                  pmt = Some(pmtPacket)
+                , pcrPid = streamPids.flatMap(_.pcrPid).orElse(updated.pcrPid)
+                , videoPid = streamPids.flatMap(_.videoPid).orElse(updated.videoPid)
+                , videoStreamType = streamPids.flatMap(_.videoStreamType).orElse(updated.videoStreamType)
+                , audioPids = nextAudioPids
+                , audioStreamTypes = nextAudioStreamTypes
+                )
+              }
+              emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+            } else if (sameTablePacket(updated.pmt, arr, pos)) {
+              candidatePmt = None
+              emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+            } else {
+              val streamPids = extractPmtStreamPids(arr, pos)
+              val hasValidStreams = streamPids.exists { pids =>
+                (updated.videoPid.isEmpty || pids.videoPid.isDefined) &&
+                (updated.audioPids.isEmpty || pids.audioPids.nonEmpty)
+              }
+              if (hasValidStreams && sameTablePacket(candidatePmt, arr, pos)) {
+                candidatePmt = None
+                val pmtPacket = ByteString.fromArray(arr, pos, PacketSize)
+                val pids = streamPids.get
+                val nextAudioPids = if (pids.audioPids.nonEmpty) pids.audioPids else updated.audioPids
+                val nextAudioStreamTypes = updated.audioStreamTypes ++ pids.audioStreamTypes
+                updated = updated.copy(
+                  pmt = Some(pmtPacket)
+                , pcrPid = pids.pcrPid.orElse(updated.pcrPid)
+                , videoPid = pids.videoPid.orElse(updated.videoPid)
+                , videoStreamType = pids.videoStreamType.orElse(updated.videoStreamType)
+                , audioPids = nextAudioPids
+                , audioStreamTypes = nextAudioStreamTypes
+                )
+                emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+              } else {
+                candidatePmt = if (hasValidStreams) Some(ByteString.fromArray(arr, pos, PacketSize)) else None
+                val goodPmt = updated.pmt.get.toArray
+                emitWithOutboundCc(goodPmt, 0, pid, hasPayload = true, outputBuilder)
+              }
             }
-            emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
           } else if (updated.videoPid.contains(pid)) {
             val isMpeg2 = updated.videoStreamType.isEmpty || updated.videoStreamType.contains(0x01) || updated.videoStreamType.contains(0x02)
             val pesOff = if (pusi) FreezeFramePacer.findPesHeaderOffset(arr, pos) else -1
