@@ -450,7 +450,10 @@ object MpegTsSync {
                   lastContinuousVideoPts = inPts
                   pendingMetricOutlierPts = None
                 } else if (delta < -FreezeFramePacer.RebaseThresholdTicks || delta > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
-                  if (pendingMetricOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)) {
+                  if (
+                    pendingOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks) ||
+                    pendingMetricOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)
+                  ) {
                     lastContinuousVideoPts = inPts
                     pendingMetricOutlierPts = None
                   } else {
@@ -581,6 +584,74 @@ object MpegTsSync {
         val _ = outputBuilder.putBytes(arr, pktOffset, PacketSize)
       }
 
+      private def checkCorruptPesTimestamp(
+        arr: Array[Byte]
+      , pktOffset: Int
+      , pesOff: Int
+      , isVideo: Boolean
+      ): Boolean = {
+        val pktEnd = pktOffset + PacketSize
+        if (pesOff < 0 || pesOff + 9 > pktEnd) {
+          false
+        } else {
+          val flags1 = arr(pesOff + 6) & 0xFF
+          val flags2 = arr(pesOff + 7) & 0xFF
+          val headerDataLen = arr(pesOff + 8) & 0xFF
+          val ptsDtsFlags = (flags2 >> 6) & 0x03
+          if ((flags1 & 0xC0) != 0x80 || pesOff + 9 + headerDataLen > pktEnd || ptsDtsFlags == 1) {
+            totalScrubbedPts += 1L
+            windowPtsScrubs += 1L
+            true
+          } else if (ptsDtsFlags == 0) {
+            false
+          } else {
+            FreezeFramePacer.readPtsDts(arr, pesOff, pktEnd) match {
+              case None =>
+                totalScrubbedPts += 1L
+                windowPtsScrubs += 1L
+                true
+              case Some((inPts, inDtsOpt)) =>
+                val hasCorruptDts = inDtsOpt.exists { inDts =>
+                  val ptsMinusDts = signedPtsDiff(inPts, inDts)
+                  ptsMinusDts < 0L || ptsMinusDts > FreezeFramePacer.MaxSinglePacketPtsJumpTicks
+                }
+                if (hasCorruptDts) {
+                  totalScrubbedPts += 1L
+                  windowPtsScrubs += 1L
+                  true
+                } else if (isVideo) {
+                  if (lastOutputPts >= 0L && lastInputVideoPts >= 0L) {
+                    val inputJump = math.abs(signedPtsDiff(inPts, lastInputVideoPts))
+                    if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                      if (pendingOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)) {
+                        false
+                      } else {
+                        pendingOutlierPts = Some(inPts)
+                        totalScrubbedPts += 1L
+                        windowPtsScrubs += 1L
+                        true
+                      }
+                    } else {
+                      false
+                    }
+                  } else {
+                    false
+                  }
+                } else {
+                  val mappedPts = (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+                  if (lastOutputPts >= 0L && math.abs(signedPtsDiff(mappedPts, lastOutputPts)) > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                    totalScrubbedPts += 1L
+                    windowPtsScrubs += 1L
+                    true
+                  } else {
+                    false
+                  }
+                }
+            }
+          }
+        }
+      }
+
       private def normalizePacketTimestamps(arr: Array[Byte], pktOffset: Int, isVideo: Boolean): Unit = {
         val pktEnd = pktOffset + PacketSize
         val pesOff = FreezeFramePacer.findPesHeaderOffset(arr, pktOffset)
@@ -633,8 +704,14 @@ object MpegTsSync {
               }
             }
 
-            val stepDelta = (outPts - inPts) & FreezeFramePacer.PtsMask
-            val outDtsOpt = inDtsOpt.map(d => (d + stepDelta) & FreezeFramePacer.PtsMask)
+            val outDtsOpt = inDtsOpt.map { inDts =>
+              val ptsMinusDts = signedPtsDiff(inPts, inDts)
+              if (ptsMinusDts >= 0L && ptsMinusDts <= FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                (outPts - ptsMinusDts) & FreezeFramePacer.PtsMask
+              } else {
+                outPts
+              }
+            }
             if (outPts != inPts || outDtsOpt != inDtsOpt) {
               FreezeFramePacer.writePtsDts(arr, pesOff, pktEnd, outPts, outDtsOpt)
             }
@@ -642,8 +719,14 @@ object MpegTsSync {
         }
 
         FreezeFramePacer.readPcrBase(arr, pktOffset).foreach { inPcr =>
-          val outPcr = (inPcr + ptsDeltaTicks) & FreezeFramePacer.PtsMask
-          if (ptsDeltaTicks != 0L) {
+          val rawOutPcr = (inPcr + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+          val outPcr =
+            if (lastOutputPts >= 0L && math.abs(signedPtsDiff(rawOutPcr, lastOutputPts)) > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+              lastOutputPts
+            } else {
+              rawOutPcr
+            }
+          if (outPcr != inPcr) {
             FreezeFramePacer.writePcrBase(arr, pktOffset, outPcr)
           }
           if (lastOutputPts < 0) {
@@ -837,6 +920,9 @@ object MpegTsSync {
             val esPayloadLen = math.max(0, (pos + PacketSize) - esPayloadOffset)
             val hasOutOfBoundsSlice = !isTei && isMpeg2 && hasPayload && esPayloadLen > 0 &&
               FreezeFramePacer.hasOutOfBoundsMpeg2Slice(arr, esPayloadOffset, esPayloadLen, maxSliceRow)
+            val hasCorruptPesTimestamp =
+              !isTei && !isCcError && !hasOutOfBoundsSlice && hasVideoPesStart && !freezeActive &&
+                checkCorruptPesTimestamp(arr, pos, pesOff, isVideo = true)
             if (hasVideoPesStart && !freezeActive) {
               if (currentVideoFrameStarted) {
                 windowVideoFramesTotal += 1L
@@ -845,8 +931,8 @@ object MpegTsSync {
                 }
               }
               currentVideoFrameStarted = true
-              currentVideoFrameCorrupt = isCcError || hasOutOfBoundsSlice
-            } else if (!freezeActive && (isCcError || hasOutOfBoundsSlice)) {
+              currentVideoFrameCorrupt = isCcError || hasOutOfBoundsSlice || hasCorruptPesTimestamp
+            } else if (!freezeActive && (isCcError || hasOutOfBoundsSlice || hasCorruptPesTimestamp)) {
               currentVideoFrameStarted = true
               currentVideoFrameCorrupt = true
             }
@@ -863,6 +949,10 @@ object MpegTsSync {
               if (pusi) {
                 requireVideoPesStart = true
               }
+            }
+            if (hasCorruptPesTimestamp) {
+              droppingVideoSlice = true
+              requireVideoPesStart = true
             }
             val isKeyStart = hasPayload && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
             if (freezeActive) {
@@ -889,7 +979,7 @@ object MpegTsSync {
 
             if (!freezeActive) {
               var sliceStuffTargetOffset = -1
-              if (droppingVideoSlice && !hasOutOfBoundsSlice) {
+              if (droppingVideoSlice && !hasOutOfBoundsSlice && !hasCorruptPesTimestamp) {
                 if (hasVideoPesStart || isKeyStart) {
                   droppingVideoSlice = false
                   requireVideoPesStart = false
@@ -911,11 +1001,17 @@ object MpegTsSync {
                   windowSliceDrops += 1L
                 }
                 FreezeFramePacer.readPcrBase(arr, pos) match {
-                  case Some(rawPcr) =>
+                  case Some(rawPcr) if !hasCorruptPesTimestamp =>
                     val normPcr = (rawPcr + ptsDeltaTicks) & FreezeFramePacer.PtsMask
-                    val pcrPkt = FreezeFramePacer.pcrOnlyPacket(pid, nextOutboundCc(pid, hasPayload = false), normPcr)
+                    val safePcr =
+                      if (lastOutputPts >= 0L && math.abs(signedPtsDiff(normPcr, lastOutputPts)) > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                        lastOutputPts
+                      } else {
+                        normPcr
+                      }
+                    val pcrPkt = FreezeFramePacer.pcrOnlyPacket(pid, nextOutboundCc(pid, hasPayload = false), safePcr)
                     val _ = outputBuilder.putBytes(pcrPkt, 0, PacketSize)
-                  case None =>
+                  case _ =>
                     val _ = outputBuilder ++= MPEGTS_NULL_PACKET
                 }
               } else {
@@ -982,6 +1078,10 @@ object MpegTsSync {
               val _ = outputBuilder ++= MPEGTS_NULL_PACKET
             } else {
               val streamTypeOpt = updated.audioStreamTypes.get(pid)
+              val pesOff = if (pusi) FreezeFramePacer.findPesHeaderOffset(arr, pos) else -1
+              val hasCorruptPesTimestamp =
+                !isTei && !isCcError && pusi && pesOff >= 0 &&
+                  checkCorruptPesTimestamp(arr, pos, pesOff, isVideo = false)
               if (isCcError) {
                 totalCcErrors += 1L
                 windowCcErr += 1L
@@ -989,7 +1089,10 @@ object MpegTsSync {
                 currentAudioFrameStarted += pid
                 currentAudioFrameCorrupt += pid
               }
-              if (droppingAudioPids.contains(pid)) {
+              if (hasCorruptPesTimestamp) {
+                droppingAudioPids += pid
+              }
+              if (droppingAudioPids.contains(pid) && !hasCorruptPesTimestamp && !isCcError) {
                 if (pusi && hasPayload && payloadLen > 0 && FreezeFramePacer.hasValidAudioSyncword(arr, payloadOffset, payloadLen, streamTypeOpt)) {
                   droppingAudioPids -= pid
                 }
@@ -1002,7 +1105,7 @@ object MpegTsSync {
                   }
                 }
                 currentAudioFrameStarted += pid
-                if (droppingAudioPids.contains(pid) || isCcError) {
+                if (droppingAudioPids.contains(pid) || isCcError || hasCorruptPesTimestamp) {
                   currentAudioFrameCorrupt += pid
                 } else {
                   currentAudioFrameCorrupt -= pid

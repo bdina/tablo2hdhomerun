@@ -1353,7 +1353,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       (recoveredAudio(3) & 0x0F) shouldBe 1 // audioValidPusi continuous CC = 1
     }
 
-    "cacheFlow should scrub single-packet PTS outliers jumping > 2s to lastOutputPts + 3003 even when freezeThreshold is Duration.Zero" in {
+    "cacheFlow should drop single-packet PTS outliers jumping > 2s and their continuation slices even when freezeThreshold is Duration.Zero" in {
       val videoPid = 0x0101
       val audioPid = 0x0102
       val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
@@ -1388,48 +1388,66 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val p1Pts = FreezeFramePacer.readPtsDts(out.slice(0, 188).toArray, 4, 188).map(_._1)
       val a1Pts = FreezeFramePacer.readPtsDts(out.slice(188, 376).toArray, 4, 188).map(_._1)
       val p2Pts = FreezeFramePacer.readPtsDts(out.slice(376, 564).toArray, 4, 188).map(_._1)
-      val p3Pts = FreezeFramePacer.readPtsDts(out.slice(564, 752).toArray, 4, 188).map(_._1)
-      val p4Pts = FreezeFramePacer.readPtsDts(out.slice(752, 940).toArray, 4, 188).map(_._1)
+      val p3Pkt = out.slice(564, 752)
+      val p4Pkt = out.slice(752, 940)
+      val p4Pts = FreezeFramePacer.readPtsDts(p4Pkt.toArray, 4, 188).map(_._1)
 
       val _ = p1Pts shouldBe Some(90000L)
       val _ = a1Pts shouldBe Some(90000L)
       val _ = p2Pts shouldBe Some(93003L)
-      // Outlier scrubbed in-place to 93003L + 3003L = 96006L even with freezeThreshold = Duration.Zero
-      val _ = p3Pts shouldBe Some(96006L)
+      // Corrupt outlier PES packet is dropped as MPEGTS_NULL_PACKET rather than emitted downstream
+      val _ = p3Pkt shouldBe MpegTsSync.MPEGTS_NULL_PACKET
       val _ = p4Pts shouldBe Some(96006L)
+      // Outbound CC on v4 continues seamlessly from v2 (0 -> 1 -> 2)
+      val _ = (p4Pkt(3) & 0x0F) shouldBe 2
 
       val snap = latestMetricsRef.get()
       val _ = snap.ptsScrubs shouldBe 1L
+      val _ = snap.videoFramesTotal shouldBe 4L
+      val _ = snap.videoFramesClean shouldBe 3L
       snap.avSkewMs shouldBe ((6006L * 1000L) / 90000L)
     }
 
-    "cacheFlow should rebase timestamps across confirmed PTS reset to maintain strict monotonic PTS" in {
+    "cacheFlow should rebase timestamps across confirmed PTS reset and preserve PTS-DTS decode offsets" in {
       val videoPid = 0x0101
       val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
         MpegTsSync.CachedHeaders(videoPid = Some(videoPid), videoStreamType = Some(0x02))
       )
 
-      val v1 = buildVideoPesPacket(videoPid, pts = 900000L, cc = 1)
-      val v2 = buildVideoPesPacket(videoPid, pts = 903003L, cc = 2)
-      // Upstream encoder PTS resets back near 0 across 2 consecutive packets
-      val vReset1 = buildVideoPesPacket(videoPid, pts = 0L, cc = 3)
-      val vReset2 = buildVideoPesPacket(videoPid, pts = 3003L, cc = 4)
+      val v1 = buildVideoPesPacket(videoPid, pts = 900000L, dtsOpt = Some(891000L), cc = 1)
+      val v2 = buildVideoPesPacket(videoPid, pts = 903003L, dtsOpt = Some(894003L), cc = 2)
+      // Upstream encoder PTS/DTS resets back near 0 across consecutive packets
+      val vReset1 = buildVideoPesPacket(videoPid, pts = 9009L, dtsOpt = Some(0L), cc = 3)
+      val vReset2 = buildVideoPesPacket(videoPid, pts = 12012L, dtsOpt = Some(3003L), cc = 4)
+      val vReset3 = buildVideoPesPacket(videoPid, pts = 15015L, dtsOpt = Some(6006L), cc = 5)
 
-      val out = Source.single(v1 ++ v2 ++ vReset1 ++ vReset2)
+      val out = Source.single(v1 ++ v2 ++ vReset1 ++ vReset2 ++ vReset3)
         .via(MpegTsSync.cacheFlow(cachedHeadersRef, freezeThreshold = 10.seconds))
         .runWith(Sink.fold(ByteString.empty)(_ ++ _))
         .futureValue
 
-      val _ = out.length shouldBe (188 * 4)
-      val p1Pts = FreezeFramePacer.readPtsDts(out.slice(0, 188).toArray, 4, 188).map(_._1).get
-      val p2Pts = FreezeFramePacer.readPtsDts(out.slice(188, 376).toArray, 4, 188).map(_._1).get
-      val p3Pts = FreezeFramePacer.readPtsDts(out.slice(376, 564).toArray, 4, 188).map(_._1).get
-      val p4Pts = FreezeFramePacer.readPtsDts(out.slice(564, 752).toArray, 4, 188).map(_._1).get
+      val _ = out.length shouldBe (188 * 5)
+      val (p1Pts, p1Dts) = FreezeFramePacer.readPtsDts(out.slice(0, 188).toArray, 4, 188).get
+      val (p2Pts, p2Dts) = FreezeFramePacer.readPtsDts(out.slice(188, 376).toArray, 4, 188).get
+      val p3Pkt = out.slice(376, 564)
+      val p4Pkt = out.slice(564, 752)
+      val p5Pkt = out.slice(752, 940)
+      val (p4Pts, p4Dts) = FreezeFramePacer.readPtsDts(p4Pkt.toArray, 4, 188).get
+      val (p5Pts, p5Dts) = FreezeFramePacer.readPtsDts(p5Pkt.toArray, 4, 188).get
 
       val _ = p1Pts shouldBe 900000L
+      val _ = p1Dts shouldBe Some(891000L)
       val _ = p2Pts shouldBe 903003L
-      val _ = p3Pts should be >= 906006L
-      p4Pts should be > p3Pts
+      val _ = p2Dts shouldBe Some(894003L)
+      // First unconfirmed reset packet is dropped while recording pendingOutlierPts
+      val _ = p3Pkt shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      // Second packet confirms the new timeline, rebases monotonically, and preserves the exact 9009-tick PTS-DTS offset
+      val _ = p4Pts shouldBe 906006L
+      val _ = p4Dts shouldBe Some(896997L)
+      val _ = (p4Pkt(3) & 0x0F) shouldBe 2
+      val _ = p5Pts shouldBe 909009L
+      val _ = p5Dts shouldBe Some(900000L)
+      (p5Pkt(3) & 0x0F) shouldBe 3
     }
 
     "cacheFlow should preserve native B-frame decode-order PTS/DTS and audio/PCR timestamps without rebasing or scrambling" in {
@@ -2047,6 +2065,95 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         .futureValue
 
       cachedHeadersRef.get().audioPids shouldBe Seq(0x0105)
+    }
+
+    "cacheFlow should drop entire multi-packet video frame and PUSI=0 continuation slices when PES PTS or DTS is corrupt" in {
+      val videoPid = 0x0101
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(videoPid = Some(videoPid), videoStreamType = Some(0x02))
+      )
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val cleanFrame1 = buildVideoPesPacket(videoPid, pts = 90000L, dtsOpt = Some(81000L), pusi = true, cc = 1, isKeyframe = true)
+      // Corrupt frame 2: PTS has a bit-flip (+500,000 ticks) while DTS is 84003L, followed by a PUSI=0 slice continuation packet
+      val corruptPtsFrameStart = buildVideoPesPacket(videoPid, pts = 590000L, dtsOpt = Some(84003L), pusi = true, cc = 2, sliceRow = Some(1))
+      val corruptPtsFrameCont = buildVideoPesPacket(videoPid, pts = 590000L, pusi = false, cc = 3, sliceRow = Some(10))
+      // Corrupt frame 3: PTS is normal (96006L) but DTS has a bit-flip (500,000L > PTS), followed by a PUSI=0 slice continuation packet
+      val corruptDtsFrameStart = buildVideoPesPacket(videoPid, pts = 96006L, dtsOpt = Some(500000L), pusi = true, cc = 4, sliceRow = Some(1))
+      val corruptDtsFrameCont = buildVideoPesPacket(videoPid, pts = 96006L, pusi = false, cc = 5, sliceRow = Some(12))
+      // Clean frame 4: valid PTS and DTS
+      val cleanFrame4 = buildVideoPesPacket(videoPid, pts = 99009L, dtsOpt = Some(90009L), pusi = true, cc = 6, sliceRow = Some(1))
+
+      val out = Source(
+        List(
+          cleanFrame1
+        , corruptPtsFrameStart
+        , corruptPtsFrameCont
+        , corruptDtsFrameStart
+        , corruptDtsFrameCont
+        , cleanFrame4
+        )
+      ).via(MpegTsSync.cacheFlow(cachedHeadersRef, latestMetricsRef = Some(latestMetricsRef)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 6
+      val _ = (out(0)(3) & 0x0F) shouldBe 0
+      val _ = FreezeFramePacer.readPtsDts(out(0).toArray, 4, 188) shouldBe Some((90000L, Some(81000L)))
+      // Both corrupt frames and their PUSI=0 continuation slices must be dropped as null packets
+      val _ = out(1) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(2) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(3) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(4) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      // Clean frame 4 recovers with continuous outbound CC = 1 and intact PTS/DTS
+      val _ = (((out(5)(1) & 0x1F) << 8) | (out(5)(2) & 0xFF)) shouldBe videoPid
+      val _ = (out(5)(3) & 0x0F) shouldBe 1
+      val _ = FreezeFramePacer.readPtsDts(out(5).toArray, 4, 188) shouldBe Some((99009L, Some(90009L)))
+
+      val snap = latestMetricsRef.get()
+      val _ = snap.ptsScrubs shouldBe 2L
+      val _ = snap.videoFramesTotal shouldBe 4L
+      snap.videoFramesClean shouldBe 2L
+    }
+
+    "cacheFlow should drop audio frame and PUSI=0 continuation when audio PES timestamp is corrupt and recover on next clean PUSI=1" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(
+          videoPid = Some(videoPid)
+        , videoStreamType = Some(0x02)
+        , audioPids = Seq(audioPid)
+        , audioStreamTypes = Map(audioPid -> 0x81)
+        )
+      )
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val v1 = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+      val a1 = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1, withValidSyncword = true)
+      // Corrupt audio PES packet with PTS outlier (800,000L > 90,000L + 180,000L) despite valid AC-3 syncword, plus PUSI=0 continuation
+      val aCorruptStart = buildAudioPesPacket(audioPid, pts = 800000L, cc = 2, withValidSyncword = true)
+      val aCorruptCont = withCc(buildMediaPacket(audioPid), cc = 3, pusi = false)
+      // Next clean audio PES packet
+      val aCleanNext = buildAudioPesPacket(audioPid, pts = 92880L, cc = 4, withValidSyncword = true)
+
+      val out = Source(List(v1, a1, aCorruptStart, aCorruptCont, aCleanNext))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, latestMetricsRef = Some(latestMetricsRef)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 5
+      val _ = (out(1)(3) & 0x0F) shouldBe 0
+      val _ = out(2) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = out(3) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = (((out(4)(1) & 0x1F) << 8) | (out(4)(2) & 0xFF)) shouldBe audioPid
+      val _ = (out(4)(3) & 0x0F) shouldBe 1
+      val _ = FreezeFramePacer.readPtsDts(out(4).toArray, 4, 188).map(_._1) shouldBe Some(92880L)
+
+      val snap = latestMetricsRef.get()
+      val _ = snap.ptsScrubs shouldBe 1L
+      val _ = snap.audioFramesTotal shouldBe 3L
+      snap.audioFramesClean shouldBe 2L
     }
   }
 }
