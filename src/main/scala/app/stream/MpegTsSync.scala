@@ -1407,7 +1407,9 @@ object MpegTsSync {
     found
   }
 
-  val DefaultMaxDroppedPackets: Int = 8000
+  val DefaultMaxAlignmentWait: FiniteDuration = 3.seconds
+  val DefaultMaxDroppedPackets: Int = Int.MaxValue
+  val MaxPostThresholdPusiWaitPackets: Int = 512
 
   def alignToIFrame(
     videoPid: Option[Int] = None
@@ -1417,8 +1419,20 @@ object MpegTsSync {
   , audioStreamTypes: Map[Int, Int] = Map.empty
   , lockedSeqHeader: Option[ByteString] = None
   , label: String = ""
+  , maxWait: FiniteDuration = DefaultMaxAlignmentWait
   ): Flow[ByteString, ByteString, NotUsed] =
-    Flow.fromGraph(new AlignToIFrameStage(videoPid, maxDroppedPackets, videoStreamType, audioPids, audioStreamTypes, lockedSeqHeader, label))
+    Flow.fromGraph(
+      new AlignToIFrameStage(
+        videoPid
+      , maxDroppedPackets
+      , videoStreamType
+      , audioPids
+      , audioStreamTypes
+      , lockedSeqHeader
+      , label
+      , maxWait
+      )
+    )
 
   private final class AlignToIFrameStage(
     videoPid: Option[Int]
@@ -1428,6 +1442,7 @@ object MpegTsSync {
   , initialAudioStreamTypes: Map[Int, Int]
   , lockedSeqHeader: Option[ByteString]
   , label: String
+  , maxWait: FiniteDuration
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.alignToIFrame.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.alignToIFrame.out")
@@ -1435,6 +1450,7 @@ object MpegTsSync {
 
     override def createLogic(attrs: Attributes): GraphStageLogic = new GraphStageLogic(shape) {
       private val startTimeNanos: Long = System.nanoTime()
+      private var firstDroppedVideoNanos: Long = 0L
       private val labelPrefix: String = if (label.nonEmpty) s" label=$label" else ""
       private var carry: ByteString = ByteString.empty
       private var isAligned = false
@@ -1445,6 +1461,7 @@ object MpegTsSync {
       private var alignedAudioPids: Set[Int] = Set.empty
       private var detectedPmtPid: Int = -1
       private var droppedPackets = 0
+      private var postThresholdDroppedPackets = 0
 
       private def allAudioAligned: Boolean =
         knownAudioPids.isEmpty || alignedAudioPids.size >= knownAudioPids.size
@@ -1532,25 +1549,43 @@ object MpegTsSync {
                     val resolvedVpid = currentVideoPid.getOrElse(pid)
                     if (currentVideoPid.isEmpty) currentVideoPid = Some(resolvedVpid)
                     isAligned = true
-                    val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
-                    log.info(s"[mpegts]$labelPrefix Aligned to I-Frame on PID $resolvedVpid (dropped $droppedPackets leading packets in ${elapsedMs}ms)")
+                    val now = System.nanoTime()
+                    val elapsedMs = (now - startTimeNanos) / 1000000
+                    val videoWaitMs = if (firstDroppedVideoNanos == 0L) 0L else (now - firstDroppedVideoNanos) / 1000000
+                    log.info(s"[mpegts]$labelPrefix Aligned to I-Frame on PID $resolvedVpid (dropped $droppedPackets leading packets in ${elapsedMs}ms, videoWait=${videoWaitMs}ms)")
                     if (isMpeg2 && lockedSeqHeader.isDefined && !FreezeFramePacer.hasMpeg2SequenceHeader(arr, payloadOffset, payloadLen)) {
                       val prevCc = ((arr(pos + 3) & 0x0F) - 1) & 0x0F
                       val _ = outputBuilder ++= FreezeFramePacer.synthesizeSequenceHeaderPacket(resolvedVpid, lockedSeqHeader.get, prevCc)
                     }
                     val _ = outputBuilder.putBytes(arr, pos, PacketSize)
                   } else if (isTargetVideo || isCandidateVideo) {
+                    val now = System.nanoTime()
+                    if (firstDroppedVideoNanos == 0L) {
+                      firstDroppedVideoNanos = now
+                    }
                     droppedPackets += 1
-                    if (droppedPackets > maxDroppedPackets) {
-                      val elapsedMs = (System.nanoTime() - startTimeNanos) / 1000000
-                      log.warn(s"[mpegts]$labelPrefix Max dropped packets ($droppedPackets in ${elapsedMs}ms) exceeded while waiting for I-Frame; forcing alignment")
-                      isAligned = true
-                      alignedAudioPids = knownAudioPids
-                      if (isMpeg2 && lockedSeqHeader.isDefined && (payloadLen <= 0 || !FreezeFramePacer.hasMpeg2SequenceHeader(arr, payloadOffset, payloadLen))) {
-                        val prevCc = ((arr(pos + 3) & 0x0F) - 1) & 0x0F
-                        val _ = outputBuilder ++= FreezeFramePacer.synthesizeSequenceHeaderPacket(currentVideoPid.getOrElse(pid), lockedSeqHeader.get, prevCc)
+                    val videoWaitNanos = now - firstDroppedVideoNanos
+                    val thresholdExceeded =
+                      (maxWait.toNanos > 0L && videoWaitNanos >= maxWait.toNanos) ||
+                        droppedPackets > maxDroppedPackets
+                    if (thresholdExceeded) {
+                      val pusi = (arr(pos + 1) & 0x40) != 0
+                      if (pusi || postThresholdDroppedPackets >= MaxPostThresholdPusiWaitPackets) {
+                        val elapsedMs = (now - startTimeNanos) / 1000000
+                        val videoWaitMs = videoWaitNanos / 1000000
+                        log.warn(
+                          s"[mpegts]$labelPrefix Max alignment wait (${videoWaitMs}ms video wait, ${elapsedMs}ms total, $droppedPackets dropped packets) exceeded while waiting for I-Frame; forcing alignment (pusi=$pusi)"
+                        )
+                        isAligned = true
+                        alignedAudioPids = knownAudioPids
+                        if (isMpeg2 && lockedSeqHeader.isDefined && (payloadLen <= 0 || !FreezeFramePacer.hasMpeg2SequenceHeader(arr, payloadOffset, payloadLen))) {
+                          val prevCc = ((arr(pos + 3) & 0x0F) - 1) & 0x0F
+                          val _ = outputBuilder ++= FreezeFramePacer.synthesizeSequenceHeaderPacket(currentVideoPid.getOrElse(pid), lockedSeqHeader.get, prevCc)
+                        }
+                        val _ = outputBuilder.putBytes(arr, pos, PacketSize)
+                      } else {
+                        postThresholdDroppedPackets += 1
                       }
-                      val _ = outputBuilder.putBytes(arr, pos, PacketSize)
                     }
                   }
                 }
