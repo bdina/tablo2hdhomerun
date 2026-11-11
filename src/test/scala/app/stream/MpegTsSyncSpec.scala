@@ -948,6 +948,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val videoPid = 0x0101
       val nonKeyPackets = (1 to 4).map { i =>
         val arr = buildMediaPacket(videoPid).toArray
+        arr(1) = (arr(1) | 0x40).toByte
         arr(4) = i.toByte
         ByteString(arr)
       }.toList
@@ -1688,9 +1689,9 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val secondPktA = resA.drop(188)
       val _ = secondPktA shouldBe gopKey
 
-      // Case B: Forced alignment on maxDroppedPackets = 1 without 0xB3
+      // Case B: Forced alignment on maxDroppedPackets = 1 without 0xB3 (gating until PUSI=1)
       val midGopB1 = buildMediaPacket(videoPid, cc = 1)
-      val midGopB2 = buildMediaPacket(videoPid, cc = 2)
+      val midGopB2 = withCc(buildMediaPacket(videoPid), cc = 2, pusi = true)
 
       val resB = Source(List(midGopB1, midGopB2))
         .via(
@@ -2154,6 +2155,69 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = snap.ptsScrubs shouldBe 1L
       val _ = snap.audioFramesTotal shouldBe 3L
       snap.audioFramesClean shouldBe 2L
+    }
+
+    "alignToIFrame should not force alignment on fast-attach in-memory burst of > 8000 non-keyframe packets within maxWait" in {
+      val videoPid = 0x0101
+      val burstNonKey = (1 to 10000).map(i => withCc(buildMediaPacket(videoPid), cc = i & 0x0F, pusi = (i % 50 == 0))).toList
+      val keyframe = buildKeyframePacket(videoPid, isH264 = false, isGop = false)
+      val postKey = buildMediaPacket(videoPid, cc = 1)
+
+      val emitted = Source(burstNonKey ++ List(keyframe, postKey))
+        .via(
+          MpegTsSync.alignToIFrame(
+            videoPid = Some(videoPid)
+          , videoStreamType = Some(0x02)
+          )
+        )
+        .runWith(Sink.fold(ByteString.empty)(_ ++ _))
+        .futureValue
+
+      emitted shouldBe (keyframe ++ postKey)
+    }
+
+    "alignToIFrame should measure wall-clock maxWait from first dropped video packet and gate forced alignment on PUSI=1" in {
+      val videoPid = 0x0101
+      val seqHeader = ByteString(0x00, 0x00, 0x01, 0xB3.toByte, 0x78, 0x04, 0x38, 0x12, 0x34, 0x56, 0x78, 0x9A.toByte)
+
+      val (queue, outFuture) = Source.queue[ByteString](bufferSize = 32, OverflowStrategy.backpressure)
+        .via(
+          MpegTsSync.alignToIFrame(
+            videoPid = Some(videoPid)
+          , videoStreamType = Some(0x02)
+          , lockedSeqHeader = Some(seqHeader)
+          , maxWait = 60.millis
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      // 1. Pre-video null packets spanning > maxWait (100ms > 60ms) must not start or expire the video alignment clock
+      val _ = queue.offer(MpegTsSync.MPEGTS_NULL_PACKET).futureValue
+      Thread.sleep(100L)
+
+      // 2. First non-keyframe video packet (PUSI=1) starts firstDroppedVideoNanos at videoWait=0ms -> dropped
+      val vFirstDropped = withCc(buildMediaPacket(videoPid), cc = 3, pusi = true)
+      val _ = queue.offer(vFirstDropped).futureValue
+
+      // 3. Wait past maxWait (60ms) from firstDroppedVideoNanos
+      Thread.sleep(75L)
+
+      // 4. Offer a PUSI=0 mid-frame slice packet followed by a PUSI=1 frame start packet and PUSI=0 continuation:
+      //    vMidSlice (PUSI=0) must be dropped, and forced alignment must trigger on vPusiFrame (PUSI=1) with synthesized 0xB3 prepended
+      val vMidSlice = withCc(buildMediaPacket(videoPid), cc = 4, pusi = false)
+      val vPusiFrame = withCc(buildMediaPacket(videoPid), cc = 5, pusi = true)
+      val vContSlice = withCc(buildMediaPacket(videoPid), cc = 6, pusi = false)
+      val _ = queue.offer(vMidSlice ++ vPusiFrame ++ vContSlice).futureValue
+      queue.complete()
+
+      val out = outFuture.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val _ = out.length shouldBe (188 * 3)
+      val synthSeqPkt = out.take(188)
+      val _ = FreezeFramePacer.hasMpeg2SequenceHeader(synthSeqPkt.toArray, 0, 188) shouldBe true
+      val _ = (synthSeqPkt(3) & 0x0F) shouldBe 4 // (5 - 1) & 0x0F
+      val _ = out.slice(188, 376) shouldBe vPusiFrame
+      out.drop(376) shouldBe vContSlice
     }
   }
 }
