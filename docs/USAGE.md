@@ -488,7 +488,7 @@ services:
 ### Memory Usage
 
 The native image is configured with:
-- Min Heap: 128MB
+- Min Heap: 32MB
 - Max Heap: 128MB
 - Max New Gen: 64MB
 

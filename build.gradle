@@ -161,7 +161,7 @@ shadowJar {
 nativeImage {
     dependsOn shadowJar
 
-    minHeap = 128
+    minHeap = 32
     maxHeap = 128
     maxNew = 64
 
