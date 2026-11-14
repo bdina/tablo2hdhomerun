@@ -7,13 +7,13 @@ services:
     environment:
       - TABLO_IP=192.168.2.28
       - TABLO_GEN=4thgen
-      - TABLO_EMAIL=${TABLO_EMAIL:-bryansdina@gmail.com}
+      - TABLO_EMAIL=${TABLO_EMAIL:-user@example.com}
       - TABLO_PASSWORD=${TABLO_PASSWORD}
       - PROXY_IP=192.168.2.24
       - STREAM_BACKEND=hls
       - DEVICE_ID=12345678
       # - TUNER_COUNT=4 # Optional override (auto-detected from Tablo hardware if omitted)
-      # - STREAM_STALL_TIMEOUT_SEC=8 # Optional: seconds without new data before a cold retune (default: 8)
+      # - STREAM_STALL_TIMEOUT_SEC=45 # Optional: resilient stall timeout in seconds (default: 45; 0 disables byte-stall watchdog)
       - ENABLE_UDP_DISCOVERY=true
       - ENABLE_HLS_ENDPOINT=true
     mem_limit: 256m

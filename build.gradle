@@ -11,13 +11,14 @@ apply plugin: 'scala'
 apply plugin: 'application'
 
 repositories {
-    flatDir {
-        dirs 'lib'
-    }
     mavenCentral()
     maven {
         url = 'https://mvnrepository.com/artifact'
     }
+}
+
+configurations {
+    replCompiler
 }
 
 ext {
@@ -31,7 +32,7 @@ ext {
 
 dependencies {
     implementation "org.scala-lang:scala${scala_maj}-library_${scala_maj}:${scala_ver}"
-    implementation "org.scala-lang:scala${scala_maj}-compiler_${scala_maj}:${scala_ver}"
+    replCompiler "org.scala-lang:scala${scala_maj}-compiler_${scala_maj}:${scala_ver}"
 
     implementation 'org.slf4j:slf4j-simple:2.0.19'
 
@@ -96,7 +97,7 @@ sourceSets {
 
 task repl(type:JavaExec) {
     mainClass = 'scala.tools.nsc.MainGenericRunner'
-    classpath = sourceSets.main.runtimeClasspath
+    classpath = sourceSets.main.runtimeClasspath + configurations.replCompiler
     standardInput = System.in
     args '-usejavacp'
 }
