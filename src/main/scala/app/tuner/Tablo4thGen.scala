@@ -2256,20 +2256,44 @@ object Tablo4thGen {
       }
     }
 
+    def isAllowedSegmentUri(
+      rawUri: String
+    , authContextOpt: Option[Auth.AuthContext] = None
+    ): Boolean = {
+      Try(Uri(rawUri)).toOption.exists { uri =>
+        val scheme = uri.scheme.toLowerCase
+        val validScheme = scheme == "http" || scheme == "https"
+        val targetHost = uri.authority.host.address().toLowerCase
+        val allowedHosts = Set(
+          authContextOpt.orElse(Auth.authContext).map(_.deviceUrl.authority.host.address().toLowerCase)
+        , Option(AppContext.config).map(_.tablo.ipHost.toLowerCase)
+        ).flatten.filter(_.nonEmpty)
+        validScheme && targetHost.nonEmpty && allowedHosts.contains(targetHost)
+      }
+    }
+
     def route(
       sessionManager: ActorRef[SessionManager.Request]
     )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
-      route(sessionManager, None)
+      route(sessionManager, None, None)
 
     def route(
       sessionManager: ActorRef[SessionManager.Request]
     , lineupActor: ActorRef[Lineup.LineupActor.Request]
     )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
-      route(sessionManager, Some(lineupActor))
+      route(sessionManager, Some(lineupActor), None)
+
+    def route(
+      sessionManager: ActorRef[SessionManager.Request]
+    , lineupActor: ActorRef[Lineup.LineupActor.Request]
+    , authContext: Auth.AuthContext
+    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
+      route(sessionManager, Some(lineupActor), Some(authContext))
 
     def route(
       sessionManager: ActorRef[SessionManager.Request]
     , lineupActorOpt: Option[ActorRef[Lineup.LineupActor.Request]]
+    , authContextOpt: Option[Auth.AuthContext] = None
     )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route = {
       import pekko.http.scaladsl.unmarshalling.Unmarshal
       implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -2517,24 +2541,29 @@ object Tablo4thGen {
         } ~
         get {
           val decoded = Try(java.net.URLDecoder.decode(encodedSegment, "UTF-8")).getOrElse(encodedSegment)
-          val request = HttpRequest(uri = decoded)
-          val fut = HttpCtx.singleRequest(request).map { resp =>
-            if (resp.status.isSuccess()) {
-              val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-              val contentType = pekko.http.scaladsl.model.ContentType(`video/mp2t`)
-              val segHeaders = corsHeaders ++ Seq(
-                pekko.http.scaladsl.model.headers.RawHeader("Cache-Control", "public, max-age=86400")
-              )
-              HttpResponse(StatusCodes.OK, headers = segHeaders.toList, entity = HttpEntity(contentType, resp.entity.dataBytes))
-            } else {
-              val _ = resp.entity.discardBytes()
-              HttpResponse(resp.status, headers = corsHeaders.toList, entity = "Failed to fetch segment")
+          if (!isAllowedSegmentUri(decoded, authContextOpt)) {
+            log.warn("[channel] forbidden segment URI channelId={} uri={}", channelId, LogConfig.truncate(decoded))
+            complete(HttpResponse(StatusCodes.Forbidden, headers = corsHeaders.toList, entity = "Forbidden segment URI"))
+          } else {
+            val request = HttpRequest(uri = decoded)
+            val fut = HttpCtx.singleRequest(request).map { resp =>
+              if (resp.status.isSuccess()) {
+                val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
+                val contentType = pekko.http.scaladsl.model.ContentType(`video/mp2t`)
+                val segHeaders = corsHeaders ++ Seq(
+                  pekko.http.scaladsl.model.headers.RawHeader("Cache-Control", "public, max-age=86400")
+                )
+                HttpResponse(StatusCodes.OK, headers = segHeaders.toList, entity = HttpEntity(contentType, resp.entity.dataBytes))
+              } else {
+                val _ = resp.entity.discardBytes()
+                HttpResponse(resp.status, headers = corsHeaders.toList, entity = "Failed to fetch segment")
+              }
+            }.recover { case ex =>
+              log.warn("[channel] segment fetch failed channelId={} error={}", channelId, ex.getMessage)
+              HttpResponse(StatusCodes.BadGateway, headers = corsHeaders.toList, entity = "Segment fetch failed")
             }
-          }.recover { case ex =>
-            log.warn("[channel] segment fetch failed channelId={} error={}", channelId, ex.getMessage)
-            HttpResponse(StatusCodes.BadGateway, headers = corsHeaders.toList, entity = "Segment fetch failed")
+            complete(fut)
           }
-          complete(fut)
         }
       } ~
       path("hls" / Segment / Segment) { (channelId, _) =>
@@ -2964,6 +2993,6 @@ object Tablo4thGen {
     Tablo2HDHomeRun.Response.Discover.route ~
       Lineup.route(lineupActor) ~
       Guide.route(authContext) ~
-      Channel.route(sessionManager, lineupActor) ~
+      Channel.route(sessionManager, lineupActor, authContext) ~
       Tablo2HDHomeRun.Favicon.route
 }

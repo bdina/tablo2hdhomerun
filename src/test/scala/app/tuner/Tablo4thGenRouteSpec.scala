@@ -233,4 +233,21 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
       t1("Resource") shouldBe JsString("tuner1")
     }
   }
+
+  "GET /channel/:id/segment/:url" should "return 403 Forbidden for external target hosts" in {
+    val encodedEvil = java.net.URLEncoder.encode("http://evil.example.com/seg.ts", "UTF-8")
+    Get(s"/channel/chan-1/segment/$encodedEvil") ~> routes() ~> check {
+      status shouldBe StatusCodes.Forbidden
+    }
+  }
+
+  "Tablo4thGen.Channel.isAllowedSegmentUri" should "allow Tablo device hosts over HTTP/HTTPS and reject others" in {
+    val config = AppConfig.load(Map("TABLO_IP" -> "192.168.1.50")).config
+    AppContext.initialize(config, TabloLegacy.Response.Discover("Tablo 4th Gen Proxy", config.proxy.ip, config.tablo.protocol, config.proxy.port))
+    val auth = stubAuthContext
+    val _ = Tablo4thGen.Channel.isAllowedSegmentUri("http://127.0.0.1:8887/stream/seg0.ts", Some(auth)) shouldBe true
+    val _ = Tablo4thGen.Channel.isAllowedSegmentUri("https://192.168.1.50:8887/stream/seg0.ts", Some(auth)) shouldBe true
+    val _ = Tablo4thGen.Channel.isAllowedSegmentUri("http://evil.example.com/seg0.ts", Some(auth)) shouldBe false
+    Tablo4thGen.Channel.isAllowedSegmentUri("file:///etc/passwd", Some(auth)) shouldBe false
+  }
 }
