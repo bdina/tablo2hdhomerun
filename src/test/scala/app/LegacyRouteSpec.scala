@@ -25,9 +25,15 @@ trait LegacyRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRo
     system.toTyped.asInstanceOf[pekko.actor.typed.ActorSystem[pekko.NotUsed]]
 
   def createStubLineupActor(): org.apache.pekko.actor.typed.ActorRef[Lineup.LineupActor.Request] = {
+    val sampleChannel = JsObject(
+      "GuideNumber" -> JsString("4.1"),
+      "GuideName" -> JsString("WUSA-HD"),
+      "URL" -> JsString("http://127.0.0.1:8080/channel/101"),
+      "type" -> JsString("antenna")
+    )
     val behavior: Behavior[Lineup.LineupActor.Request] = Behaviors.receiveMessage {
       case Lineup.LineupActor.Request.Fetch(replyTo) =>
-        replyTo ! Lineup.LineupActor.Response.Fetch(Seq.empty, null)
+        replyTo ! Lineup.LineupActor.Response.Fetch(Seq(sampleChannel), null)
         Behaviors.same
       case Lineup.LineupActor.Request.Status(replyTo) =>
         replyTo ! Lineup.LineupActor.Response.Status(0, 1, null)
@@ -38,8 +44,10 @@ trait LegacyRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRo
     system.spawn(behavior, s"stub-lineup-${java.util.UUID.randomUUID()}")
   }
 
-  def legacyRoutes: Route = {
-    val config = AppConfig.load(Map.empty).config
+  def legacyRoutes: Route = legacyRoutesWithEnv(Map.empty)
+
+  def legacyRoutesWithEnv(envOverrides: Map[String, String]): Route = {
+    val config = AppConfig.load(envOverrides).config
     val discover = Discover(
       friendlyName = "Tablo Legacy Gen Proxy",
       localIp = config.proxy.ip,
@@ -49,7 +57,7 @@ trait LegacyRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRo
     AppContext.initialize(config, discover)
     AppContext.initialize(typedSystem)
     val stubLineup = createStubLineupActor()
-    Response.Discover.route ~ Lineup.route(stubLineup) ~ Channel.route ~ Favicon.route
+    Response.Discover.route ~ Lineup.route(stubLineup) ~ Channel.route(stubLineup) ~ Favicon.route
   }
 }
 
@@ -114,4 +122,28 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
       arr(0).asJsObject.fields("Resource") shouldBe JsString("tuner0")
     }
   }
+
+  "GET /lineup.m3u" should "return 200 OK with channel URL in Legacy mode" in {
+    Get("/lineup.m3u") ~> legacyRoutes ~> check {
+      val _ = status shouldBe StatusCodes.OK
+      val body = responseAs[String]
+      val _ = body should include("#EXTM3U")
+      val _ = body should include("WUSA-HD")
+      val _ = body should include("http://127.0.0.1:8080/channel/101")
+      body should not include ".m3u8"
+    }
+  }
+
+  it should "return 404 Not Found when ENABLE_HLS_ENDPOINT=false in Legacy mode" in {
+    Get("/lineup.m3u") ~> legacyRoutesWithEnv(Map("ENABLE_HLS_ENDPOINT" -> "false")) ~> check {
+      status shouldBe StatusCodes.NotFound
+    }
+  }
+
+  "GET /auto/v99.9" should "return 404 Not Found in Legacy mode" in {
+    Get("/auto/v99.9") ~> legacyRoutes ~> check {
+      status shouldBe StatusCodes.NotFound
+    }
+  }
+
 }

@@ -148,11 +148,11 @@ object TabloLegacy {
 
       object Proxy {
         object Request {
-          val baseUrl = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
-          val getUri = baseUrl.withPath(Uri.Path("/guide/channels"))
-          val postUri = baseUrl.withPath(Uri.Path("/batch"))
+          def baseUrl = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
+          def getUri = baseUrl.withPath(Uri.Path("/guide/channels"))
+          def postUri = baseUrl.withPath(Uri.Path("/batch"))
 
-          val httpRequest = HttpRequest(uri = getUri)
+          def httpRequest = HttpRequest(uri = getUri)
 
           def postRequest(entity: RequestEntity) = HttpRequest(
             method = HttpMethods.POST
@@ -196,6 +196,7 @@ object TabloLegacy {
         object Command {
           case class Store(channels: Seq[JsValue]) extends Command
           case object Scan extends Command
+          case object ScanFailed extends Command
         }
 
         trait Error extends Exception
@@ -246,16 +247,31 @@ object TabloLegacy {
 
                 channels
               }
+              .recover { case ex =>
+                log.error("[lineup] scan failed", ex)
+                context.self ! Command.ScanFailed
+                cache._2
+              }
 
           context.self ! Command.Scan
 
           Behaviors.receiveMessage {
             case Command.Store(channels) =>
               log.info("[lineup] store count={}", channels.size)
-
-              cache = (1.day.fromNow, channels)
+              if (channels.nonEmpty || cache._2.isEmpty) {
+                cache = (1.day.fromNow, channels)
+              } else {
+                log.warn("[lineup] keeping existing cached lineup count={} after empty scan", cache._2.size)
+                cache = (5.minutes.fromNow, cache._2)
+              }
               scanInProgress = false
+              Behaviors.same
 
+            case Command.ScanFailed =>
+              scanInProgress = false
+              if (cache._2.nonEmpty) {
+                cache = (1.minute.fromNow, cache._2)
+              }
               Behaviors.same
 
             case Command.Scan if scanInProgress =>
@@ -280,14 +296,19 @@ object TabloLegacy {
 
             case Request.Fetch(replyTo) if cache._1.isOverdue() =>
               log.debug("[lineup] fetch cache expired")
-
-              val sender = replyTo
-
-              scanInProgress = true
-              scan().foreach { channels =>
-                sender ! LineupActor.Response.Fetch(channels, context.self)
+              if (cache._2.nonEmpty) {
+                replyTo ! LineupActor.Response.Fetch(cache._2, context.self)
+                if (!scanInProgress) {
+                  scanInProgress = true
+                  scan() : Unit
+                }
+              } else {
+                val sender = replyTo
+                scanInProgress = true
+                scan().foreach { channels =>
+                  sender ! LineupActor.Response.Fetch(channels, context.self)
+                }
               }
-
               Behaviors.same
 
             case Request.Fetch(sender) =>
@@ -362,6 +383,36 @@ object TabloLegacy {
               }
             }
           }
+        } ~
+        path("lineup.m3u" | "lineup.m3u8") {
+          get {
+            val hlsEnabled = Option(AppContext.config).forall(_.proxy.enableHlsEndpoint)
+            if (!hlsEnabled) {
+              complete(HttpResponse(StatusCodes.NotFound, entity = "HLS endpoint disabled"))
+            } else {
+              import pekko.actor.typed.scaladsl.AskPattern._
+              import pekko.util.ByteString
+              implicit val timeout: pekko.util.Timeout = 3.seconds
+              val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
+              onComplete(lineupF) {
+                case Success(LineupActor.Response.Fetch(channels, _)) =>
+                  val sb = new java.lang.StringBuilder("#EXTM3U\n")
+                  channels.foreach { ch =>
+                    val obj = ch.asJsObject.fields
+                    val name = obj.get("GuideName").collect { case JsString(s) => s }.getOrElse("")
+                    val num = obj.get("GuideNumber").collect { case JsString(s) => s }.getOrElse("")
+                    val url = obj.get("URL").collect { case JsString(s) => s }.getOrElse("")
+                    val _ = sb.append(s"""#EXTINF:-1 tvg-id="$num" tvg-name="$name" tvg-chno="$num" group-title="Antenna",$name\n""")
+                    val _ = sb.append(s"$url\n")
+                  }
+                  val mpegurl = MediaType.customBinary("application", "x-mpegURL", MediaType.NotCompressible)
+                  complete(HttpEntity(pekko.http.scaladsl.model.ContentType(mpegurl), ByteString(sb.toString())))
+                case Failure(ex) =>
+                  log.warn("[lineup] lineup.m3u failed", ex)
+                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce M3U lineup"))
+              }
+            }
+          }
         }
     }
 
@@ -399,7 +450,7 @@ object TabloLegacy {
 
       object Proxy {
         object Request {
-          val baseUrl = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
+          def baseUrl = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
 
           // try to discover program guide endpoints
           def getProgramsUri(channelId: Int, startTime: Option[String] = None, endTime: Option[String] = None) = {
@@ -500,10 +551,12 @@ object TabloLegacy {
       // Singleton actor instance to avoid creating new actors per request
       private var _instance: Option[ActorRef[Request]] = None
 
-      def instance: ActorRef[Request] = _instance.getOrElse {
-        val actor = AppContext.system.systemActorOf(apply(), "guide-actor-singleton", pekko.actor.typed.Props.empty)
-        _instance = Some(actor)
-        actor
+      def instance: ActorRef[Request] = synchronized {
+        _instance.getOrElse {
+          val actor = AppContext.system.systemActorOf(apply(), "guide-actor-singleton", pekko.actor.typed.Props.empty)
+          _instance = Some(actor)
+          actor
+        }
       }
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
@@ -680,7 +733,12 @@ object TabloLegacy {
         Behaviors.receiveMessage {
           case Command.StoreGuide(guide) =>
             log.info("[guide] store count={}", guide.size)
-            cache = (1.hour.fromNow, guide)
+            if (guide.nonEmpty || cache._2.isEmpty) {
+              cache = (1.hour.fromNow, guide)
+            } else {
+              log.warn("[guide] scan returned empty guide; retaining cached guide count={}", cache._2.size)
+              cache = (5.minutes.fromNow, cache._2)
+            }
             scanInProgress = false
             Behaviors.same
 
@@ -697,10 +755,19 @@ object TabloLegacy {
             Behaviors.same
 
           case Request.FetchGuide(replyTo) if cache._1.isOverdue() =>
-            log.debug("[guide] fetch cache expired")
-            scanInProgress = true
-            scan().foreach { guide =>
-              replyTo ! Response.FetchGuide(guide, context.self)
+            if (cache._2.nonEmpty) {
+              log.debug("[guide] fetch cache expired; serving stale cache count={} and refreshing in background", cache._2.size)
+              if (!scanInProgress) {
+                context.self ! Command.Scan
+              }
+              replyTo ! Response.FetchGuide(cache._2, context.self)
+            } else {
+              log.debug("[guide] fetch cache expired and empty; scanning")
+              scanInProgress = true
+              scan().foreach { guide =>
+                context.self ! Command.StoreGuide(guide)
+                replyTo ! Response.FetchGuide(guide, context.self)
+              }
             }
             Behaviors.same
 
@@ -853,8 +920,8 @@ object TabloLegacy {
           )
         }
         object Tuners {
-          val uri = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port).withPath(Uri.Path(s"/server/tuners"))
-          val httpRequest = HttpRequest(uri = uri)
+          def uri = AppContext.discover.proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port).withPath(Uri.Path(s"/server/tuners"))
+          def httpRequest = HttpRequest(uri = uri)
         }
       }
       object Response {
@@ -884,7 +951,154 @@ object TabloLegacy {
         }
       }
 
-      val route =
+      def streamChannel(channelId: Long): pekko.http.scaladsl.server.Route = {
+        import Response.JsonProtocol._
+        import app.stream.{MpegTsSync, ResilientHlsSource, StreamMetrics}
+
+        val streamId = java.util.UUID.randomUUID.toString.take(8)
+
+        val watchUri =
+          AppContext.discover
+            .proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
+            .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
+
+        val tunersFuture: Future[Seq[Response.Tuners]] =
+          HttpCtx.singleRequest(Request.Tuners.httpRequest).flatMap { response =>
+            import Response.Tuners.JsonProtocol.tunersFormat
+            log.debug("[channel] http GET /server/tuners status={}", response.status.intValue())
+            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[Response.Tuners]])
+          }
+
+        def watchChannel(): Future[Response.WatchResponse] = {
+          HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
+            log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
+            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
+          }
+        }
+
+        def startWatchSession(checkTuners: Boolean): Future[Response.WatchResponse] = {
+          val availableFuture =
+            if (checkTuners) {
+              tunersFuture.map { tuners =>
+                val available = tuners.filterNot(_.in_use).size
+                log.info("[channel] available tuners {}", available)
+                if (available > 0) {
+                  true
+                } else {
+                  log.info("[channel] no available tuners (0/{})", tuners.size)
+                  false
+                }
+              }
+            } else {
+              Future.successful(true)
+            }
+          availableFuture.flatMap { available =>
+            if (available) {
+              watchChannel()
+            } else {
+              Future.failed(Response.NoAvailableTunersError)
+            }
+          }
+        }
+
+        def streamWithResilience(firstPlaylistUrl: String) =
+          Source.lazySource { () =>
+            var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
+            val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
+            val hlsCollector = new StreamMetrics.HlsCollector()
+            val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+            val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+            val metricsInterval =
+              Option(AppContext.config).map(_.stream.metricsIntervalSec.seconds).getOrElse(30.seconds)
+            val _ = activeStreams.put(streamId, (channelId.toString, latestMetricsRef))
+
+            def streamFactory() = {
+              nextPlaylistUrl match {
+                case Some(url) =>
+                  nextPlaylistUrl = None
+                  StreamBackend().stream(
+                    url
+                  , streamId
+                  , initialSeq = lastSeqRef.get()
+                  , onSeqAdvanced = seq => lastSeqRef.set(seq)
+                  , metricsCollector = Some(hlsCollector)
+                  )
+                case None =>
+                  Source.futureSource(
+                    startWatchSession(checkTuners = false).map { data =>
+                      log.info("[channel] recovered tune playlist={}", data.playlist_url)
+                      StreamBackend().stream(
+                        data.playlist_url.toString
+                      , streamId
+                      , initialSeq = lastSeqRef.get()
+                      , onSeqAdvanced = seq => lastSeqRef.set(seq)
+                      , metricsCollector = Some(hlsCollector)
+                      )
+                    }
+                  )
+              }
+            }
+            ResilientHlsSource(
+              streamFactory = () => streamFactory()
+            , streamName = s"legacy-channel-$channelId"
+            , resumePrefixSupplier = () => Some(cachedHeadersRef.get().syncPrefix)
+            , videoPidSupplier = () => cachedHeadersRef.get().videoPid
+            , videoStreamTypeSupplier = () => cachedHeadersRef.get().videoStreamType
+            , audioPidsSupplier = () => cachedHeadersRef.get().audioPids
+            , audioStreamTypesSupplier = () => cachedHeadersRef.get().audioStreamTypes
+            , lockedSeqHeaderSupplier = () => cachedHeadersRef.get().lockedSeqHeader
+            , metricsCollector = Some(hlsCollector)
+            )
+              .via(MpegTsSync.cacheFlow(
+                cachedHeadersRef
+              , label = s"legacy-channel-$channelId ($streamId)"
+              , metricsInterval = metricsInterval
+              , hlsCollector = Some(hlsCollector)
+              , latestMetricsRef = Some(latestMetricsRef)
+              ))
+              .watchTermination() { (_, done) =>
+                done.onComplete {
+                  case Success(_) =>
+                    val _ = activeStreams.remove(streamId)
+                    log.info("[channel] stream end streamId={} channelId={}", streamId, channelId)
+                  case Failure(ex) =>
+                    val _ = activeStreams.remove(streamId)
+                    log.warn("[channel] stream failed streamId={} channelId={}", streamId, channelId, ex)
+                }
+              }
+          }
+
+        onComplete(startWatchSession(checkTuners = true)) {
+          case Success(data) =>
+            log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, data.playlist_url)
+            val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
+            complete(
+              HttpEntity.Chunked.fromData(
+                ContentType(`video/mp2t`),
+                streamWithResilience(data.playlist_url.toString)
+              )
+            )
+          case Failure(Response.NoAvailableTunersError) =>
+            log.info("[channel] no available tuners streamId={} channelId={}", streamId, channelId)
+            complete(
+              HttpResponse(
+                StatusCodes.ServiceUnavailable
+              , headers = List(pekko.http.scaladsl.model.headers.RawHeader("X-HDHomeRun-Error", "805 All Tuners In Use"))
+              , entity = "No available tuners"
+              )
+            )
+          case Failure(ex) =>
+            log.warn("[channel] stream start failed streamId={} channelId={}", streamId, channelId, ex)
+            complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+        }
+      }
+
+      val route: pekko.http.scaladsl.server.Route = route(None)
+
+      def route(lineupActor: ActorRef[Lineup.LineupActor.Request]): pekko.http.scaladsl.server.Route =
+        route(Some(lineupActor))
+
+      def route(lineupActorOpt: Option[ActorRef[Lineup.LineupActor.Request]]): pekko.http.scaladsl.server.Route =
         path("status.json") {
           get {
             val totalTuners =
@@ -905,129 +1119,44 @@ object TabloLegacy {
         } ~
         path("channel" / LongNumber) { channelId =>
           get {
-            import Response.JsonProtocol._
-            import app.stream.{MpegTsSync, ResilientHlsSource, StreamMetrics}
+            streamChannel(channelId)
+          }
+        } ~
+        path("auto" / ("v" ~ Segment)) { guideNumber =>
+          get {
+            lineupActorOpt match {
+              case Some(lineupActor) =>
+                import pekko.actor.typed.scaladsl.AskPattern._
+                implicit val timeout: pekko.util.Timeout = 3.seconds
+                val fetchF: Future[Lineup.LineupActor.Response.Fetch] =
+                  lineupActor.ask(replyTo => Lineup.LineupActor.Request.Fetch(replyTo))
+                onComplete(fetchF) {
+                  case Success(Lineup.LineupActor.Response.Fetch(channels, _)) =>
+                    val matchedChannelId = channels.iterator.flatMap { ch =>
+                      val obj = ch.asJsObject.fields
+                      val gn = obj.get("GuideNumber").collect { case JsString(s) => s }
+                      if (gn.contains(guideNumber)) {
+                        obj.get("URL").collect { case JsString(u) =>
+                          val clean = u.stripSuffix(".m3u8")
+                          val idx = clean.lastIndexOf('/')
+                          if (idx >= 0 && idx < clean.length - 1) clean.substring(idx + 1)
+                          else clean
+                        }.flatMap(idStr => Try(idStr.toLong).toOption)
+                      } else None
+                    }.nextOption()
 
-            val streamId = java.util.UUID.randomUUID.toString.take(8)
-
-            val watchUri =
-              AppContext.discover
-                .proxyAddress(AppContext.config.tablo.ip, AppContext.config.tablo.port)
-                .withPath(Uri.Path(s"/guide/channels/$channelId/watch"))
-
-            val tunersFuture: Future[Seq[Response.Tuners]] =
-              HttpCtx.singleRequest(Request.Tuners.httpRequest).flatMap { response =>
-                import Response.Tuners.JsonProtocol.tunersFormat
-                log.debug("[channel] http GET /server/tuners status={}", response.status.intValue())
-                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[Response.Tuners]])
-              }
-
-            def watchChannel(): Future[Response.WatchResponse] = {
-              HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
-                log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
-                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
-              }
-            }
-
-            def startWatchSession(checkTuners: Boolean): Future[Response.WatchResponse] = {
-              val availableFuture =
-                if (checkTuners) {
-                  tunersFuture.map { tuners =>
-                    val available = tuners.filterNot(_.in_use).size
-                    log.info("[channel] available tuners {}", available)
-                    if (available > 0) {
-                      true
-                    } else {
-                      log.info("[channel] no available tuners (0/{})", tuners.size)
-                      false
+                    matchedChannelId match {
+                      case Some(channelId) =>
+                        streamChannel(channelId)
+                      case None =>
+                        complete(HttpResponse(StatusCodes.NotFound, entity = s"Channel v$guideNumber not found"))
                     }
-                  }
-                } else {
-                  Future.successful(true)
+                  case Failure(ex) =>
+                    log.warn("[auto] failed to resolve guideNumber={} from lineup", guideNumber, ex)
+                    complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to resolve channel lineup"))
                 }
-              availableFuture.flatMap { available =>
-                if (available) {
-                  watchChannel()
-                } else {
-                  Future.failed(Response.NoAvailableTunersError)
-                }
-              }
-            }
-
-            def streamWithResilience(firstPlaylistUrl: String) =
-              Source.lazySource { () =>
-                var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
-                val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
-                val hlsCollector = new StreamMetrics.HlsCollector()
-                val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
-                val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
-                val metricsInterval =
-                  Option(AppContext.config).map(_.stream.metricsIntervalSec.seconds).getOrElse(30.seconds)
-                val _ = activeStreams.put(streamId, (channelId.toString, latestMetricsRef))
-
-                def streamFactory() = {
-                  nextPlaylistUrl match {
-                    case Some(url) =>
-                      nextPlaylistUrl = None
-                      StreamBackend().stream(
-                        url
-                      , streamId
-                      , initialSeq = lastSeqRef.get()
-                      , onSeqAdvanced = seq => lastSeqRef.set(seq)
-                      , metricsCollector = Some(hlsCollector)
-                      )
-                    case None =>
-                      Source.futureSource(
-                        startWatchSession(checkTuners = false).map { data =>
-                          log.info("[channel] recovered tune playlist={}", data.playlist_url)
-                          StreamBackend().stream(
-                            data.playlist_url.toString
-                          , streamId
-                          , initialSeq = lastSeqRef.get()
-                          , onSeqAdvanced = seq => lastSeqRef.set(seq)
-                          , metricsCollector = Some(hlsCollector)
-                          )
-                        }
-                      )
-                  }
-                }
-                ResilientHlsSource(
-                  streamFactory = () => streamFactory()
-                , streamName = s"legacy-channel-$channelId"
-                , metricsCollector = Some(hlsCollector)
-                )
-                  .via(MpegTsSync.cacheFlow(
-                    cachedHeadersRef
-                  , label = s"legacy-channel-$channelId ($streamId)"
-                  , metricsInterval = metricsInterval
-                  , hlsCollector = Some(hlsCollector)
-                  , latestMetricsRef = Some(latestMetricsRef)
-                  ))
-                  .watchTermination() { (_, done) =>
-                    done.onComplete {
-                      case Success(_) =>
-                        val _ = activeStreams.remove(streamId)
-                        log.info("[channel] stream end streamId={} channelId={}", streamId, channelId)
-                      case Failure(ex) =>
-                        val _ = activeStreams.remove(streamId)
-                        log.warn("[channel] stream failed streamId={} channelId={}", streamId, channelId, ex)
-                    }
-                  }
-              }
-
-            onComplete(startWatchSession(checkTuners = true)) {
-              case Success(data) =>
-                log.info("[channel] tuned streamId={} channelId={} playlistUrl={}", streamId, channelId, data.playlist_url)
-                val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-                complete(
-                  HttpEntity.Chunked.fromData(
-                    ContentType(`video/mp2t`),
-                    streamWithResilience(data.playlist_url.toString)
-                  )
-                )
-              case Failure(ex) =>
-                log.warn("[channel] stream start failed streamId={} channelId={}", streamId, channelId, ex)
-                complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+              case None =>
+                complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "Channel lineup not available"))
             }
           }
         }

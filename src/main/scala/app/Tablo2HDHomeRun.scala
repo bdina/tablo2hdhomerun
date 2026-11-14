@@ -207,7 +207,7 @@ object Tablo2HDHomeRun {
           AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
         }
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
-        Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route ~ Guide.route ~ Favicon.route
+        Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route(lineup) ~ Guide.route ~ Favicon.route
     }
 
     startHttp(config, routes, daemon)
