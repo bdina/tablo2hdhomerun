@@ -278,6 +278,18 @@
       "allDeclaredFields": true
     },
     {
+      "type": "app.tuner.Tablo4thGen$Lineup$DeviceChannelInfo",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.tuner.Tablo4thGen$Lineup$DeviceChannelObject",
+      "allDeclaredFields": true
+    },
+    {
+      "type": "app.tuner.Tablo4thGen$TunerState$TunerSlot",
+      "allDeclaredFields": true
+    },
+    {
       "type": "app.tuner.Tablo4thGen$Guide$SeasonInfo",
       "allDeclaredFields": true
     },

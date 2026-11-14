@@ -295,8 +295,10 @@ object Tablo4thGen {
       implicit val otaChannelInfoFormat: JsonFormat[OtaChannelInfo] = jsonFormat7(OtaChannelInfo.apply)
       implicit val ottChannelInfoFormat: JsonFormat[OttChannelInfo] = jsonFormat7(OttChannelInfo.apply)
       implicit val channelLineupFormat: JsonFormat[ChannelLineup] = jsonFormat5(ChannelLineup.apply)
-      implicit val deviceChannelInfoFormat: JsonFormat[DeviceChannelInfo] = jsonFormat7(DeviceChannelInfo.apply)
-      implicit val deviceChannelObjectFormat: JsonFormat[DeviceChannelObject] = jsonFormat3(DeviceChannelObject.apply)
+      implicit val deviceChannelInfoFormat: JsonFormat[DeviceChannelInfo] =
+        jsonFormat(DeviceChannelInfo.apply, "call_sign", "name", "major", "minor", "network", "channel_identifier", "source")
+      implicit val deviceChannelObjectFormat: JsonFormat[DeviceChannelObject] =
+        jsonFormat(DeviceChannelObject.apply, "object_id", "path", "channel")
     }
 
     final case class VctInfo(vctNumber: String, vctName: String)
@@ -2616,7 +2618,8 @@ object Tablo4thGen {
     )
 
     object JsonProtocol extends DefaultJsonProtocol {
-      implicit val tunerSlotFormat: JsonFormat[TunerSlot] = jsonFormat4(TunerSlot.apply)
+      implicit val tunerSlotFormat: JsonFormat[TunerSlot] =
+        jsonFormat(TunerSlot.apply, "in_use", "channel", "recording", "channel_identifier")
     }
 
     sealed trait TuneOrigin {
