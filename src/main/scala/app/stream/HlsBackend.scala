@@ -149,7 +149,7 @@ object HlsBackend extends StreamBackend {
             , retriesLeft
             ) match {
               case HlsSegmentFetch.Accept =>
-                response.entity.dataBytes.watchTermination() { (_, done) =>
+                response.entity.dataBytes.watchTermination { (_, done) =>
                   done.onComplete {
                     case Success(_) => ()
                     case Failure(_) => val _ = response.entity.discardBytes()
@@ -358,7 +358,7 @@ object HlsBackend extends StreamBackend {
                   val _ = bytesOut.addAndGet(chunk.size)
                   chunk
                 }
-                .watchTermination() { (_, done) =>
+                .watchTermination { (_, done) =>
                   done.onComplete {
                     case Success(_) =>
                       val totalSegBytes = segBytes.get()
@@ -394,7 +394,7 @@ object HlsBackend extends StreamBackend {
               countedSource
             }
         }
-      ).watchTermination() { (_, done) =>
+      ).watchTermination { (_, done) =>
         done.onComplete {
           case Success(_) =>
             heartbeatTask.foreach(_.cancel())

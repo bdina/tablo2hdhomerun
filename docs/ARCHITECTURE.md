@@ -52,10 +52,10 @@ Over-the-air broadcast streams during antenna flutter, wind gusts, or fringe rec
 
 | Component | Technology |
 |-----------|------------|
-| Language | Scala 3.9.0 |
+| Language | Scala 3.10.1 |
 | Runtime | JVM (Java 24+) or GraalVM Native Image |
-| HTTP Framework | Apache Pekko HTTP 1.4.0 |
-| Actor System | Apache Pekko Actor Typed 1.7.0 |
+| HTTP Framework | Apache Pekko HTTP 2.0.0 |
+| Actor System | Apache Pekko Actor Typed 2.0.0 |
 | JSON | Spray JSON |
 | XML | scala-xml |
 | Build | Gradle 9.3.1 with Shadow plugin 9.6.1 |

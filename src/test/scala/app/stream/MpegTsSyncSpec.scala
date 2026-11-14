@@ -2,7 +2,6 @@ package app.stream
 
 import org.apache.pekko.NotUsed
 import org.apache.pekko.actor.testkit.typed.scaladsl.ScalaTestWithActorTestKit
-import org.apache.pekko.stream.OverflowStrategy
 import org.apache.pekko.stream.scaladsl.{Flow, Sink, Source}
 import org.apache.pekko.util.ByteString
 import org.junit.runner.RunWith
@@ -1552,7 +1551,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val initialKeyframe = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
       val initialAudio = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1, withValidSyncword = true)
 
-      val (queue, probe) = Source.queue[ByteString](bufferSize = 64, OverflowStrategy.backpressure)
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
         .via(
           MpegTsSync.cacheFlow(
             cachedHeadersRef
@@ -1717,7 +1716,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
       val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
 
-      val (queue, probe) = Source.queue[ByteString](bufferSize = 64, OverflowStrategy.backpressure)
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
         .via(
           MpegTsSync.cacheFlow(
             cachedHeadersRef
@@ -1764,7 +1763,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
       val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
 
-      val (queue, probe) = Source.queue[ByteString](bufferSize = 64, OverflowStrategy.backpressure)
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
         .via(
           MpegTsSync.cacheFlow(
             cachedHeadersRef
@@ -2180,7 +2179,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val videoPid = 0x0101
       val seqHeader = ByteString(0x00, 0x00, 0x01, 0xB3.toByte, 0x78, 0x04, 0x38, 0x12, 0x34, 0x56, 0x78, 0x9A.toByte)
 
-      val (queue, outFuture) = Source.queue[ByteString](bufferSize = 32, OverflowStrategy.backpressure)
+      val (queue, outFuture) = Source.queue[ByteString](bufferSize = 32)
         .via(
           MpegTsSync.alignToIFrame(
             videoPid = Some(videoPid)
@@ -2193,12 +2192,12 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         .run()
 
       // 1. Pre-video null packets spanning > maxWait (100ms > 60ms) must not start or expire the video alignment clock
-      val _ = queue.offer(MpegTsSync.MPEGTS_NULL_PACKET).futureValue
+      val _ = queue.offer(MpegTsSync.MPEGTS_NULL_PACKET).isEnqueued shouldBe true
       Thread.sleep(100L)
 
       // 2. First non-keyframe video packet (PUSI=1) starts firstDroppedVideoNanos at videoWait=0ms -> dropped
       val vFirstDropped = withCc(buildMediaPacket(videoPid), cc = 3, pusi = true)
-      val _ = queue.offer(vFirstDropped).futureValue
+      val _ = queue.offer(vFirstDropped).isEnqueued shouldBe true
 
       // 3. Wait past maxWait (60ms) from firstDroppedVideoNanos
       Thread.sleep(75L)
@@ -2208,7 +2207,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val vMidSlice = withCc(buildMediaPacket(videoPid), cc = 4, pusi = false)
       val vPusiFrame = withCc(buildMediaPacket(videoPid), cc = 5, pusi = true)
       val vContSlice = withCc(buildMediaPacket(videoPid), cc = 6, pusi = false)
-      val _ = queue.offer(vMidSlice ++ vPusiFrame ++ vContSlice).futureValue
+      val _ = queue.offer(vMidSlice ++ vPusiFrame ++ vContSlice).isEnqueued shouldBe true
       queue.complete()
 
       val out = outFuture.futureValue.foldLeft(ByteString.empty)(_ ++ _)

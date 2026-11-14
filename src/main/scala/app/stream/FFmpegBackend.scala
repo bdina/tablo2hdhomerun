@@ -59,7 +59,7 @@ object FFmpegBackend extends StreamBackend {
       log.info("[stream:ffmpeg] start label={} pid={} playlistUrl={}", label, process.pid, playlistUrl)
       StreamConverters
         .fromInputStream(() => process.getInputStream)
-        .watchTermination() { (_, done) =>
+        .watchTermination { (_, done) =>
           done.onComplete {
             case Success(_) =>
               log.info("[stream:ffmpeg] complete label={} pid={}", label, process.pid)

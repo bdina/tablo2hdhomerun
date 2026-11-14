@@ -343,6 +343,14 @@
       ]
     },
     {
+      "type": "org.apache.pekko.actor.ArgsReflectConstructor",
+      "fields": [
+        {
+          "name": "initialized$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.actor.CoordinatedShutdown",
       "fields": [
         {
@@ -451,7 +459,21 @@
       ]
     },
     {
-      "type": "org.apache.pekko.actor.Props$EmptyActor"
+      "type": "org.apache.pekko.actor.NoArgsReflectConstructor",
+      "fields": [
+        {
+          "name": "initialized$lzy2"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.actor.Props$EmptyActor",
+      "methods": [
+        {
+          "name": "<init>",
+          "parameterTypes": []
+        }
+      ]
     },
     {
       "type": "org.apache.pekko.actor.RepointableActorRef",
@@ -575,10 +597,18 @@
       ]
     },
     {
-      "type": "org.apache.pekko.dispatch.ForkJoinExecutorConfigurator$ForkJoinExecutorServiceFactory",
-      "fields": [
+      "type": "org.apache.pekko.dispatch.ForkJoinExecutorConfigurator$PekkoForkJoinPool",
+      "methods": [
         {
-          "name": "pekkoJdk9ForkJoinPoolHandleOpt$lzy1"
+          "name": "<init>",
+          "parameterTypes": [
+            "int",
+            "java.util.concurrent.ForkJoinPool$ForkJoinWorkerThreadFactory",
+            "int",
+            "java.lang.Thread$UncaughtExceptionHandler",
+            "boolean",
+            "int"
+          ]
         }
       ]
     },
@@ -616,22 +646,6 @@
       "type": "org.apache.pekko.dispatch.MultipleConsumerSemantics"
     },
     {
-      "type": "org.apache.pekko.dispatch.PekkoJdk9ForkJoinPool",
-      "methods": [
-        {
-          "name": "<init>",
-          "parameterTypes": [
-            "int",
-            "java.util.concurrent.ForkJoinPool$ForkJoinWorkerThreadFactory",
-            "int",
-            "java.lang.Thread$UncaughtExceptionHandler",
-            "boolean",
-            "int"
-          ]
-        }
-      ]
-    },
-    {
       "type": "org.apache.pekko.dispatch.SingleConsumerOnlyUnboundedMailbox",
       "methods": [
         {
@@ -666,6 +680,11 @@
     },
     {
       "type": "org.apache.pekko.event.DeadLetterListener",
+      "fields": [
+        {
+          "name": "coordinatedShutdown$lzy1"
+        }
+      ],
       "methods": [
         {
           "name": "<init>",
@@ -816,7 +835,7 @@
       ]
     },
     {
-      "type": "org.apache.pekko.http.impl.engine.server.HttpServerBluePrint$ControllerStage$$anon$10",
+      "type": "org.apache.pekko.http.impl.engine.server.HttpServerBluePrint$ControllerStage$$anon$9",
       "fields": [
         {
           "name": "OneHundredContinueStage$lzy1"
@@ -1175,6 +1194,14 @@
       ]
     },
     {
+      "type": "org.apache.pekko.stream.ActorMaterializerSettings",
+      "fields": [
+        {
+          "name": "toAttributes$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.stream.Attributes$SourceLocation",
       "fields": [
         {
@@ -1197,14 +1224,6 @@
       ]
     },
     {
-      "type": "org.apache.pekko.stream.UniformFanOutShape",
-      "fields": [
-        {
-          "name": "_outArray$lzy1"
-        }
-      ]
-    },
-    {
       "type": "org.apache.pekko.stream.impl.PhasedFusingActorMaterializer",
       "fields": [
         {
@@ -1221,6 +1240,14 @@
       ]
     },
     {
+      "type": "org.apache.pekko.stream.impl.fusing.GraphInterpreter",
+      "fields": [
+        {
+          "name": "defaultErrorReportingLogLevel$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.stream.impl.fusing.GraphInterpreterShell",
       "fields": [
         {
@@ -1232,10 +1259,10 @@
       ]
     },
     {
-      "type": "org.apache.pekko.stream.impl.fusing.MapAsyncUnordered$$anon$29",
+      "type": "org.apache.pekko.stream.impl.fusing.MapAsyncUnordered$$anon$28",
       "fields": [
         {
-          "name": "decider$lzy9"
+          "name": "decider$lzy10"
         }
       ]
     },
@@ -1267,10 +1294,29 @@
       ]
     },
     {
+      "type": "org.apache.pekko.stream.stage.GraphStageLogic$StageActor$LazyDispatch",
+      "fields": [
+        {
+          "name": "state"
+        }
+      ]
+    },
+    {
+      "type": "org.apache.pekko.util.ByteString",
+      "fields": [
+        {
+          "name": "hashCode$lzy1"
+        }
+      ]
+    },
+    {
       "type": "org.apache.pekko.util.ByteString$ByteString1"
     },
     {
       "type": "org.apache.pekko.util.ByteString$ByteString1C"
+    },
+    {
+      "type": "org.apache.pekko.util.ByteString$ByteString2"
     },
     {
       "type": "org.apache.pekko.util.ByteString$ByteStrings"

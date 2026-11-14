@@ -41,8 +41,8 @@ ext {
     scala_maj = '3'
     scala_ver = "${scala_maj}.10.1"
 
-    pekko_core = '1.7.1'
-    pekko_http = '1.4.2'
+    pekko_core = '2.0.0'
+    pekko_http = '2.0.0'
     scala_test = '3.2.20'
 }
 

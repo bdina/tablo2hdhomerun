@@ -2145,7 +2145,7 @@ object Tablo4thGen {
               , latestMetricsRef = Some(latestMetricsRef)
               ))
               .viaMat(KillSwitches.single)(Keep.right)
-              .watchTermination()(Keep.both)
+              .watchTermination(Keep.both)
               .toMat(BroadcastHub.sink[ByteString](SessionManager.BroadcastHubBufferSize))(Keep.both)
               .run()
 
@@ -2429,7 +2429,7 @@ object Tablo4thGen {
               val _ = bytesSent.addAndGet(chunk.size)
               chunk
             }
-            .watchTermination() { (_, done) =>
+            .watchTermination { (_, done) =>
               done.onComplete { result =>
                 val durationMs = (System.nanoTime() - startNanos) / 1000000L
                 val totalBytes = bytesSent.get()

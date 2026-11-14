@@ -1056,7 +1056,7 @@ object TabloLegacy {
               , hlsCollector = Some(hlsCollector)
               , latestMetricsRef = Some(latestMetricsRef)
               ))
-              .watchTermination() { (_, done) =>
+              .watchTermination { (_, done) =>
                 done.onComplete {
                   case Success(_) =>
                     val _ = activeStreams.remove(streamId)
