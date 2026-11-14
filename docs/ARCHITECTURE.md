@@ -141,6 +141,13 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 - Handles lifecycle (start, status, stop)
 - Intel QuickSync Video (QSV) hardware acceleration support
 
+#### TunerStateActor (4th Gen)
+
+- Maintains the latest snapshot of Tablo 4th Gen hardware tuner activity (`Snapshot`)
+- Fed by a periodic Pekko stream (`TunerState.startStream`, default `30s`, configured via `TUNER_STATE_POLL_INTERVAL_SEC`) that polls `GET /server/tuners?lh=1` on the local Tablo device
+- Resolves human-readable OTA channel labels via `Lineup` with a fallback to `GET /guide/channels/{id}?lh=1`
+- Queries `SessionManager` (`GetActiveChannelStates`) to log whether each tuned channel is controlled by `tablo2hdhomerun` (`[self:<state>]`) or externally by another app (`[external]`), without altering `SessionManager` tuner count gating
+
 ### Stream Processing Pipeline
 
 The live channel stream can use one of two backends, selected by `STREAM_BACKEND`:
@@ -283,6 +290,7 @@ Streams fan out to subscribers via a 1024-element `BroadcastHub` buffer. When ne
 | `STREAM_PRE_ROLL_INTERVAL_MS`| `100` | Interval in ms between pre-roll keepalive chunks |
 | `STREAM_PRE_ROLL_PACKETS` | `7` | Number of 188-byte null packets per keepalive chunk (7 = 1316 bytes MTU) |
 | `SESSION_IDLE_GRACE_SEC` | `180` | Idle grace period (in seconds) to retain tuner session |
+| `TUNER_STATE_POLL_INTERVAL_SEC` | `30` | Interval in seconds to poll and log Tablo 4th Gen hardware tuner state (`<= 0` disables polling) |
 | `MEDIA_ROOT` | (none) | Optional path for media file transcoding |
 
 ### Fixed Configuration

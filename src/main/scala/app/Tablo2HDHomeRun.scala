@@ -106,7 +106,7 @@ object Tablo2HDHomeRun {
 
   def logStartupConfig(config: AppConfig): Unit =
     log.info(
-      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} metricsIntervalSec={} idleGraceSec={} stallTimeoutSec={} tuneTimeoutSec={} recoveryTimeoutSec={} preRollKeepAlive={} mediaRoot={}"
+      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} metricsIntervalSec={} idleGraceSec={} tunerStatePollIntervalSec={} stallTimeoutSec={} tuneTimeoutSec={} recoveryTimeoutSec={} preRollKeepAlive={} mediaRoot={}"
     , appVersion
     , config.tablo.gen.envValue
     , config.tablo.ipHost
@@ -115,6 +115,7 @@ object Tablo2HDHomeRun {
     , config.stream.backend.envValue
     , config.stream.metricsIntervalSec
     , config.proxy.idleGraceSec
+    , config.proxy.tunerStatePollIntervalSec
     , config.stream.resilient.stallTimeoutSec
     , config.stream.resilient.tuneTimeoutSec
     , config.stream.resilient.recoveryTimeoutSec
@@ -178,6 +179,18 @@ object Tablo2HDHomeRun {
           )
         , "session-manager-4thgen"
         )
+        val tunerStateActor = context.spawn(
+          app.tuner.Tablo4thGen.TunerState.TunerStateActor()
+        , "tuner-state-actor-4thgen"
+        )
+        if (config.proxy.tunerStatePollIntervalSec > 0) {
+          val _ = app.tuner.Tablo4thGen.TunerState.startStream(
+            tunerStateActor = tunerStateActor
+          , sessionManager = sessionManager
+          , authContext = authContext
+          , pollInterval = config.proxy.tunerStatePollIntervalSec.seconds
+          )
+        }
         app.tuner.Tablo4thGen.routes(lineup, sessionManager, authContext)
       case TabloGen.Legacy =>
         implicit val sys: ActorSystem[?] = context.system

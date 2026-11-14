@@ -276,11 +276,27 @@ object Tablo4thGen {
     case class OtaChannelInfo(major: Int, minor: Int, callSign: Option[String], network: Option[String], streamUrl: Option[String], provider: Option[String], canRecord: Option[Boolean])
     case class OttChannelInfo(major: Option[Int], minor: Option[Int], callSign: Option[String], network: Option[String], streamUrl: Option[String], provider: Option[String], canRecord: Option[Boolean])
     case class ChannelLineup(identifier: String, name: String, kind: String, ota: Option[OtaChannelInfo], ott: Option[OttChannelInfo])
+    case class DeviceChannelInfo(
+      call_sign: String
+    , name: Option[String]
+    , major: Int
+    , minor: Int
+    , network: Option[String]
+    , channel_identifier: String
+    , source: Option[String]
+    )
+    case class DeviceChannelObject(
+      object_id: Int
+    , path: String
+    , channel: DeviceChannelInfo
+    )
 
     object JsonProtocol extends DefaultJsonProtocol {
       implicit val otaChannelInfoFormat: JsonFormat[OtaChannelInfo] = jsonFormat7(OtaChannelInfo.apply)
       implicit val ottChannelInfoFormat: JsonFormat[OttChannelInfo] = jsonFormat7(OttChannelInfo.apply)
       implicit val channelLineupFormat: JsonFormat[ChannelLineup] = jsonFormat5(ChannelLineup.apply)
+      implicit val deviceChannelInfoFormat: JsonFormat[DeviceChannelInfo] = jsonFormat7(DeviceChannelInfo.apply)
+      implicit val deviceChannelObjectFormat: JsonFormat[DeviceChannelObject] = jsonFormat3(DeviceChannelObject.apply)
     }
 
     final case class VctInfo(vctNumber: String, vctName: String)
@@ -329,6 +345,27 @@ object Tablo4thGen {
       label
     }
 
+    def registerDeviceChannel(obj: DeviceChannelObject): String = {
+      val ch = obj.channel
+      val kind = ch.source.getOrElse("ota")
+      val lineup = ChannelLineup(
+        identifier = ch.channel_identifier
+      , name = ch.name.getOrElse(ch.call_sign)
+      , kind = kind
+      , ota = Some(OtaChannelInfo(
+          major = ch.major
+        , minor = ch.minor
+        , callSign = Some(ch.call_sign)
+        , network = ch.network
+        , streamUrl = None
+        , provider = None
+        , canRecord = None
+        ))
+      , ott = None
+      )
+      registerChannel(lineup)
+    }
+
     def registerChannelsFromJson(channels: Seq[JsValue]): Unit =
       channels.foreach { ch =>
         val _ = Try {
@@ -352,6 +389,9 @@ object Tablo4thGen {
           }
         }
       }
+
+    def hasChannelLabel(channelId: String): Boolean =
+      channelId != null && channelId.nonEmpty && Option(channelLabels.get(channelId)).exists(_.nonEmpty)
 
     def channelLabel(channelId: String): String =
       Option(channelLabels.get(channelId)).filter(_.nonEmpty).getOrElse(channelId)
@@ -1263,6 +1303,7 @@ object Tablo4thGen {
         case class SetTotalTuners(total: Int) extends Request
         case class GetSessionMeta(channelId: String, replyTo: ActorRef[Option[TabloSessionMeta]]) extends Request
         case class GetTunerStatuses(replyTo: ActorRef[Seq[HDHomeRunStatus.TunerStatus]]) extends Request
+        case class GetActiveChannelStates(replyTo: ActorRef[Map[String, String]]) extends Request
       }
 
       sealed trait Response
@@ -1473,6 +1514,15 @@ object Tablo4thGen {
                 )
             }
             replyTo ! HDHomeRunStatus.buildTunerStatuses(tuners, activeInfos)
+            Behaviors.same
+
+          case Request.GetActiveChannelStates(replyTo) =>
+            val states = sessions.map {
+              case (chId, _: SessionState.Opening) => chId -> "opening"
+              case (chId, _: SessionState.Live) => chId -> "live"
+              case (chId, _: SessionState.IdleGrace) => chId -> "idle-grace"
+            }
+            replyTo ! states
             Behaviors.same
 
           case Request.GetSessionMeta(channelId, replyTo) =>
@@ -2552,6 +2602,314 @@ object Tablo4thGen {
           }
         }
       }
+    }
+  }
+
+  object TunerState {
+    val log = LoggerFactory.getLogger(this.getClass)
+
+    case class TunerSlot(
+      in_use: Boolean
+    , channel: Option[String]
+    , recording: Option[String]
+    , channel_identifier: Option[String]
+    )
+
+    object JsonProtocol extends DefaultJsonProtocol {
+      implicit val tunerSlotFormat: JsonFormat[TunerSlot] = jsonFormat4(TunerSlot.apply)
+    }
+
+    sealed trait TuneOrigin {
+      def tag: String
+      def isSelf: Boolean
+    }
+    object TuneOrigin {
+      final case class Self(sessionState: String) extends TuneOrigin {
+        def tag: String = s"self:$sessionState"
+        def isSelf: Boolean = true
+      }
+      case object External extends TuneOrigin {
+        def tag: String = "external"
+        def isSelf: Boolean = false
+      }
+    }
+
+    final case class TunedChannel(
+      slotIndex: Int
+    , channelId: String
+    , channelPath: Option[String]
+    , label: String
+    , origin: TuneOrigin
+    , recording: Option[String]
+    ) {
+      def formatLogEntry: String = {
+        val recSuffix = recording.filter(_.nonEmpty).map(r => s" rec=$r").getOrElse("")
+        s"slot=$slotIndex $label ($channelId) [${origin.tag}]$recSuffix"
+      }
+    }
+
+    final case class Snapshot(
+      totalSlots: Int
+    , inUseSlots: Int
+    , tunedChannels: Seq[TunedChannel]
+    ) {
+      def selfCount: Int = tunedChannels.count(_.origin.isSelf)
+      def externalCount: Int = tunedChannels.count(ch => !ch.origin.isSelf)
+    }
+
+    object Snapshot {
+      val empty: Snapshot = Snapshot(0, 0, Seq.empty)
+    }
+
+    private val ValidChannelPathPattern = "^/guide/channels/[0-9]+$".r
+
+    def isValidChannelPath(path: String): Boolean =
+      path != null && ValidChannelPathPattern.matches(path.trim)
+
+    def fetchTunerSlots(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]): Future[Seq[TunerSlot]] = {
+      import JsonProtocol._
+      import pekko.http.scaladsl.unmarshalling.Unmarshal
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val activeAuth = Auth.authContext.getOrElse(authContext)
+      val tunersUri = activeAuth.deviceUrl.withPath(Uri.Path("/server/tuners")).withQuery(Uri.Query("lh" -> "1"))
+      val headers = Hmac.signedHeaders("GET", "/server/tuners", None, activeAuth)
+      val request = HttpRequest(
+        method = HttpMethods.GET
+      , uri = tunersUri
+      , headers = headers.toList
+      )
+      log.debug("[tuner-state] http GET /server/tuners uri={}", tunersUri)
+      Http().singleRequest(request).flatMap { response =>
+        if (response.status.isSuccess()) {
+          Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[TunerSlot]])
+        } else {
+          val statusCode = response.status.intValue()
+          val _ = response.entity.discardBytes()
+          Future.failed(new RuntimeException(s"Tablo /server/tuners returned HTTP $statusCode"))
+        }
+      }
+    }
+
+    def fetchDeviceChannel(
+      channelPath: String
+    , authContext: Auth.AuthContext
+    )(implicit system: ActorSystem[?]): Future[Option[Lineup.DeviceChannelObject]] = {
+      import Lineup.JsonProtocol._
+      import pekko.http.scaladsl.unmarshalling.Unmarshal
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val trimmedPath = if (channelPath == null) "" else channelPath.trim
+      if (!isValidChannelPath(trimmedPath)) {
+        log.debug("[tuner-state] skipping invalid channel path={}", trimmedPath)
+        Future.successful(None)
+      } else {
+        val activeAuth = Auth.authContext.getOrElse(authContext)
+        val channelUri = activeAuth.deviceUrl.withPath(Uri.Path(trimmedPath)).withQuery(Uri.Query("lh" -> "1"))
+        val headers = Hmac.signedHeaders("GET", trimmedPath, None, activeAuth)
+        val request = HttpRequest(
+          method = HttpMethods.GET
+        , uri = channelUri
+        , headers = headers.toList
+        )
+        log.debug("[tuner-state] http GET {} uri={}", trimmedPath, channelUri)
+        Http().singleRequest(request).flatMap { response =>
+          if (response.status.isSuccess()) {
+            Unmarshal(response.entity).to[String].map { body =>
+              val obj = body.parseJson.convertTo[Lineup.DeviceChannelObject]
+              if (obj.channel.source.forall(_ == "ota")) {
+                val _ = Lineup.registerDeviceChannel(obj)
+              }
+              Some(obj)
+            }
+          } else {
+            val statusCode = response.status.intValue()
+            val _ = response.entity.discardBytes()
+            log.debug("[tuner-state] device channel fetch status={} path={}", statusCode, trimmedPath)
+            Future.successful(None)
+          }
+        }.recover { case ex =>
+          log.debug("[tuner-state] device channel fetch failed path={} error={}", trimmedPath, ex.getMessage)
+          None
+        }
+      }
+    }
+
+    def resolveSnapshot(
+      slots: Seq[TunerSlot]
+    , activeChannelStates: Map[String, String]
+    , fetchChannel: String => Future[Option[Lineup.DeviceChannelObject]]
+    )(implicit ec: scala.concurrent.ExecutionContext): Future[Snapshot] = {
+      val activeSlots = slots.zipWithIndex.filter { case (slot, _) =>
+        slot.in_use && (slot.channel_identifier.exists(_.nonEmpty) || slot.channel.exists(_.nonEmpty))
+      }
+
+      Future.traverse(activeSlots) { case (slot, idx) =>
+        val rawIdOpt = slot.channel_identifier.map(_.trim).filter(_.nonEmpty)
+        val pathOpt = slot.channel.map(_.trim).filter(_.nonEmpty)
+        val needsFetch = rawIdOpt.forall(id => !Lineup.hasChannelLabel(id))
+
+        val fetchedOptFut: Future[Option[Lineup.DeviceChannelObject]] =
+          if (needsFetch) {
+            pathOpt.filter(isValidChannelPath) match {
+              case Some(path) => fetchChannel(path).recover { case _ => None }
+              case None => Future.successful(None)
+            }
+          } else {
+            Future.successful(None)
+          }
+
+        fetchedOptFut.map { devObjOpt =>
+          val isNonOta = devObjOpt.exists(_.channel.source.exists(_ != "ota"))
+          if (isNonOta) {
+            None
+          } else {
+            val registeredLabelOpt = devObjOpt.map(Lineup.registerDeviceChannel)
+            val resolvedId = rawIdOpt
+              .orElse(devObjOpt.map(_.channel.channel_identifier).filter(_.nonEmpty))
+              .orElse(pathOpt)
+              .getOrElse("")
+            if (resolvedId.isEmpty) {
+              None
+            } else {
+              val label =
+                if (Lineup.hasChannelLabel(resolvedId)) Lineup.channelLabel(resolvedId)
+                else registeredLabelOpt.getOrElse(Lineup.channelLabel(resolvedId))
+              val origin = activeChannelStates.get(resolvedId) match {
+                case Some(state) => TuneOrigin.Self(state)
+                case None => TuneOrigin.External
+              }
+              Some(TunedChannel(
+                slotIndex = idx
+              , channelId = resolvedId
+              , channelPath = pathOpt
+              , label = label
+              , origin = origin
+              , recording = slot.recording
+              ))
+            }
+          }
+        }
+      }.map { resolvedOpts =>
+        Snapshot(
+          totalSlots = slots.size
+        , inUseSlots = slots.count(_.in_use)
+        , tunedChannels = resolvedOpts.flatten
+        )
+      }
+    }
+
+    def pollOnce(
+      sessionManager: ActorRef[Channel.SessionManager.Request]
+    , authContext: Auth.AuthContext
+    )(implicit system: ActorSystem[?]): Future[Snapshot] = {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      implicit val timeout: Timeout = Timeout(3.seconds)
+      val slotsFut = fetchTunerSlots(authContext)
+      val activeStatesFut = sessionManager.ask[Map[String, String]](replyTo =>
+        Channel.SessionManager.Request.GetActiveChannelStates(replyTo)
+      )
+      for {
+        slots <- slotsFut
+        activeStates <- activeStatesFut
+        snapshot <- resolveSnapshot(slots, activeStates, path => fetchDeviceChannel(path, authContext))
+      } yield snapshot
+    }
+
+    object TunerStateActor {
+      sealed trait Request
+      object Request {
+        final case class GetState(replyTo: ActorRef[Snapshot]) extends Request
+      }
+      sealed trait Command extends Request
+      object Command {
+        final case class UpdateState(snapshot: Snapshot) extends Command
+        final case class PollFailed(cause: Throwable) extends Command
+      }
+
+      def apply(): Behavior[Request] = Behaviors.setup { _ =>
+        var current: Snapshot = Snapshot.empty
+
+        Behaviors.receiveMessage {
+          case Command.UpdateState(snapshot) =>
+            val prevHadTuned = current.tunedChannels.nonEmpty
+            current = snapshot
+            if (snapshot.tunedChannels.nonEmpty) {
+              val details = snapshot.tunedChannels.map(_.formatLogEntry).mkString(", ")
+              log.info(
+                "[tuner-state] tuned={}/{} inUse={} self={} external={} channels=[{}]"
+              , snapshot.tunedChannels.size
+              , snapshot.totalSlots
+              , snapshot.inUseSlots
+              , snapshot.selfCount
+              , snapshot.externalCount
+              , details
+              )
+            } else if (prevHadTuned) {
+              log.info(
+                "[tuner-state] tuned=0/{} inUse={} all channels released"
+              , snapshot.totalSlots
+              , snapshot.inUseSlots
+              )
+            } else {
+              log.debug(
+                "[tuner-state] idle tuned=0/{} inUse={}"
+              , snapshot.totalSlots
+              , snapshot.inUseSlots
+              )
+            }
+            Behaviors.same
+
+          case Command.PollFailed(cause) =>
+            log.warn("[tuner-state] poll failed error={}", cause.getMessage)
+            Behaviors.same
+
+          case Request.GetState(replyTo) =>
+            replyTo ! current
+            Behaviors.same
+        }
+      }
+    }
+
+    def startStream(
+      tunerStateActor: ActorRef[TunerStateActor.Request]
+    , sessionManager: ActorRef[Channel.SessionManager.Request]
+    , authContext: Auth.AuthContext
+    , pollInterval: FiniteDuration = 30.seconds
+    , initialDelay: FiniteDuration = 5.seconds
+    )(implicit system: ActorSystem[?]): UniqueKillSwitch = {
+      startStreamWithPoller(
+        tunerStateActor = tunerStateActor
+      , pollFn = () => pollOnce(sessionManager, authContext)
+      , pollInterval = pollInterval
+      , initialDelay = initialDelay
+      )
+    }
+
+    def startStreamWithPoller(
+      tunerStateActor: ActorRef[TunerStateActor.Request]
+    , pollFn: () => Future[Snapshot]
+    , pollInterval: FiniteDuration = 30.seconds
+    , initialDelay: FiniteDuration = 5.seconds
+    )(implicit system: ActorSystem[?]): UniqueKillSwitch = {
+      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      log.info("[tuner-state] starting poll stream interval={}s", pollInterval.toSeconds)
+      val (killSwitch, done) = Source
+        .tick(initialDelay, pollInterval, ())
+        .viaMat(KillSwitches.single)(Keep.right)
+        .mapAsync(1) { _ =>
+          pollFn().map { snapshot =>
+            tunerStateActor ! TunerStateActor.Command.UpdateState(snapshot)
+          }.recover { case ex =>
+            tunerStateActor ! TunerStateActor.Command.PollFailed(ex)
+          }
+        }
+        .toMat(pekko.stream.scaladsl.Sink.ignore)(Keep.both)
+        .run()
+
+      done.onComplete {
+        case Success(_) => log.debug("[tuner-state] poll stream completed")
+        case Failure(ex) => log.warn("[tuner-state] poll stream terminated with error={}", ex.getMessage)
+      }
+      killSwitch
     }
   }
 

@@ -237,6 +237,7 @@ Every 30 seconds (and on stream completion), an `INFO` log line is emitted:
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Stream MPEG-TS null packets (PID 0x1FFF) immediately on cold tunes to satisfy Plex grabber timeouts |
 | `STREAM_PRE_ROLL_INTERVAL_MS` | `100` | Pre-roll keepalive emission interval in milliseconds |
 | `STREAM_PRE_ROLL_PACKETS` | `7` | Number of 188-byte MPEG-TS null packets per pre-roll emission chunk (7 packets = 1316 bytes) |
+| `TUNER_STATE_POLL_INTERVAL_SEC` | `30` | Interval in seconds to poll Tablo 4th Gen tuner state and log active internal/external channels (`<= 0` disables polling) |
 
 ### Plex Live TV & DVR Recommendations
 

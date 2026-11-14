@@ -29,6 +29,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.enablePreRollKeepAlive shouldBe true
     val _ = config.proxy.preRollIntervalMs shouldBe 100
     val _ = config.proxy.preRollPackets shouldBe 7
+    val _ = config.proxy.tunerStatePollIntervalSec shouldBe 30
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
     val _ = config.stream.metricsIntervalSec shouldBe 30
     val _ = config.stream.freezeThresholdSec shouldBe 10
@@ -143,7 +144,8 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "DEVICE_ID" -> "AABBCCDD",
       "TUNER_COUNT" -> "4",
       "ENABLE_UDP_DISCOVERY" -> "false",
-      "ENABLE_HLS_ENDPOINT" -> "false"
+      "ENABLE_HLS_ENDPOINT" -> "false",
+      "TUNER_STATE_POLL_INTERVAL_SEC" -> "45"
     )).config
     val _ = config.proxy.bindHost shouldBe "192.168.1.50"
     val _ = config.proxy.port.value shouldBe 9090
@@ -151,6 +153,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.tunerCount shouldBe Some(4)
     val _ = config.proxy.effectiveTunerCount shouldBe 4
     val _ = config.proxy.enableUdpDiscovery shouldBe false
-    config.proxy.enableHlsEndpoint shouldBe false
+    val _ = config.proxy.enableHlsEndpoint shouldBe false
+    config.proxy.tunerStatePollIntervalSec shouldBe 45
   }
 }

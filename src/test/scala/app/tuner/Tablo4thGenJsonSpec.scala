@@ -248,5 +248,61 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
     val _ = Tablo4thGen.Lineup.channelLabel("S20431_004_01") shouldBe "CBS 4.1"
     Tablo4thGen.Lineup.channelLabel("S20431_009_01") shouldBe "ABC 9.1"
   }
+
+  "TunerSlot" should "parse active and idle entries from /server/tuners" in {
+    import app.tuner.Tablo4thGen.TunerState.JsonProtocol._
+    val json =
+      """[
+        |  {
+        |    "in_use": true,
+        |    "channel": "/guide/channels/4141",
+        |    "recording": null,
+        |    "channel_identifier": "S19604_009_01"
+        |  },
+        |  {
+        |    "in_use": false,
+        |    "channel": null,
+        |    "recording": null,
+        |    "channel_identifier": null
+        |  }
+        |]""".stripMargin.parseJson
+
+    val slots = json.convertTo[Seq[Tablo4thGen.TunerState.TunerSlot]]
+    val _ = slots.size shouldBe 2
+    val _ = slots(0).in_use shouldBe true
+    val _ = slots(0).channel shouldBe Some("/guide/channels/4141")
+    val _ = slots(0).recording shouldBe None
+    val _ = slots(0).channel_identifier shouldBe Some("S19604_009_01")
+    val _ = slots(1).in_use shouldBe false
+    val _ = slots(1).channel shouldBe None
+    slots(1).channel_identifier shouldBe None
+  }
+
+  "DeviceChannelObject" should "parse /guide/channels/<object_id> and register OTA channel label" in {
+    Tablo4thGen.Lineup.clearChannelLabels()
+    val json =
+      """{
+        |  "object_id": 4141,
+        |  "path": "/guide/channels/4141",
+        |  "channel": {
+        |    "call_sign": "WMUR",
+        |    "name": "WMUR",
+        |    "major": 9,
+        |    "minor": 1,
+        |    "network": "ABC",
+        |    "channel_identifier": "S19604_009_01",
+        |    "source": "ota"
+        |  }
+        |}""".stripMargin.parseJson
+
+    val obj = json.convertTo[Tablo4thGen.Lineup.DeviceChannelObject]
+    val _ = obj.object_id shouldBe 4141
+    val _ = obj.path shouldBe "/guide/channels/4141"
+    val _ = obj.channel.channel_identifier shouldBe "S19604_009_01"
+    val label = Tablo4thGen.Lineup.registerDeviceChannel(obj)
+    val _ = label shouldBe "ABC 9.1"
+    val _ = Tablo4thGen.Lineup.hasChannelLabel("S19604_009_01") shouldBe true
+    Tablo4thGen.Lineup.channelLabel("S19604_009_01") shouldBe "ABC 9.1"
+  }
 }
 

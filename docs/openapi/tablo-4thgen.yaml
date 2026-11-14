@@ -402,6 +402,34 @@ paths:
       responses:
         default:
           description: Response not captured in this trace
+  /guide/channels/{id}:
+    get:
+      operationId: get_guide_channels_id
+      summary: Device-local channel metadata by numeric object ID
+      tags:
+      - guide
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: integer
+        description: Numeric channel object identifier (e.g., 4141)
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: Local channel metadata
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GuideChannelObjectGetResponse'
   /guide/airings:
     get:
       operationId: get_guide_airings
@@ -1032,6 +1060,28 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/ServerLocationGetResponse'
+  /server/tuners:
+    get:
+      operationId: get_server_tuners
+      summary: Current state of all hardware tuner slots
+      tags:
+      - server
+      parameters:
+      - name: lh
+        in: query
+        required: false
+        description: Bare flag parameter (no value). Present on most authenticated API calls.
+        schema:
+          type: boolean
+      security:
+      - TabloAuth: []
+      responses:
+        '200':
+          description: Array of hardware tuner slot states
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ServerTunersGetResponse'
   /server/update/info:
     get:
       operationId: get_server_update_info
@@ -3478,6 +3528,71 @@ components:
       - playlist_url
       - token
       - video_details
+    TunerSlot:
+      type: object
+      properties:
+        in_use:
+          type: boolean
+        channel:
+          type:
+          - string
+          - 'null'
+        recording:
+          type:
+          - string
+          - 'null'
+        channel_identifier:
+          type:
+          - string
+          - 'null'
+      required:
+      - in_use
+      - channel
+      - recording
+      - channel_identifier
+    ServerTunersGetResponse:
+      type: array
+      items:
+        $ref: '#/components/schemas/TunerSlot'
+    GuideChannelObjectGetResponse:
+      type: object
+      properties:
+        object_id:
+          type: integer
+        path:
+          type: string
+        channel:
+          type: object
+          properties:
+            call_sign:
+              type: string
+            name:
+              type:
+              - string
+              - 'null'
+            major:
+              type: integer
+            minor:
+              type: integer
+            network:
+              type:
+              - string
+              - 'null'
+            channel_identifier:
+              type: string
+            source:
+              type:
+              - string
+              - 'null'
+          required:
+          - call_sign
+          - major
+          - minor
+          - channel_identifier
+      required:
+      - object_id
+      - path
+      - channel
   responses:
     DeviceUnauthorized:
       description: Device authentication failed

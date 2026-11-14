@@ -45,6 +45,7 @@ final case class ProxyConfig(
 , enablePreRollKeepAlive: Boolean = true
 , preRollIntervalMs: Int = 100
 , preRollPackets: Int = 7
+, tunerStatePollIntervalSec: Int = 30
 ) {
   def bindHost: String = ip.hostString
   def bindPort: Int = port.value
@@ -122,6 +123,7 @@ object AppConfig {
     , enablePreRollKeepAlive = getBoolTrue(get, "STREAM_PRE_ROLL_KEEP_ALIVE", true)
     , preRollIntervalMs = getInt(get, "STREAM_PRE_ROLL_INTERVAL_MS", 100)
     , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)
+    , tunerStatePollIntervalSec = getInt(get, "TUNER_STATE_POLL_INTERVAL_SEC", 30)
     )
     val resilient = ResilientHlsConfig(
       stallTimeoutSec = getInt(get, "STREAM_STALL_TIMEOUT_SEC", 45)

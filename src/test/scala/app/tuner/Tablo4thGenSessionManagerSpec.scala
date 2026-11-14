@@ -665,5 +665,44 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       val _ = liveStatuses(0).NetworkRate shouldBe Some(snap.networkRateBps)
       liveStatuses(1).VctNumber shouldBe None
     }
+
+    "report active channel states via GetActiveChannelStates across opening, live, and idle-grace" in {
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager(
+        startRunner = { (_, self) => selfRef.set(self) }
+      , totalTuners = 2
+      , idleGrace = 150.millis
+      )
+
+      val statesProbe = testKit.createTestProbe[Map[String, String]]()
+      mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+      val _ = statesProbe.receiveMessage() shouldBe Map.empty
+
+      val acquireProbe = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-state-1", "client-1", acquireProbe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+
+      mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+      val _ = statesProbe.receiveMessage() shouldBe Map("ch-state-1" -> "opening")
+
+      selfRef.get() ! Command.CheckIn("ch-state-1", meta(), hubSource, () => ())
+      val _ = acquireProbe.expectMessageType[Response.Attached]
+
+      mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+      val _ = statesProbe.receiveMessage() shouldBe Map("ch-state-1" -> "live")
+
+      mgr ! Request.Release("ch-state-1", "client-1")
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+        statesProbe.receiveMessage() shouldBe Map("ch-state-1" -> "idle-grace")
+      }
+
+      eventually(timeout(3.seconds), interval(50.millis)) {
+        mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+        statesProbe.receiveMessage() shouldBe Map.empty
+      }
+    }
   }
 }
