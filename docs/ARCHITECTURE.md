@@ -361,5 +361,5 @@ tablo2hdhomerun/
     ├── ARCHITECTURE.md       # This file
     ├── USAGE.md              # Usage guide
     ├── session-manager.md    # 4th gen SessionManager & resilience design
-    └── playback-failure-scenarios/ # Empirical OTA failure scenario analyses
+    └── playback-scenarios/         # Empirical OTA playback scenario analyses & benchmarks
 ```

@@ -1,6 +1,6 @@
-# Playback Failure Scenarios Guide
+# Playback Scenarios Guide
 
-This directory maintains empirical incident reports and root-cause analyses for live TV streaming failures observed during playback through `tablo2hdhomerun`. These documents serve as architectural reference cases to drive stream resiliency, watchdog design, and error recovery mechanisms.
+This directory maintains empirical incident reports and test benchmarks for live TV streaming scenarios observed during playback through `tablo2hdhomerun`, capturing both failure incidents and successful stability benchmarks. These documents serve as architectural reference cases to drive stream resiliency, watchdog design, error recovery mechanisms, and performance verification.
 
 ---
 
@@ -20,24 +20,29 @@ Every scenario document must establish whether environmental conditions were cal
 
 ## 2. Scenario Catalog & Index
 
-| Scenario Document | Date & Window | Primary Channel | Environmental Trigger | Primary Failure Mode | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| [2026.10.07_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.07_0.scenario.md) | 2026-10-07 21:25–23:08 EDT | CBS 4.1 (RF 20) | Calm (6–12 mph S, no gusts) | Watchdog false-positives (`microStallGap = 1s` tripped on normal HLS pacing); 194 cold retunes. | Resolved (`187e437`) |
-| [2026.10.08_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.08_0.scenario.md) | 2026-10-08 07:27–09:05 EDT | CBS 4.1 (RF 20) | Calm (5–10 mph SSW, no gusts) | Continuous 273 retune storm every 21s from watchdog misconfiguration; client abandonment. | Resolved (`187e437`) |
-| [2026.10.08_1.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.08_1.scenario.md) | 2026-10-08 09:42–12:04 EDT | CBS 4.1 (RF 20) | Gusts to **29 mph** WSW/NNW | Wind gust front induced heavy RF packet corruption, compounding retunes to crash Plex transcoder. | Retune storm resolved (`187e437`); gust corruption open (see 2026.10.13_0) |
-| [2026.10.09_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.09_0.scenario.md) | 2026-10-08 21:50–21:55 EDT | CBS 4.1 (RF 20) | Calm (5 mph S, no gusts) | Plex transcoder mid-GOP start quirk (`Invalid frame dimensions 0x0`) on iPad; resolved via `idle-grace`. | Resolved: client attach gated on I-frame + synthesized `00 00 01 B3` Sequence Header (`7ad93be`) |
-| [2026.10.09_1.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.09_1.scenario.md) | 2026-10-09 14:50–15:32 EDT | CBS 4.1 (RF 20) | Peak gusts to **32 mph** SSW | Wind-induced ATSC lock loss; 27.5s recovery exceeded client tolerance, causing playback restart. | Resolved via control-plane session-presence probing (`dea1c71`) & 40ms `0x1FFF` keepalives (replaces `6598c07` immediate `304` escalation) |
-| [2026.10.10_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.10_0.scenario.md) | 2026-10-09 23:19 – 10-10 10:06 EDT | CBS 4.1 (RF 20) & PBS 2.3 (RF 32) | Daytime breeze (8–13 mph NW) | Morning canopy breeze caused clustered dropouts on RF 20 while RF 32 ran flawlessly. | Resolved via control-plane session-presence probing (`dea1c71`) & 500ms fast polling riding out canopy flutter |
-| [2026.10.13_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.13_0.scenario.md) | 2026-10-13 17:43–21:24 EDT | CBS 4.1 (RF 20) | Gusts to **29–32 mph** WNW | Corrupt ATSC bytes passed silently by zero-byte watchdog, causing Plex crash and fast-attach trap. | Resolved via slice-level sanitization, outbound CC rewriting & `FreezeFramePacer` |
-| [2026.10.14_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.14_0.scenario.md) | 2026-10-14 19:50–21:35 EDT | CBS 4.1 (RF 20) | Shift to N, **11.5 mph** sustained | Validated I-frame gating & capped dampening across 13 successful retunes (~6.5s); silent demodulator corruption ended 58m Roku session. | Resolved via slice row clamping (`<= maxSliceRow`) & locked sequence header geometry |
-| [2026.10.15_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.15_0.scenario.md) | 2026-10-15 19:53–21:44 EDT | CBS 4.1 (RF 20) | Calm (0 mph, no gusts, clear) | Validated 180s idle-grace hand-off (Apple TV attached in 28s) & multi-client grabber multiplexing; silent 5,541-error RF packet burst starved player buffer. | Resolved via `FreezeFramePacer` (100ms repeat P-frames & silent audio) feeding Plex `ssegment` grabber |
-| [2026.10.16_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.16_0.scenario.md) | 2026-10-16 08:11–15:59 EDT | CBS 4.1 (RF 20) | Calm (3–11 mph S, no gusts) | Benchmark 7h 47m continuous stream (44.75 GB); Plex 10 GB transcode tmpfs ramdisk overflow (`No space left on device`); validated 180s idle-grace fast-attach in 59s. | Validated benchmark stability (`5f8c22d`); Mode F operational |
-| [2026.10.17_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.17_0.scenario.md) | 2026-10-17 21:44–22:56 EDT | CBS 4.1 (RF 20) | Calm (0–8 mph NNW, no gusts) | Sustained 71m iPhone stream (6.78 GB); instantaneous I-frame lock (2 packets dropped in 0ms); late 45-error burst before clean disconnect and 180s idle-grace teardown. | Validated startup gating & lease hold (`9b9e68f`); Mode E precursor |
-| [2026.10.18_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.18_0.scenario.md) | 2026-10-18 13:28–14:47 EDT | CBS 4.1 (RF 20) | Calm (0–4 mph VRB, no gusts) | Plex on Apple TV 4K failed repeatedly from 7,821 decode errors and three 8s Tablo hardware stalls; comparative control experiment using official Tablo client absorbed freezes, self-recovered, and maintained channel uptime. | Open: Downstream Plex pipeline fragility; proposed synthetic filler, TEI gating, and retune bridging |
-| [2026.10.26_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.26_0.scenario.md) | 2026-10-26 17:50–18:10 EDT | CBS 4.1 (RF 20) | Calm (3.5 mph SSW, no gusts) | Upstream 160 KB segment trickle collapse froze video; fast-attach keyframe drop storm (8,001 pkts in 74ms) discarded all audio, causing total audio loss on Apple TV. | Open: Mode E trickle watchdog & Mode G audio preservation in `alignToIFrame` (`c57c238`) |
-| [2026.10.27_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.27_0.scenario.md) | 2026-10-27 16:35–20:34 EDT | CBS 4.1 (RF 20) | Calm (0–7 mph NNW, no gusts) | Benchmark 4h continuous stream (22.8 GB); 2h 41m active Apple TV 4K playback in locked A/V sync; zero retunes; absorbed 6.5s delivery gap & 21 packet errors. | Validated All-Day TV architecture (`7db3318`); Failure Modes E, E2, & G resolved |
-| [2026.10.28_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.10.28_0.scenario.md) | 2026-10-28 10:25–12:13 EDT | CBS 4.1 (RF 20) | Calm (3–8 mph VRB, no gusts) | Side-by-side test (Plex Web vs TabloTV iPad); Tablo Wi-Fi dropout; fringe RF error storm (7,557 decode errors) caused PMS A/V desync and crash; validated 180s idle-grace fast-attaches (0ms, 183ms, 2.6s) and 43m stable stream. | Validated idle-grace recovery & identified transcode A/V desync sensitivity (`5259855`) |
-| [2026.11.08_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/2026.11.08_0.scenario.md) | 2026-11-08 07:05–10:13 EST | CBS 4.1 (RF 20), NBC 15.1 (RF 32), ABC 9.1 (RF 9) | Gusts to **26 kt (30 mph)** WNW/NW | CBS demodulator lock failure (503) timed out PMS grabber at 25s; NBC segment delivery jitter starved Roku buffer into 121s hang; ABC 2.5h stream hit 10GB `/transcode` tmpfs low disk space warnings and upstream packager stalls. | Multi-channel benchmark (`d09cc2f`); validates MPEG-2 slice clamping (88 clamped slices), 180s idle-grace fast-attach, and `FreezeFramePacer` 46s bridge |
+The scenarios in this catalog are classified into three operational categories:
+- **Success (Benchmark)**: Uninterrupted continuous playback, validated performance metrics, zero unexpected crashes/retunes, and verified audio/video synchronization across multi-hour runs.
+- **Failure**: Service degradation, fatal transcode crashes, retune storms, audio/video loss, or viewer-impacting error dialogs. These are mapped to specific Failure Modes (A–G) and analyzed to drive architectural fixes.
+- **Mixed / Resilience Validation**: Scenarios that stress-tested the system against challenging environmental or infrastructure conditions (e.g. wind gusts, Wi-Fi drops, downstream tmpfs disk limits), successfully demonstrating recovery mechanisms (e.g. idle-grace fast-attach, MPEG-2 slice clamping, FreezeFramePacer bridging) while uncovering edge cases.
+
+| Scenario Document | Classification | Date & Window | Primary Channel | Environmental Trigger | Primary Outcome / Failure Mode | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| [2026.10.07_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.07_0.scenario.md) | **Failure** | 2026-10-07 21:25–23:08 EDT | CBS 4.1 (RF 20) | Calm (6–12 mph S, no gusts) | Watchdog false-positives (`microStallGap = 1s` tripped on normal HLS pacing); 194 cold retunes. | Resolved (`187e437`) |
+| [2026.10.08_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.08_0.scenario.md) | **Failure** | 2026-10-08 07:27–09:05 EDT | CBS 4.1 (RF 20) | Calm (5–10 mph SSW, no gusts) | Continuous 273 retune storm every 21s from watchdog misconfiguration; client abandonment. | Resolved (`187e437`) |
+| [2026.10.08_1.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.08_1.scenario.md) | **Failure** | 2026-10-08 09:42–12:04 EDT | CBS 4.1 (RF 20) | Gusts to **29 mph** WSW/NNW | Wind gust front induced heavy RF packet corruption, compounding retunes to crash Plex transcoder. | Retune storm resolved (`187e437`); gust corruption open (see 2026.10.13_0) |
+| [2026.10.09_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.09_0.scenario.md) | **Failure** | 2026-10-08 21:50–21:55 EDT | CBS 4.1 (RF 20) | Calm (5 mph S, no gusts) | Plex transcoder mid-GOP start quirk (`Invalid frame dimensions 0x0`) on iPad; resolved via `idle-grace`. | Resolved: client attach gated on I-frame + synthesized `00 00 01 B3` Sequence Header (`7ad93be`) |
+| [2026.10.09_1.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.09_1.scenario.md) | **Failure** | 2026-10-09 14:50–15:32 EDT | CBS 4.1 (RF 20) | Peak gusts to **32 mph** SSW | Wind-induced ATSC lock loss; 27.5s recovery exceeded client tolerance, causing playback restart. | Resolved via control-plane session-presence probing (`dea1c71`) & 40ms `0x1FFF` keepalives (replaces `6598c07` immediate `304` escalation) |
+| [2026.10.10_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.10_0.scenario.md) | **Failure** | 2026-10-09 23:19 – 10-10 10:06 EDT | CBS 4.1 (RF 20) & PBS 2.3 (RF 32) | Daytime breeze (8–13 mph NW) | Morning canopy breeze caused clustered dropouts on RF 20 while RF 32 ran flawlessly. | Resolved via control-plane session-presence probing (`dea1c71`) & 500ms fast polling riding out canopy flutter |
+| [2026.10.13_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.13_0.scenario.md) | **Failure** | 2026-10-13 17:43–21:24 EDT | CBS 4.1 (RF 20) | Gusts to **29–32 mph** WNW | Corrupt ATSC bytes passed silently by zero-byte watchdog, causing Plex crash and fast-attach trap. | Resolved via slice-level sanitization, outbound CC rewriting & `FreezeFramePacer` |
+| [2026.10.14_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.14_0.scenario.md) | **Mixed / Resilience Validation** | 2026-10-14 19:50–21:35 EDT | CBS 4.1 (RF 20) | Shift to N, **11.5 mph** sustained | Validated I-frame gating & capped dampening across 13 successful retunes (~6.5s); silent demodulator corruption ended 58m Roku session. | Resolved via slice row clamping (`<= maxSliceRow`) & locked sequence header geometry |
+| [2026.10.15_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.15_0.scenario.md) | **Mixed / Resilience Validation** | 2026-10-15 19:53–21:44 EDT | CBS 4.1 (RF 20) | Calm (0 mph, no gusts, clear) | Validated 180s idle-grace hand-off (Apple TV attached in 28s) & multi-client grabber multiplexing; silent 5,541-error RF packet burst starved player buffer. | Resolved via `FreezeFramePacer` (100ms repeat P-frames & silent audio) feeding Plex `ssegment` grabber |
+| [2026.10.16_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.16_0.scenario.md) | **Mixed / Benchmark** | 2026-10-16 08:11–15:59 EDT | CBS 4.1 (RF 20) | Calm (3–11 mph S, no gusts) | Benchmark 7h 47m continuous stream (44.75 GB); Plex 10 GB transcode tmpfs ramdisk overflow (`No space left on device`); validated 180s idle-grace fast-attach in 59s. | Validated benchmark stability (`5f8c22d`); Mode F operational |
+| [2026.10.17_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.17_0.scenario.md) | **Mixed / Resilience Validation** | 2026-10-17 21:44–22:56 EDT | CBS 4.1 (RF 20) | Calm (0–8 mph NNW, no gusts) | Sustained 71m iPhone stream (6.78 GB); instantaneous I-frame lock (2 packets dropped in 0ms); late 45-error burst before clean disconnect and 180s idle-grace teardown. | Validated startup gating & lease hold (`9b9e68f`); Mode E precursor |
+| [2026.10.18_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.18_0.scenario.md) | **Failure** | 2026-10-18 13:28–14:47 EDT | CBS 4.1 (RF 20) | Calm (0–4 mph VRB, no gusts) | Plex on Apple TV 4K failed repeatedly from 7,821 decode errors and three 8s Tablo hardware stalls; comparative control experiment using official Tablo client absorbed freezes, self-recovered, and maintained channel uptime. | Open: Downstream Plex pipeline fragility; proposed synthetic filler, TEI gating, and retune bridging |
+| [2026.10.26_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.26_0.scenario.md) | **Failure** | 2026-10-26 17:50–18:10 EDT | CBS 4.1 (RF 20) | Calm (3.5 mph SSW, no gusts) | Upstream 160 KB segment trickle collapse froze video; fast-attach keyframe drop storm (8,001 pkts in 74ms) discarded all audio, causing total audio loss on Apple TV. | Open: Mode E trickle watchdog & Mode G audio preservation in `alignToIFrame` (`c57c238`) |
+| [2026.10.27_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.27_0.scenario.md) | **Success (Benchmark)** | 2026-10-27 16:35–20:34 EDT | CBS 4.1 (RF 20) | Calm (0–7 mph NNW, no gusts) | Benchmark 4h continuous stream (22.8 GB); 2h 41m active Apple TV 4K playback in locked A/V sync; zero retunes; absorbed 6.5s delivery gap & 21 packet errors. | Validated All-Day TV architecture (`7db3318`); Failure Modes E, E2, & G resolved |
+| [2026.10.28_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.28_0.scenario.md) | **Mixed / Comparative Analysis** | 2026-10-28 10:25–12:13 EDT | CBS 4.1 (RF 20) | Calm (3–8 mph VRB, no gusts) | Side-by-side test (Plex Web vs TabloTV iPad); Tablo Wi-Fi dropout; fringe RF error storm (7,557 decode errors) caused PMS A/V desync and crash; validated 180s idle-grace fast-attaches (0ms, 183ms, 2.6s) and 43m stable stream. | Validated idle-grace recovery & identified transcode A/V desync sensitivity (`5259855`) |
+| [2026.11.08_0.scenario.md](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.11.08_0.scenario.md) | **Mixed / Multi-Channel Benchmark** | 2026-11-08 07:05–10:13 EST | CBS 4.1 (RF 20), NBC 15.1 (RF 32), ABC 9.1 (RF 9) | Gusts to **26 kt (30 mph)** WNW/NW | CBS demodulator lock failure (503) timed out PMS grabber at 25s; NBC segment delivery jitter starved Roku buffer into 121s hang; ABC 2.5h stream hit 10GB `/transcode` tmpfs low disk space warnings and upstream packager stalls. | Multi-channel benchmark (`d09cc2f`); validates MPEG-2 slice clamping (88 clamped slices), 180s idle-grace fast-attach, and `FreezeFramePacer` 46s bridge |
 
 
 
@@ -48,12 +53,12 @@ Every scenario document must establish whether environmental conditions were cal
 
 ## 3. Workflow for Documenting a Scenario
 
-When capturing a new playback failure, follow this systematic procedure:
+When capturing a new playback scenario (whether diagnosing a failure or validating a success benchmark), follow this systematic procedure:
 
 ### Step 1: File Naming Convention
 Name the scenario file according to the incident date and daily sequence number:
 ```text
-docs/playback-failure-scenarios/YYYY.MM.DD_<index>.scenario.md
+docs/playback-scenarios/YYYY.MM.DD_<index>.scenario.md
 ```
 Example: `2026.10.14_0.scenario.md`
 
@@ -80,13 +85,32 @@ Always maintain correlated dual-timestamp columns:
 - **Local Time (EDT / EST)**: Native logging format for Plex Media Server and weather observations.
 
 ### Step 5: Draft the Scenario Using the Template
-Copy [`SCENARIO_TEMPLATE.md`](file:///home/bdina/git/tablo2hdhomerun/docs/playback-failure-scenarios/SCENARIO_TEMPLATE.md) and populate all standard sections.
+Copy [`SCENARIO_TEMPLATE.md`](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/SCENARIO_TEMPLATE.md) and populate all standard sections, setting the classification (`Success (Benchmark)`, `Failure`, or `Mixed / Resilience Validation`).
 
 ---
 
-## 4. Failure Mode Classification Taxonomy
+## 4. Scenario Classification & Failure Mode Taxonomy
 
-Classify the incident into one or more canonical failure modes:
+### 4.1 Scenario Classification Taxonomy
+Every scenario report must classify the observed session into one of the following primary categories:
+
+1. **Success (Benchmark)**:
+   - **Definition**: The live stream met or exceeded all target playback stability objectives without viewer-impacting failure.
+   - **Characteristics**: Continuous multi-hour playback without crashes, zero watchdog false-positive retunes, flawless audio/video synchronization, and transparent absorption of transient upstream delivery gaps (e.g., via native STC timestamps and slice-level sanitization).
+   - **Primary Reference**: [`2026.10.27_0.scenario.md`](file:///home/bdina/git/tablo2hdhomerun/docs/playback-scenarios/2026.10.27_0.scenario.md) (4-hour continuous stream benchmark on Apple TV 4K).
+
+2. **Failure**:
+   - **Definition**: The playback session terminated prematurely, crashed downstream decoders/transcoders, or resulted in fatal error dialogs on client devices.
+   - **Characteristics**: Fatal transcode runner exits, infinite retune loops, complete audio loss, unrecoverable buffer starvation, or upstream tuner lock destruction.
+   - **Mapping**: Mapped directly to canonical Failure Modes A through G in Section 4.2.
+
+3. **Mixed / Resilience Validation**:
+   - **Definition**: The session encountered adverse environmental conditions (e.g., wind gusts, RF multipath) or upstream/downstream anomalies (e.g., Tablo Wi-Fi dropouts, transcode ramdisk exhaustion), successfully demonstrating proxy recovery and mitigation mechanisms while discovering edge-case boundaries.
+   - **Characteristics**: Validates resilience components (such as 180s idle-grace fast-attach, MPEG-2 slice row clamping, or `FreezeFramePacer` bridges) while capturing operational findings for future hardening.
+
+### 4.2 Failure Mode Classification Taxonomy (Failure & Mixed Scenarios)
+
+Classify failures and stress incidents into one or more canonical failure modes:
 
 | Failure Mode | Symptoms | Root Cause Mechanism | Indicator in Logs | Status |
 | :--- | :--- | :--- | :--- | :--- |

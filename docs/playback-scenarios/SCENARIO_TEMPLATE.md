@@ -1,6 +1,6 @@
-# Playback Failure Scenarios & Log Accounting
+# Playback Scenario & Log Accounting
 
-This document captures detailed timelines, cross-component accounting, and root-cause analyses for live TV streaming failures observed during playback. These empirical incident reports serve as architectural reference cases to drive resiliency, stream stability, and watchdog design improvements in `tablo2hdhomerun`.
+This document captures detailed timelines, cross-component accounting, and root-cause analyses or validation metrics for live TV streaming scenarios observed during playback. These empirical incident reports and benchmark evaluations serve as architectural reference cases to drive resiliency, stream stability, watchdog design, and performance validation in `tablo2hdhomerun`.
 
 ---
 
@@ -23,9 +23,14 @@ This document captures detailed timelines, cross-component accounting, and root-
 
 ---
 
-## 2. Executive Summary of Incident
+## 2. Executive Summary of Incident / Test Benchmark
 
-On `<incident_date>`, a live streaming session on `<channel_name>` (`<channel_id>`) ran for **<duration>** (`<start_time_local>` – `<end_time_local>` / `<start_time_utc>` – `<end_time_utc>`), encountering `<summary_of_failure_modes>`.
+### Scenario Classification
+- **Classification**: `[Success (Benchmark) | Failure | Mixed / Resilience Validation]`
+- **Primary Objective / Outcome**: `<Brief description, e.g., Multi-hour stability benchmark, or Root-cause diagnosis of wind-induced dropout>`
+- **Associated Failure Modes** (if applicable): `[None (Benchmark Validation) | Mode A | Mode B | Mode C | Mode D | Mode E | Mode E2 | Mode F | Mode G]`
+
+On `<incident_date>`, a live streaming session on `<channel_name>` (`<channel_id>`) ran for **<duration>** (`<start_time_local>` – `<end_time_local>` / `<start_time_utc>` – `<end_time_utc>`), encountering `<summary_of_failure_modes_or_validation_outcome>`.
 
 ### Key Session Metrics:
 - **Total Observed Window**: `<total_elapsed_time>`
@@ -40,12 +45,12 @@ On `<incident_date>`, a live streaming session on `<channel_name>` (`<channel_id
 - Observations at **KMHT** recorded `<wind_speed_range>`, peak gusts of **`<peak_gust_mph>`**, and `<sky_conditions>`.
 - `<Discussion of RF propagation impact: e.g., did gusts induce antenna deflection or dynamic multipath fading, or was the atmosphere calm, ruling out environmental triggers?>`
 
-### Summary of Failure Progression:
+### Summary of Progression / Lifecycle:
 1. **Initial Baseline**: `<Initial tune parameters, latency, early stability>`
-2. **Environmental / Trigger Event**: `<Wind gust, timeout, watchdog trip, or initialization error>`
-3. **Downstream Degradation**: `<Plex transcoder reaction, macroblock corruption, packet rejection>`
-4. **Proxy Reaction**: `<Watchdog trip, silent corruption blind spot, or fast-attach reuse>`
-5. **Session Termination**: `<Client disconnect, fatal crash, or idle-grace expiry>`
+2. **Environmental / Trigger Event**: `<Wind gust, timeout, watchdog trip, initialization error, or continuous benchmark phase>`
+3. **Downstream Delivery**: `<Plex transcoder reaction, macroblock corruption, packet rejection, or sustained sync>`
+4. **Proxy Reaction**: `<Watchdog trip, silent corruption blind spot, fast-attach reuse, or seamless keepalive pacing>`
+5. **Session Termination**: `<Client disconnect, fatal crash, idle-grace expiry, or intentional user pause>`
 
 ---
 
@@ -91,12 +96,12 @@ Observations recorded at Manchester-Boston Regional Airport (KMHT), situated in 
 
 ## 4. Cross-Component Impact Matrix
 
-| Component | Normal Operating State | Observed State During Incident | Consequence & Impact |
+| Component | Normal Operating State | Observed State During Run | Consequence & Impact |
 | :--- | :--- | :--- | :--- |
-| **Tablo 4th Gen** (`192.168.2.28`) | Continuous demodulation and clean HLS segment generation. | `<Observed behavior: e.g. RF lock drop, trickle corruption, continuous retuning>` | `<Impact on device state and tuner resource allocation>` |
-| **tablo2hdhomerun** (`192.168.2.24:8080`) | Reliable segment ingestion, watchdog monitoring, clean null padding. | `<Observed behavior: watchdog trip, blind spot, or fast-attach>` | `<Impact on stream continuity and downstream client pipe>` |
-| **Plex Media Server** (`192.168.2.24:32400`) | Smooth VAAPI transcoding and DASH fragment publishing. | `<Observed behavior: macroblock errors, transcode runner death>` | `<Impact on transcode queue and container delivery>` |
-| **Plex Client** (`<client_ip>`) | Steady 60fps playback without buffering. | `<Observed behavior: black screen, frozen frames, fatal error>` | `<Impact on user experience>` |
+| **Tablo 4th Gen** (`192.168.2.28`) | Continuous demodulation and clean HLS segment generation. | `<Observed behavior: e.g. clean continuous streaming, RF lock drop, trickle corruption, continuous retuning>` | `<Impact on device state and tuner resource allocation>` |
+| **tablo2hdhomerun** (`192.168.2.24:8080`) | Reliable segment ingestion, watchdog monitoring, clean null padding. | `<Observed behavior: e.g. continuous STC streaming, watchdog trip, blind spot, or fast-attach>` | `<Impact on stream continuity and downstream client pipe>` |
+| **Plex Media Server** (`192.168.2.24:32400`) | Smooth VAAPI transcoding and DASH fragment publishing. | `<Observed behavior: e.g. continuous locked A/V sync, macroblock errors, transcode runner death>` | `<Impact on transcode queue and container delivery>` |
+| **Plex Client** (`<client_ip>`) | Steady 60fps playback without buffering. | `<Observed behavior: e.g. uninterrupted playback, black screen, frozen frames, fatal error>` | `<Impact on user experience>` |
 
 ---
 
@@ -127,19 +132,19 @@ If the proxy did not log a measurement, record it as `not logged` and add a logg
 
 ---
 
-## 6. Root Cause Technical Deep Dive
+## 6. Root Cause Technical Deep Dive / Benchmark Validation
 
-### `<Primary Root Cause Title>`
-`<Detailed technical explanation analyzing the code, timing, protocol interactions, or physical RF conditions responsible for the failure.>`
+### `<Primary Technical Deep Dive / Benchmark Finding Title>`
+`<Detailed technical explanation analyzing the code, timing, protocol interactions, or physical RF conditions responsible for the failure, or validating architectural resilience in a benchmark.>`
 
 ---
 
-## 7. Architecture & Design Recommendations
+## 7. Architecture & Design Recommendations / Validation Conclusions
 
-### 1. `<Recommendation 1: Code / Resiliency Fix>`
-- **Action**: `<Specific code change in ResilientHlsSource, SessionManager, or Watchdog>`
-- **Expected Outcome**: `<How this eliminates the failure pattern>`
+### 1. `<Recommendation / Conclusion 1>`
+- **Action / Finding**: `<Specific code change, validation outcome, or operational guidance>`
+- **Expected Outcome / Significance**: `<How this eliminates the failure pattern or confirms benchmark stability>`
 
-### 2. `<Recommendation 2: Operational / Diagnostic Enhancement>`
-- **Action**: `<Diagnostic metric, TEI counter, or health log addition>`
-- **Expected Outcome**: `<How this operationalizes observability for debug and optimization>`
+### 2. `<Recommendation / Conclusion 2>`
+- **Action / Finding**: `<Diagnostic metric, TEI counter, or health log addition>`
+- **Expected Outcome / Significance**: `<How this operationalizes observability for debug and optimization>`
