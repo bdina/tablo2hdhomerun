@@ -1,5 +1,11 @@
 build/
 .gradle/
+buildSrc/build/
+buildSrc/.gradle/
 .cursor/
 **/*.iml
 .idea/
+.tags
+**/.tags
+docs/
+*.md

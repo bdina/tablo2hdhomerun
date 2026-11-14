@@ -437,7 +437,7 @@ services:
       - ENABLE_UDP_DISCOVERY=true
       - ENABLE_HLS_ENDPOINT=true
     healthcheck:
-      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/discover.json > /dev/null 2>&1 || exit 1"]
+      test: ["CMD", "./tablo2hdhomerun", "--healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 3

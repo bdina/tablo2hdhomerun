@@ -2,18 +2,30 @@ services:
   tablo2hdhomerun:
     container_name: tablo2hdhomerun
     image: tablo2hdhomerun:latest
+    init: true
     restart: always
     network_mode: host
     environment:
-      - TABLO_IP=192.168.2.28
+      - TABLO_IP=${TABLO_IP:-192.168.2.28}
       - TABLO_GEN=4thgen
       - TABLO_EMAIL=${TABLO_EMAIL:-user@example.com}
       - TABLO_PASSWORD=${TABLO_PASSWORD}
-      - PROXY_IP=192.168.2.24
+      - PROXY_IP=${PROXY_IP:-192.168.2.24}
       - STREAM_BACKEND=hls
       - DEVICE_ID=12345678
       # - TUNER_COUNT=4 # Optional override (auto-detected from Tablo hardware if omitted)
       # - STREAM_STALL_TIMEOUT_SEC=45 # Optional: resilient stall timeout in seconds (default: 45; 0 disables byte-stall watchdog)
       - ENABLE_UDP_DISCOVERY=true
       - ENABLE_HLS_ENDPOINT=true
+    healthcheck:
+      test: ["CMD", "./tablo2hdhomerun", "--healthcheck"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
     mem_limit: 256m

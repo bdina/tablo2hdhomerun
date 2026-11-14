@@ -21,17 +21,19 @@ RUN apt-get update -y \
  && tar zxvf /tmp/graalvm-community-jdk-${JAVA_VERSION}_linux-x64_bin.tar.gz -C /opt/graalvm-community-jdk-${JAVA_VERSION} --strip-components 1 \
  && wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -P /tmp \
  && unzip -d /opt /tmp/gradle-${GRADLE_VERSION}-bin.zip \
- && DEBIAN_FRONTEND=noninteractive TZ=America/NEW_YORK apt-get -y install tzdata
-# && DEBIAN_FRONTEND=noninteractive TZ=America/NEW_YORK apt-get -y install tzdata ffmpeg
+ && DEBIAN_FRONTEND=noninteractive TZ=America/New_York apt-get -y install tzdata \
+ && rm -rf /tmp/*.tar.gz /tmp/*.zip /var/lib/apt/lists/*
+# && DEBIAN_FRONTEND=noninteractive TZ=America/New_York apt-get -y install tzdata ffmpeg
 
 ARG MUSL_VERSION=11.2.1
 ARG ZLIB_VERSION=1.4
 
-RUN wget http://more.musl.cc/${MUSL_VERSION}/x86_64-linux-musl/x86_64-linux-musl-native.tgz -P /tmp \
+RUN wget https://more.musl.cc/${MUSL_VERSION}/x86_64-linux-musl/x86_64-linux-musl-native.tgz -P /tmp \
  && mkdir /opt/musl-${MUSL_VERSION} \
  && tar -zxvf /tmp/x86_64-linux-musl-native.tgz -C /opt/musl-${MUSL_VERSION}/ \
  && wget https://zlib.net/zlib-${ZLIB_VERSION}.tar.gz -P /tmp \
- && tar -zxvf /tmp/zlib-${ZLIB_VERSION}.tar.gz -C /tmp
+ && tar -zxvf /tmp/zlib-${ZLIB_VERSION}.tar.gz -C /tmp \
+ && rm -f /tmp/x86_64-linux-musl-native.tgz /tmp/zlib-${ZLIB_VERSION}.tar.gz
 
 # Build MUSL to static link into application
 ENV TOOLCHAIN_DIR=/opt/musl-${MUSL_VERSION}/x86_64-linux-musl-native
@@ -56,36 +58,16 @@ WORKDIR ${GRAALVM_WORKDIR}
 COPY . ${GRAALVM_WORKDIR}
 RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon nativeImage
 
-# Create a staging image (this will be part of the distribution)
-#FROM alpine AS app-stage
-FROM scratch AS app-stage
-#FROM ubuntu:24.04 AS app-stage
+# Create the minimal runtime image
+FROM scratch AS app
 
-ARG GRAALVM_WORKDIR
-
-# Install tools required for project
-# Run `docker build --no-cache .` to update dependencies
-#RUN apt-get update -y \
-# && apt-get upgrade -y \
-# && apt-get install -y ffmpeg \
-# && apt-get install -y libmfx1 libmfx-tools \
-# && apt-get install -y libva-drm2 libva-x11-2 vainfo \
-# && apt-get install -y intel-media-va-driver-non-free \
-# && apt-get autoremove --purge -y
-#
-#RUN rm -rf /tmp/*
-
-ENV GRAALVM_WORKDIR=${GRAALVM_WORKDIR}
 ENV APP_HOME=/opt/tablo2hdhomerun
-ENV PATH=${APP_HOME}/bin:${PATH}
+ENV PATH=${APP_HOME}:${PATH}
 
 WORKDIR ${APP_HOME}
 
 COPY --from=build /graalvm/src/project/build/tablo2hdhomerun* ${APP_HOME}/
 
-CMD [ "/bin/bash" ]
+EXPOSE 8080/tcp 65001/udp
 
-# And we finally create the application layer
-FROM app-stage AS app
-#CMD [ "./tablo2hdhomerun" , "-d" , "-XX:+PrintGC" , "-XX:+VerboseGC" ]
 CMD [ "./tablo2hdhomerun" , "-d" ]

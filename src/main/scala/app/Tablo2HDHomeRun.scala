@@ -24,6 +24,10 @@ import app.tuner.TabloLegacy.Response.Discover
 
 @main def tablo2hdhomerunApp(args: String*): Unit = {
   val loaded = AppConfig.load()
+  if (args.contains("--healthcheck")) {
+    val ok = Tablo2HDHomeRun.checkHealth(loaded.config.proxy.bindHost, loaded.config.proxy.bindPort)
+    System.exit(if (ok) 0 else 1)
+  }
   LogConfig.configure(loaded.logging)
   val daemon = args.contains("-d")
   Dependencies.verify(loaded.config)
@@ -88,6 +92,27 @@ object Tablo2HDHomeRun {
     , tunerCount = config.proxy.effectiveTunerCount
     , deviceId = config.proxy.deviceId
     )
+
+  private[app] def checkHealth(host: String, port: Int, timeoutMs: Int = 2000): Boolean =
+    Try {
+      val targetHost = if (host == "0.0.0.0" || host == "::") "127.0.0.1" else host
+      val socket = new java.net.Socket()
+      try {
+        socket.connect(new java.net.InetSocketAddress(targetHost, port), timeoutMs)
+        socket.setSoTimeout(timeoutMs)
+        val out = socket.getOutputStream
+        val req = s"GET /discover.json HTTP/1.1\r\nHost: $targetHost:$port\r\nConnection: close\r\n\r\n"
+        out.write(req.getBytes(java.nio.charset.StandardCharsets.US_ASCII))
+        out.flush()
+        val reader = new java.io.BufferedReader(
+          new java.io.InputStreamReader(socket.getInputStream, java.nio.charset.StandardCharsets.US_ASCII)
+        )
+        val statusLine = Option(reader.readLine()).getOrElse("")
+        statusLine.startsWith("HTTP/1.1 200") || statusLine.startsWith("HTTP/1.0 200")
+      } finally {
+        val _ = Try(socket.close())
+      }
+    }.getOrElse(false)
 
   private[app] def appVersion: String =
     Option(getClass.getPackage.getImplementationVersion)

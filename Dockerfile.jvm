@@ -38,9 +38,11 @@ ENV PATH=${tablo2hdhomerun_HOME}/bin:${PATH}
 
 WORKDIR ${tablo2hdhomerun_HOME}
 
-COPY --from=build ${OPENJDK_WORKDIR}/tablo2hdhomerun* ${OPENJDK_WORKDIR}/build/libs/* ${tablo2hdhomerun_HOME}/
+COPY --from=build ${OPENJDK_WORKDIR}/build/libs/tablo2hdhomerun-*.jar ${tablo2hdhomerun_HOME}/tablo2hdhomerun.jar
+
+EXPOSE 8080/tcp 65001/udp
 
 # And we finally create the application layer
 FROM tablo2hdhomerun-base AS tablo2hdhomerun
 ENTRYPOINT [ "java" ]
-#CMD [ "-Djava.net.preferIPv4Stack=true" , "-jar" , "tablo2hdhomerun.jar" , "-d" ]
+CMD [ "--sun-misc-unsafe-memory-access=allow" , "-Djava.net.preferIPv4Stack=true" , "-jar" , "tablo2hdhomerun.jar" , "-d" ]

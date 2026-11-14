@@ -158,4 +158,41 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
     val _ = version should not be empty
     version should not be "dev"
   }
+
+  "Tablo2HDHomeRun.checkHealth" should "return true for 200 OK and false for non-200 or unreachable port" in {
+    def withStubHttp(statusLine: String)(fn: Int => Unit): Unit = {
+      val server = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+      val thread = new Thread(() => {
+        try {
+          val client = server.accept()
+          try {
+            client.getOutputStream.write(s"$statusLine\r\nContent-Length: 2\r\n\r\nOK".getBytes("US-ASCII"))
+            client.getOutputStream.flush()
+          } finally {
+            client.close()
+          }
+        } catch {
+          case _: Throwable => ()
+        }
+      }, "healthcheck-test-server")
+      thread.setDaemon(true)
+      thread.start()
+      try fn(server.getLocalPort)
+      finally {
+        server.close()
+        thread.join(2000)
+      }
+    }
+
+    withStubHttp("HTTP/1.1 200 OK") { port =>
+      val _ = Tablo2HDHomeRun.checkHealth("127.0.0.1", port, timeoutMs = 1000) shouldBe true
+    }
+    withStubHttp("HTTP/1.1 500 Internal Server Error") { port =>
+      val _ = Tablo2HDHomeRun.checkHealth("127.0.0.1", port, timeoutMs = 1000) shouldBe false
+    }
+    val closedSocket = new java.net.ServerSocket(0, 1, java.net.InetAddress.getByName("127.0.0.1"))
+    val closedPort = closedSocket.getLocalPort
+    closedSocket.close()
+    Tablo2HDHomeRun.checkHealth("127.0.0.1", closedPort, timeoutMs = 500) shouldBe false
+  }
 }
