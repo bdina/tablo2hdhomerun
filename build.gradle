@@ -133,6 +133,7 @@ task mergeReferenceConf {
 
         file("${outputDir}/reference.conf").text = referenceConf.toString()
         file("${outputDir}/version.conf").text = versionConf.toString()
+        file("${outputDir}/version.properties").text = "version=${project.version}\n"
     }
 }
 
@@ -147,7 +148,10 @@ jar {
 shadowJar {
     archiveClassifier = ''
     manifest {
-        attributes 'App-Version': gitVersion()
+        attributes(
+          'App-Version': gitVersion(),
+          'Implementation-Version': gitVersion()
+        )
     }
     mergeServiceFiles()
 }

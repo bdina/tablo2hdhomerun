@@ -152,4 +152,10 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
     val _ = args should contain("/tmp/my recordings/show name.ts")
     args should contain("/tmp/my recordings/show name.mp4")
   }
+
+  "Tablo2HDHomeRun.appVersion" should "resolve project version from build resources instead of dev" in {
+    val version = Tablo2HDHomeRun.appVersion
+    val _ = version should not be empty
+    version should not be "dev"
+  }
 }

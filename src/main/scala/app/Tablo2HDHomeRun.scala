@@ -89,17 +89,30 @@ object Tablo2HDHomeRun {
     , deviceId = config.proxy.deviceId
     )
 
-  private def appVersion: String =
+  private[app] def appVersion: String =
     Option(getClass.getPackage.getImplementationVersion)
+      .filter(_.nonEmpty)
       .orElse {
         Try {
-          val source = getClass.getProtectionDomain.getCodeSource
-          if (source == null) None
-          else {
-            val jar = new java.util.jar.JarFile(source.getLocation.getPath)
-            try Option(jar.getManifest.getMainAttributes.getValue("App-Version"))
-            finally jar.close()
+          Option(getClass.getResourceAsStream("/version.properties")).flatMap { in =>
+            try {
+              val props = new java.util.Properties()
+              props.load(in)
+              Option(props.getProperty("version")).map(_.trim).filter(_.nonEmpty)
+            } finally {
+              in.close()
+            }
           }
+        }.toOption.flatten
+      }
+      .orElse {
+        Try {
+          val resources = this.getClass.getClassLoader.getResources("META-INF/MANIFEST.MF")
+          Iterator.continually(resources).takeWhile(_.hasMoreElements).flatMap { e =>
+            val in = e.nextElement().openStream()
+            try Option(new java.util.jar.Manifest(in).getMainAttributes.getValue("App-Version"))
+            finally in.close()
+          }.find(_.nonEmpty)
         }.toOption.flatten
       }
       .getOrElse("dev")
