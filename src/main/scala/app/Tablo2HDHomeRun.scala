@@ -131,7 +131,7 @@ object Tablo2HDHomeRun {
       implicit val timeout: pekko.util.Timeout = pekko.util.Timeout(3, java.util.concurrent.TimeUnit.SECONDS)
 
       val path = Paths.get(root)
-      context.ask[app.sys.FsMonitor.Watch,app.sys.FsMonitor.Ack](monitor, ref => app.sys.FsMonitor.Watch(path=path,ext=Seq("ts,","mkv"),replyTo=ref)) {
+      context.ask[app.sys.FsMonitor.Watch,app.sys.FsMonitor.Ack](monitor, ref => app.sys.FsMonitor.Watch(path=path,ext=Seq("ts","mkv"),replyTo=ref)) {
         case Success(app.sys.FsMonitor.Ack(p,_)) =>
           context.log.debug("[scan] monitor ack path={}", p)
           pekko.NotUsed
