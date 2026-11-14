@@ -123,6 +123,31 @@ object FFMpegDelegate {
     case class IncompleteFile(f: File) extends Exception(s"incomplete file: $f") with Error
   }
 
+  def getBaseName(file: File): Option[String] = {
+    val name = file.getName
+    if (!name.contains(".")) {
+      None
+    } else {
+      val ext = name.substring(name.lastIndexOf(".") + 1)
+      Some(name.substring(0, name.length - ext.length - 1))
+    }
+  }
+
+  def buildCommand(in: Path): Seq[String] = {
+    val parent = in.getParent.toString
+    val root = getBaseName(in.toFile).getOrElse("")
+    val out = s"${parent}/${root}.mp4"
+    Seq(
+      "ffmpeg"
+    , "-hwaccel", "qsv"
+    , "-c:v", "h264_qsv"
+    , "-i", in.toString
+    , "-c:v", "h264_qsv"
+    , "-global_quality", "30"
+    , out
+    )
+  }
+
   def apply(file: File): Behavior[Request] =
     Behaviors.setup(context => FFMpegDelegate(context, file))
 }
@@ -140,14 +165,11 @@ case class FFMpegDelegate(
   , line => log.debug("[transcode] ffmpeg stderr: {}", line)
   )
 
-  def cmd(in: Path) = {
+  def cmd(in: Path): Seq[String] = {
     log.debug("[transcode] input path={}", in)
-    val parent = in.getParent.toString
-    val root = getBaseName(in.toFile).getOrElse("")
-    val out = s"${parent}/${root}.mp4"
-    val cmd = s"ffmpeg -hwaccel qsv -c:v h264_qsv -i ${in} -c:v h264_qsv -global_quality 30 ${out}"
+    val args = FFMpegDelegate.buildCommand(in)
     log.info("[transcode] command file={}", in.getFileName)
-    cmd
+    args
   }
 
   var proc: Option[Process] = None
@@ -164,7 +186,7 @@ case class FFMpegDelegate(
       log.info("[transcode] start file={}", file)
       prepare(file) match {
         case Success(path) =>
-          proc = Some(cmd(path).run(pLog))
+          proc = Some(Process(cmd(path)).run(pLog))
           sender ! Response.Status(code=1,replyTo=context.self)
         case Failure(ex) =>
           log.warn("[transcode] start skipped file={} reason={}", file, ex.getMessage)
@@ -189,15 +211,7 @@ case class FFMpegDelegate(
       Behaviors.same
   }
 
-  def getBaseName(file: File): Option[String] = {
-    val name = file.getName
-    if (!name.contains(".")) {
-      None
-    } else {
-      val ext = name.substring(name.lastIndexOf(".") + 1)
-      Some(name.substring(0, name.length - ext.length - 1))
-    }
-  }
+  def getBaseName(file: File): Option[String] = FFMpegDelegate.getBaseName(file)
 
   val destExt = "mp4"
 

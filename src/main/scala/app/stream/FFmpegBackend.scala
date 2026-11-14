@@ -39,7 +39,23 @@ object FFmpegBackend extends StreamBackend {
       , "-v", "warning"
       , "pipe:1"
       )
-      val process = scala.sys.runtime.exec(ffmpegCmd)
+      val process = new java.lang.ProcessBuilder(ffmpegCmd*).start()
+      val stderrThread = new Thread(() => {
+        val reader = new java.io.BufferedReader(new java.io.InputStreamReader(process.getErrorStream))
+        try {
+          var line = reader.readLine()
+          while (line != null) {
+            log.debug("[stream:ffmpeg] stderr label={} line={}", label, line)
+            line = reader.readLine()
+          }
+        } catch {
+          case _: java.io.IOException => ()
+        } finally {
+          reader.close()
+        }
+      }, s"ffmpeg-stderr-$label")
+      stderrThread.setDaemon(true)
+      stderrThread.start()
       log.info("[stream:ffmpeg] start label={} pid={} playlistUrl={}", label, process.pid, playlistUrl)
       StreamConverters
         .fromInputStream(() => process.getInputStream)

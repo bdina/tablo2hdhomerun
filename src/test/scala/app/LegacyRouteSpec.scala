@@ -146,4 +146,10 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
     }
   }
 
+  "FFMpegDelegate.buildCommand" should "preserve paths containing spaces as single arguments" in {
+    val input = java.nio.file.Paths.get("/tmp/my recordings/show name.ts")
+    val args = app.sys.FFMpegDelegate.buildCommand(input)
+    val _ = args should contain("/tmp/my recordings/show name.ts")
+    args should contain("/tmp/my recordings/show name.mp4")
+  }
 }
