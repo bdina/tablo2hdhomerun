@@ -115,8 +115,16 @@ trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with Scalat
       serverId = "serv-1"
     )
 
-  def routesWithManager(sessionManager: org.apache.pekko.actor.typed.ActorRef[Tablo4thGen.Channel.SessionManager.Request]): Route = {
-    val config = AppConfig.load(Map.empty).config
+  def routesWithManager(
+    sessionManager: org.apache.pekko.actor.typed.ActorRef[Tablo4thGen.Channel.SessionManager.Request]
+  ): Route =
+    routesWithEnv(sessionManager, Map.empty)
+
+  def routesWithEnv(
+    sessionManager: org.apache.pekko.actor.typed.ActorRef[Tablo4thGen.Channel.SessionManager.Request]
+  , envOverrides: Map[String, String]
+  ): Route = {
+    val config = AppConfig.load(envOverrides).config
     val discover = TabloLegacy.Response.Discover(
       friendlyName = "Tablo 4th Gen Proxy",
       localIp = config.proxy.ip,
@@ -131,9 +139,9 @@ trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with Scalat
     Tablo4thGen.routes(lineup, sessionManager, stubAuthContext)(typedSystem)
   }
 
-  def routes(rejectNoTuners: Boolean = false): Route = {
+  def routes(rejectNoTuners: Boolean = false, envOverrides: Map[String, String] = Map.empty): Route = {
     val sessionManager = createStubSessionManager(rejectNoTuners)
-    routesWithManager(sessionManager)
+    routesWithEnv(sessionManager, envOverrides)
   }
 }
 
@@ -249,5 +257,25 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
     val _ = Tablo4thGen.Channel.isAllowedSegmentUri("https://192.168.1.50:8887/stream/seg0.ts", Some(auth)) shouldBe true
     val _ = Tablo4thGen.Channel.isAllowedSegmentUri("http://evil.example.com/seg0.ts", Some(auth)) shouldBe false
     Tablo4thGen.Channel.isAllowedSegmentUri("file:///etc/passwd", Some(auth)) shouldBe false
+  }
+
+  "ENABLE_HLS_ENDPOINT=false" should "disable HLS and M3U routes with 404 Not Found" in {
+    val r = routes(envOverrides = Map("ENABLE_HLS_ENDPOINT" -> "false"))
+    Get("/lineup.m3u") ~> r ~> check {
+      val _ = status shouldBe StatusCodes.NotFound
+    }
+    Get("/channel/chan-1.m3u8") ~> r ~> check {
+      val _ = status shouldBe StatusCodes.NotFound
+    }
+    Get("/hls/chan-1/stream.m3u8") ~> r ~> check {
+      val _ = status shouldBe StatusCodes.NotFound
+    }
+    val encodedLocal = java.net.URLEncoder.encode("http://127.0.0.1:8887/seg.ts", "UTF-8")
+    Get(s"/channel/chan-1/segment/$encodedLocal") ~> r ~> check {
+      val _ = status shouldBe StatusCodes.NotFound
+    }
+    Get("/channel/chan-1") ~> r ~> check {
+      status shouldBe StatusCodes.OK
+    }
   }
 }

@@ -656,25 +656,30 @@ object Tablo4thGen {
       } ~
       path("lineup.m3u" | "lineup.m3u8") {
         get {
-          implicit val timeout: pekko.util.Timeout = 3.seconds
-          val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
-          onComplete(lineupF) {
-            case Success(LineupActor.Response.Fetch(channels, _)) =>
-              val sb = new java.lang.StringBuilder("#EXTM3U\n")
-              channels.foreach { ch =>
-                val obj = ch.asJsObject.fields
-                val name = obj.get("GuideName").map { case JsString(s) => s; case _ => "" }.getOrElse("")
-                val num = obj.get("GuideNumber").map { case JsString(s) => s; case _ => "" }.getOrElse("")
-                val url = obj.get("URL").map { case JsString(s) => s; case _ => "" }.getOrElse("")
-                val hlsUrl = s"${url}.m3u8"
-                val _ = sb.append(s"""#EXTINF:-1 tvg-id="$num" tvg-name="$name" tvg-chno="$num" group-title="Antenna",$name\n""")
-                val _ = sb.append(s"$hlsUrl\n")
-              }
-              val mpegurl = MediaType.customBinary("application", "x-mpegURL", MediaType.NotCompressible)
-              complete(HttpEntity(pekko.http.scaladsl.model.ContentType(mpegurl), ByteString(sb.toString())))
-            case Failure(ex) =>
-              log.warn("[lineup] lineup.m3u failed", ex)
-              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce M3U lineup"))
+          val hlsEnabled = Option(AppContext.config).forall(_.proxy.enableHlsEndpoint)
+          if (!hlsEnabled) {
+            complete(HttpResponse(StatusCodes.NotFound, entity = "HLS endpoint disabled"))
+          } else {
+            implicit val timeout: pekko.util.Timeout = 3.seconds
+            val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
+            onComplete(lineupF) {
+              case Success(LineupActor.Response.Fetch(channels, _)) =>
+                val sb = new java.lang.StringBuilder("#EXTM3U\n")
+                channels.foreach { ch =>
+                  val obj = ch.asJsObject.fields
+                  val name = obj.get("GuideName").map { case JsString(s) => s; case _ => "" }.getOrElse("")
+                  val num = obj.get("GuideNumber").map { case JsString(s) => s; case _ => "" }.getOrElse("")
+                  val url = obj.get("URL").map { case JsString(s) => s; case _ => "" }.getOrElse("")
+                  val hlsUrl = s"${url}.m3u8"
+                  val _ = sb.append(s"""#EXTINF:-1 tvg-id="$num" tvg-name="$name" tvg-chno="$num" group-title="Antenna",$name\n""")
+                  val _ = sb.append(s"$hlsUrl\n")
+                }
+                val mpegurl = MediaType.customBinary("application", "x-mpegURL", MediaType.NotCompressible)
+                complete(HttpEntity(pekko.http.scaladsl.model.ContentType(mpegurl), ByteString(sb.toString())))
+              case Failure(ex) =>
+                log.warn("[lineup] lineup.m3u failed", ex)
+                complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to produce M3U lineup"))
+            }
           }
         }
       }
@@ -773,10 +778,12 @@ object Tablo4thGen {
 
     private var _instance: Option[ActorRef[Request]] = None
 
-    def instance(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]): ActorRef[Request] = _instance.getOrElse {
-      val actor = system.systemActorOf(apply(authContext), "guide-actor-4thgen-singleton", pekko.actor.typed.Props.empty)
-      _instance = Some(actor)
-      actor
+    def instance(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]): ActorRef[Request] = synchronized {
+      _instance.getOrElse {
+        val actor = system.systemActorOf(apply(authContext), "guide-actor-4thgen-singleton", pekko.actor.typed.Props.empty)
+        _instance = Some(actor)
+        actor
+      }
     }
 
     def apply(authContext: Auth.AuthContext): Behavior[Request] = Behaviors.setup { context =>
@@ -1529,9 +1536,15 @@ object Tablo4thGen {
 
           case Request.GetSessionMeta(channelId, replyTo) =>
             val metaOpt = sessions.get(channelId).flatMap {
-              case live: SessionState.Live => Some(live.meta)
-              case idle: SessionState.IdleGrace => Some(idle.meta)
-              case _ => None
+              case live: SessionState.Live =>
+                Some(live.meta)
+              case idle: SessionState.IdleGrace =>
+                val _ = idle.graceTimer.cancel()
+                val refreshedTimer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId))
+                sessions += channelId -> idle.copy(graceTimer = refreshedTimer, enteredAtNanos = System.nanoTime())
+                Some(idle.meta)
+              case _ =>
+                None
             }
             replyTo ! metaOpt
             Behaviors.same
@@ -2356,6 +2369,8 @@ object Tablo4thGen {
           }
         }
 
+      def hlsEnabled: Boolean = Option(AppContext.config).forall(_.proxy.enableHlsEndpoint)
+
       def fetchHlsPlaylist(channelId: String): Future[HttpResponse] = {
         val hlsClientId = s"hls-$channelId"
         sessionManager.ask[Option[SessionManager.TabloSessionMeta]](replyTo =>
@@ -2370,6 +2385,7 @@ object Tablo4thGen {
                 SessionManager.Request.Acquire(channelId, hlsClientId, replyTo)
               ).flatMap {
                 case SessionManager.Response.Attached(_) =>
+                  sessionManager ! SessionManager.Request.Release(channelId, hlsClientId)
                   sessionManager.ask[Option[SessionManager.TabloSessionMeta]](replyTo =>
                     SessionManager.Request.GetSessionMeta(channelId, replyTo)
                   ).flatMap {
@@ -2540,29 +2556,33 @@ object Tablo4thGen {
           }
         } ~
         get {
-          val decoded = Try(java.net.URLDecoder.decode(encodedSegment, "UTF-8")).getOrElse(encodedSegment)
-          if (!isAllowedSegmentUri(decoded, authContextOpt)) {
-            log.warn("[channel] forbidden segment URI channelId={} uri={}", channelId, LogConfig.truncate(decoded))
-            complete(HttpResponse(StatusCodes.Forbidden, headers = corsHeaders.toList, entity = "Forbidden segment URI"))
+          if (!hlsEnabled) {
+            complete(HttpResponse(StatusCodes.NotFound, headers = corsHeaders.toList, entity = "HLS endpoint disabled"))
           } else {
-            val request = HttpRequest(uri = decoded)
-            val fut = HttpCtx.singleRequest(request).map { resp =>
-              if (resp.status.isSuccess()) {
-                val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
-                val contentType = pekko.http.scaladsl.model.ContentType(`video/mp2t`)
-                val segHeaders = corsHeaders ++ Seq(
-                  pekko.http.scaladsl.model.headers.RawHeader("Cache-Control", "public, max-age=86400")
-                )
-                HttpResponse(StatusCodes.OK, headers = segHeaders.toList, entity = HttpEntity(contentType, resp.entity.dataBytes))
-              } else {
-                val _ = resp.entity.discardBytes()
-                HttpResponse(resp.status, headers = corsHeaders.toList, entity = "Failed to fetch segment")
+            val decoded = Try(java.net.URLDecoder.decode(encodedSegment, "UTF-8")).getOrElse(encodedSegment)
+            if (!isAllowedSegmentUri(decoded, authContextOpt)) {
+              log.warn("[channel] forbidden segment URI channelId={} uri={}", channelId, LogConfig.truncate(decoded))
+              complete(HttpResponse(StatusCodes.Forbidden, headers = corsHeaders.toList, entity = "Forbidden segment URI"))
+            } else {
+              val request = HttpRequest(uri = decoded)
+              val fut = HttpCtx.singleRequest(request).map { resp =>
+                if (resp.status.isSuccess()) {
+                  val `video/mp2t` = MediaType.customBinary("video", "mp2t", MediaType.NotCompressible)
+                  val contentType = pekko.http.scaladsl.model.ContentType(`video/mp2t`)
+                  val segHeaders = corsHeaders ++ Seq(
+                    pekko.http.scaladsl.model.headers.RawHeader("Cache-Control", "public, max-age=86400")
+                  )
+                  HttpResponse(StatusCodes.OK, headers = segHeaders.toList, entity = HttpEntity(contentType, resp.entity.dataBytes))
+                } else {
+                  val _ = resp.entity.discardBytes()
+                  HttpResponse(resp.status, headers = corsHeaders.toList, entity = "Failed to fetch segment")
+                }
+              }.recover { case ex =>
+                log.warn("[channel] segment fetch failed channelId={} error={}", channelId, ex.getMessage)
+                HttpResponse(StatusCodes.BadGateway, headers = corsHeaders.toList, entity = "Segment fetch failed")
               }
-            }.recover { case ex =>
-              log.warn("[channel] segment fetch failed channelId={} error={}", channelId, ex.getMessage)
-              HttpResponse(StatusCodes.BadGateway, headers = corsHeaders.toList, entity = "Segment fetch failed")
+              complete(fut)
             }
-            complete(fut)
           }
         }
       } ~
@@ -2573,7 +2593,11 @@ object Tablo4thGen {
           }
         } ~
         get {
-          complete(fetchHlsPlaylist(channelId))
+          if (!hlsEnabled) {
+            complete(HttpResponse(StatusCodes.NotFound, headers = corsHeaders.toList, entity = "HLS endpoint disabled"))
+          } else {
+            complete(fetchHlsPlaylist(channelId))
+          }
         }
       } ~
       path("channel" / Segment) { rawId =>
@@ -2584,8 +2608,12 @@ object Tablo4thGen {
         } ~
         get {
           if (rawId.endsWith(".m3u8")) {
-            val channelId = rawId.stripSuffix(".m3u8")
-            complete(fetchHlsPlaylist(channelId))
+            if (!hlsEnabled) {
+              complete(HttpResponse(StatusCodes.NotFound, headers = corsHeaders.toList, entity = "HLS endpoint disabled"))
+            } else {
+              val channelId = rawId.stripSuffix(".m3u8")
+              complete(fetchHlsPlaylist(channelId))
+            }
           } else {
             streamChannel(rawId)
           }

@@ -704,5 +704,42 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
         statesProbe.receiveMessage() shouldBe Map.empty
       }
     }
+
+    "refresh IdleGrace timer on GetSessionMeta and expire once polling stops" in {
+      val teardownCalls = new AtomicInteger(0)
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = spawnManager(
+        startRunner = { (_, self) => selfRef.set(self) }
+      , totalTuners = 2
+      , idleGrace = 250.millis
+      )
+      val probe = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-hls-grace", "hls-ch-hls-grace", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+      selfRef.get() ! Command.CheckIn("ch-hls-grace", meta(), hubSource, () => { val _ = teardownCalls.incrementAndGet() })
+      val _ = probe.expectMessageType[Response.Attached]
+
+      mgr ! Request.Release("ch-hls-grace", "hls-ch-hls-grace")
+
+      val statesProbe = testKit.createTestProbe[Map[String, String]]()
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+        statesProbe.receiveMessage() shouldBe Map("ch-hls-grace" -> "idle-grace")
+      }
+
+      val metaProbe = testKit.createTestProbe[Option[TabloSessionMeta]]()
+      (1 to 4).foreach { _ =>
+        Thread.sleep(100)
+        mgr ! Request.GetSessionMeta("ch-hls-grace", metaProbe.ref)
+        val _ = metaProbe.receiveMessage().isDefined shouldBe true
+      }
+      val _ = teardownCalls.get() shouldBe 0
+
+      eventually(timeout(3.seconds), interval(50.millis)) {
+        teardownCalls.get() shouldBe 1
+      }
+    }
   }
 }
