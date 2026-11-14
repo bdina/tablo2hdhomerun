@@ -59,6 +59,7 @@ dependencies {
 
 test {
   useJUnit()
+  jvmArgs '--sun-misc-unsafe-memory-access=allow'
   testLogging {
     events "passed", "skipped", "failed"
     showStandardStreams = false
@@ -77,6 +78,7 @@ version = gitVersion()
 
 application {
     mainClass.set('app.tablo2hdhomerunApp')
+    applicationDefaultJvmArgs = ['--sun-misc-unsafe-memory-access=allow']
 }
 
 processResources {
