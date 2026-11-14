@@ -26,7 +26,7 @@ Our goal is to allow you to leave a fringe channel playing all day in Plex compl
 ## Requirements
 
 - Java 24+ and Scala 3.10.1 (JVM mode)
-- GraalVM CE (native image mode; Docker uses GraalVM CE 25)
+- GraalVM CE (native image mode; Docker uses GraalVM CE 25 Innovation 5)
 - FFmpeg (optional by default; required when `STREAM_BACKEND=ffmpeg`)
 - Network access to TabloTV device
 

@@ -4,8 +4,8 @@
 # build (this is discarded by docker post-build)
 FROM ubuntu:24.04 AS build
 
-ARG GRAAL_VERSION=25.3.4.1
-ARG JAVA_VERSION=25i3-25.0.4.1
+ARG GRAAL_VERSION=25.5.5.0.3
+ARG JAVA_VERSION=25i5-25.0.5.0.3
 ARG GRAALVM_WORKDIR=/graalvm/src/project
 
 ARG GRADLE_VERSION=9.3.1
