@@ -8,6 +8,7 @@ import java.util.zip.CRC32
 import org.slf4j.LoggerFactory
 
 import scala.util.Try
+import scala.util.control.NonFatal
 
 import app.AppContext
 import app.config.AppConfig
@@ -204,7 +205,7 @@ object HDHomeRunDiscovery {
               } catch {
                 case _: java.nio.channels.AsynchronousCloseException => running = false
                 case _: java.nio.channels.ClosedChannelException => running = false
-                case ex: Throwable if running =>
+                case NonFatal(ex) if running =>
                   log.debug("[discovery] receive error", ex)
               }
             }

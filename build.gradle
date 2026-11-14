@@ -1,5 +1,21 @@
 import compiler.NativeImageTask
 
+buildscript {
+  repositories {
+    mavenCentral()
+  }
+  dependencies {
+    constraints {
+      classpath('org.eclipse.jgit:org.eclipse.jgit:6.10.1.202505221210-r') {
+        because 'mitigate JGit CVEs while staying on pure-Java JGit (no git CLI in graalvm-dev)'
+      }
+      classpath('com.google.guava:guava:33.8.0-jre') {
+        because 'mitigate Guava CVEs pulled by git-version 1.0.0'
+      }
+    }
+  }
+}
+
 plugins {
   id 'compiler.native-image'
   id 'compiler.scala-cli'
@@ -23,10 +39,10 @@ configurations {
 
 ext {
     scala_maj = '3'
-    scala_ver = "${scala_maj}.9.0"
+    scala_ver = "${scala_maj}.10.1"
 
-    pekko_core = '1.7.0'
-    pekko_http = '1.4.0'
+    pekko_core = '1.7.1'
+    pekko_http = '1.4.2'
     scala_test = '3.2.20'
 }
 
@@ -34,7 +50,7 @@ dependencies {
     implementation "org.scala-lang:scala${scala_maj}-library_${scala_maj}:${scala_ver}"
     replCompiler "org.scala-lang:scala${scala_maj}-compiler_${scala_maj}:${scala_ver}"
 
-    implementation 'org.slf4j:slf4j-simple:2.0.19'
+    implementation 'org.slf4j:slf4j-simple:2.0.20'
 
     implementation "org.apache.pekko:pekko-actor-typed_${scala_maj}:${pekko_core}"
     implementation "org.apache.pekko:pekko-slf4j_${scala_maj}:${pekko_core}"

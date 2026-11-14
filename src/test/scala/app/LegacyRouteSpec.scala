@@ -172,7 +172,7 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
             client.close()
           }
         } catch {
-          case _: Throwable => ()
+          case _: Exception => ()
         }
       }, "healthcheck-test-server")
       thread.setDaemon(true)
