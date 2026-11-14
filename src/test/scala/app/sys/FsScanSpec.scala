@@ -17,14 +17,33 @@ class FsScanSpec extends ScalaTestWithActorTestKit with AnyFlatSpecLike {
     try {
       val matchingFile = root.resolve("segment.ts")
       Files.createFile(matchingFile)
+      val suffixOnlyFile = root.resolve("hosts")
+      Files.createFile(suffixOnlyFile)
       val otherFile = root.resolve("readme.txt")
       Files.createFile(otherFile)
       val scanActor = testKit.spawn(FsScan(Seq("ts", "mkv")))
       val probe = testKit.createTestProbe[Ack]()
       scanActor ! Scan(root, probe.ref)
       val ack = probe.receiveMessage()
-      val _ = ack.paths.map(_.getFileName.toString) should contain("segment.ts")
-      ack.paths.map(_.getFileName.toString) should not contain "readme.txt"
+      val names = ack.paths.map(_.getFileName.toString)
+      val _ = names should contain("segment.ts")
+      val _ = names should not contain "hosts"
+      names should not contain "readme.txt"
+    } finally {
+      Files.walk(root).sorted(java.util.Comparator.reverseOrder()).forEach(Files.delete(_))
+    }
+  }
+
+  "FsMonitor" should "reply with Ack when receiving Watch" in {
+    val root = Files.createTempDirectory("fsmon-")
+    try {
+      app.AppContext.initialize(testKit.system.asInstanceOf[org.apache.pekko.actor.typed.ActorSystem[org.apache.pekko.NotUsed]])
+      val monitor = testKit.spawn(FsMonitor())
+      val probe = testKit.createTestProbe[FsMonitor.Ack]()
+      monitor ! FsMonitor.Watch(root, Seq("ts", "mkv"), probe.ref)
+      val ack = probe.receiveMessage()
+      val _ = ack.path shouldBe root
+      testKit.stop(monitor)
     } finally {
       Files.walk(root).sorted(java.util.Comparator.reverseOrder()).forEach(Files.delete(_))
     }

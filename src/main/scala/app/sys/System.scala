@@ -84,7 +84,8 @@ object FsScan {
       .toScala(LazyList)
       .filter { case path =>
         examined += 1
-        val kind = ext.find(path.getFileName.toFile.getName.endsWith(_))
+        val fileName = path.getFileName.toFile.getName.toLowerCase
+        val kind = ext.find(e => fileName.endsWith(s".${e.toLowerCase.stripPrefix(".")}"))
         val scanned =
           Try {
             Files
@@ -421,9 +422,10 @@ object FsMonitor {
 
   def apply(): Behavior[Watch] = Behaviors.receive {
     case (context, message) =>
-      val worker = context.spawn(FsNotify(message.path, message.ext), "FsNotify-worker")
+      val worker = context.spawn(FsNotify(message.path, message.ext), s"FsNotify-worker-${java.util.UUID.randomUUID}")
       context.log.info("[scan] monitor started root={}", message.path)
       worker ! FsNotify.Poll
+      message.replyTo ! Ack(path = message.path, from = context.self)
       Behaviors.same
   }
 }
