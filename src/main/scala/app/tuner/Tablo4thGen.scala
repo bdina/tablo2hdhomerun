@@ -1761,6 +1761,8 @@ object Tablo4thGen {
             , videoPidSupplier = () => cachedHeadersRef.get().videoPid
             , videoStreamTypeSupplier = () => cachedHeadersRef.get().videoStreamType
             , audioPidsSupplier = () => cachedHeadersRef.get().audioPids
+            , audioStreamTypesSupplier = () => cachedHeadersRef.get().audioStreamTypes
+            , lockedSeqHeaderSupplier = () => cachedHeadersRef.get().lockedSeqHeader
             )
               .via(MpegTsSync.cacheFlow(cachedHeadersRef, updated => {
                 SessionManager.setCachedHeaders(channelId, updated)
