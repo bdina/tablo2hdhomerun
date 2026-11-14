@@ -281,6 +281,7 @@ object MpegTsSync {
   val DefaultFreezeThreshold: FiniteDuration = 10.seconds
   val DefaultFreezeTickInterval: FiniteDuration = 100.millis
   val DefaultMetricsInterval: FiniteDuration = 30.seconds
+  val MaxMediaClockBurstCreditTicks: Long = 200000L
 
   def configuredFreezeThreshold: FiniteDuration =
     scala.util.Try(app.AppContext.config.stream.freezeThresholdSec).toOption
@@ -385,15 +386,19 @@ object MpegTsSync {
       private var droppingAudioPids: Set[Int] = Set.empty
       private var droppingOtherPids: Set[Int] = Set.empty
       private var maxSliceRow: Int = FreezeFramePacer.DefaultMaxSliceRow
+      private var lockedMbWidth: Int = 120
       private var candidateSeqHeader: Option[ByteString] = None
       private var lockedSeqHeader: Option[ByteString] = None
       private val learnedAudioFormats = scala.collection.mutable.Map.empty[Int, FreezeFramePacer.AudioFormat]
       private var seenLiveKeyframe: Boolean = false
       private var lastLiveDataNanos: Long = System.nanoTime()
       private var freezeActive: Boolean = false
+      private var justResumedFromFreeze: Boolean = false
+      private var freezeTemporalRef: Int = 0
       private var freezeTicksCount: Int = 0
       private var lastInputVideoPts: Long = -1L
       private var lastOutputPts: Long = -1L
+      private var lastOutputDts: Long = -1L
       private var mediaClockAnchorPts: Long = -1L
       private var mediaClockAnchorNanos: Long = 0L
       private var ptsDeltaTicks: Long = 0L
@@ -443,7 +448,10 @@ object MpegTsSync {
           FreezeFramePacer.readPtsDts(arr, pesOff, pktOffset + PacketSize).foreach { case (inPts, _) =>
             if (isVideo) {
               latestVideoPts = inPts
-              if (lastContinuousVideoPts >= 0L) {
+              if (justResumedFromFreeze) {
+                lastContinuousVideoPts = inPts
+                pendingMetricOutlierPts = None
+              } else if (lastContinuousVideoPts >= 0L) {
                 val delta = signedPtsDiff(inPts, lastContinuousVideoPts)
                 if (delta > 0L && delta <= FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
                   windowPtsAdvanceTicks += delta
@@ -620,7 +628,7 @@ object MpegTsSync {
                   windowPtsScrubs += 1L
                   true
                 } else if (isVideo) {
-                  if (lastOutputPts >= 0L && lastInputVideoPts >= 0L) {
+                  if (!justResumedFromFreeze && lastOutputPts >= 0L && lastInputVideoPts >= 0L) {
                     val inputJump = math.abs(signedPtsDiff(inPts, lastInputVideoPts))
                     if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
                       if (pendingOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)) {
@@ -652,6 +660,21 @@ object MpegTsSync {
         }
       }
 
+      private def computeMonotonicRebasePts(inPts: Long, dtsOpt: Option[Long]): Long = {
+        val ptsMinusDts = dtsOpt.map(d => math.max(0L, signedPtsDiff(inPts, d))).getOrElse(0L)
+        val minPtsFromPts = (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks) & FreezeFramePacer.PtsMask
+        if (dtsOpt.isDefined && lastOutputDts >= 0L) {
+          val candidateOutDts = (minPtsFromPts - ptsMinusDts) & FreezeFramePacer.PtsMask
+          if (signedPtsDiff(candidateOutDts, lastOutputDts) < (FreezeFramePacer.DefaultVideoStepTicks / 2L)) {
+            (lastOutputDts + FreezeFramePacer.DefaultVideoStepTicks + ptsMinusDts) & FreezeFramePacer.PtsMask
+          } else {
+            minPtsFromPts
+          }
+        } else {
+          minPtsFromPts
+        }
+      }
+
       private def normalizePacketTimestamps(arr: Array[Byte], pktOffset: Int, isVideo: Boolean): Unit = {
         val pktEnd = pktOffset + PacketSize
         val pesOff = FreezeFramePacer.findPesHeaderOffset(arr, pktOffset)
@@ -659,32 +682,58 @@ object MpegTsSync {
           FreezeFramePacer.readPtsDts(arr, pesOff, pktEnd).foreach { case (inPts, inDtsOpt) =>
             val outPts = if (isVideo) {
               val chosen = if (lastOutputPts >= 0) {
-                val mappedPts = (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
-                val diffFromOut = signedPtsDiff(mappedPts, lastOutputPts)
-                val inputJump = if (lastInputVideoPts >= 0) math.abs(signedPtsDiff(inPts, lastInputVideoPts)) else 0L
-                if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
-                  if (pendingOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)) {
-                    ptsDeltaTicks = (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks - inPts) & FreezeFramePacer.PtsMask
-                    pendingOutlierPts = None
-                    lastInputVideoPts = inPts
-                    (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
-                  } else {
-                    pendingOutlierPts = Some(inPts)
-                    totalScrubbedPts += 1L
-                    windowPtsScrubs += 1L
-                    (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks) & FreezeFramePacer.PtsMask
-                  }
-                } else if (diffFromOut < -FreezeFramePacer.RebaseThresholdTicks || diffFromOut > FreezeFramePacer.RebaseThresholdTicks) {
-                  ptsDeltaTicks = (lastOutputPts + FreezeFramePacer.DefaultVideoStepTicks - inPts) & FreezeFramePacer.PtsMask
-                  pendingOutlierPts = None
+                if (justResumedFromFreeze) {
+                  val targetPts = computeMonotonicRebasePts(inPts, inDtsOpt)
+                  ptsDeltaTicks = signedPtsDiff(targetPts, inPts) & FreezeFramePacer.PtsMask
                   lastInputVideoPts = inPts
-                  (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+                  justResumedFromFreeze = false
+                  pendingOutlierPts = None
+                  mediaClockAnchorPts = targetPts
+                  mediaClockAnchorNanos = System.nanoTime()
+                  targetPts
                 } else {
-                  pendingOutlierPts = None
-                  lastInputVideoPts = inPts
-                  mappedPts
+                  val mappedPts = (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
+                  val diffFromOut = signedPtsDiff(mappedPts, lastOutputPts)
+                  val inputJump = if (lastInputVideoPts >= 0) math.abs(signedPtsDiff(inPts, lastInputVideoPts)) else 0L
+                  if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                    if (pendingOutlierPts.exists(p => math.abs(signedPtsDiff(inPts, p)) <= FreezeFramePacer.RebaseThresholdTicks)) {
+                      val targetPts = computeMonotonicRebasePts(inPts, inDtsOpt)
+                      ptsDeltaTicks = signedPtsDiff(targetPts, inPts) & FreezeFramePacer.PtsMask
+                      pendingOutlierPts = None
+                      lastInputVideoPts = inPts
+                      targetPts
+                    } else {
+                      pendingOutlierPts = Some(inPts)
+                      totalScrubbedPts += 1L
+                      windowPtsScrubs += 1L
+                      computeMonotonicRebasePts(inPts, inDtsOpt)
+                    }
+                  } else {
+                    val dtsBackward = inDtsOpt.exists { inDts =>
+                      val ptsMinusDts = signedPtsDiff(inPts, inDts)
+                      val rawOutDts =
+                        if (ptsMinusDts >= 0L && ptsMinusDts <= FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                          (mappedPts - ptsMinusDts) & FreezeFramePacer.PtsMask
+                        } else {
+                          mappedPts
+                        }
+                      lastOutputDts >= 0L && signedPtsDiff(rawOutDts, lastOutputDts) <= 0L
+                    }
+                    if (diffFromOut < -FreezeFramePacer.RebaseThresholdTicks || diffFromOut > FreezeFramePacer.RebaseThresholdTicks || dtsBackward) {
+                      val targetPts = computeMonotonicRebasePts(inPts, inDtsOpt)
+                      ptsDeltaTicks = signedPtsDiff(targetPts, inPts) & FreezeFramePacer.PtsMask
+                      pendingOutlierPts = None
+                      lastInputVideoPts = inPts
+                      targetPts
+                    } else {
+                      pendingOutlierPts = None
+                      lastInputVideoPts = inPts
+                      mappedPts
+                    }
+                  }
                 }
               } else {
+                justResumedFromFreeze = false
                 lastInputVideoPts = inPts
                 (inPts + ptsDeltaTicks) & FreezeFramePacer.PtsMask
               }
@@ -710,6 +759,18 @@ object MpegTsSync {
                 (outPts - ptsMinusDts) & FreezeFramePacer.PtsMask
               } else {
                 outPts
+              }
+            }
+            if (isVideo) {
+              outDtsOpt match {
+                case Some(outDts) =>
+                  if (lastOutputDts < 0L || signedPtsDiff(outDts, lastOutputDts) > 0L) {
+                    lastOutputDts = outDts
+                  }
+                case None =>
+                  if (lastOutputDts < 0L || signedPtsDiff(outPts, lastOutputDts) > 0L) {
+                    lastOutputDts = outPts
+                  }
               }
             }
             if (outPts != inPts || outDtsOpt != inDtsOpt) {
@@ -964,14 +1025,21 @@ object MpegTsSync {
                 , freezeTicksCount
                 )
                 freezeActive = false
+                justResumedFromFreeze = true
+                freezeTemporalRef = 0
+                pendingOutlierPts = None
                 freezeTicksCount = 0
                 droppingVideoSlice = false
                 requireVideoPesStart = false
                 seenLiveKeyframe = true
-                if (!currentVideoFrameStarted) {
-                  currentVideoFrameStarted = true
-                  currentVideoFrameCorrupt = isCcError || hasOutOfBoundsSlice
+                if (currentVideoFrameStarted) {
+                  windowVideoFramesTotal += 1L
+                  if (!currentVideoFrameCorrupt) {
+                    windowVideoFramesClean += 1L
+                  }
                 }
+                currentVideoFrameStarted = true
+                currentVideoFrameCorrupt = isCcError || hasOutOfBoundsSlice
               } else {
                 val _ = outputBuilder ++= MPEGTS_NULL_PACKET
               }
@@ -1037,9 +1105,11 @@ object MpegTsSync {
                     FreezeFramePacer.parseMpeg2SequenceHeader(arr, pktPayloadOffset, pktPayloadLen).foreach { case (hdr, rows) =>
                       if (candidateSeqHeader.exists(c => c.take(7) == hdr.take(7))) {
                         maxSliceRow = rows
+                        lockedMbWidth = FreezeFramePacer.extractMpeg2MacroblockWidth(hdr)
                         lockedSeqHeader = Some(hdr)
                       } else {
                         candidateSeqHeader = Some(hdr)
+                        lockedMbWidth = FreezeFramePacer.extractMpeg2MacroblockWidth(hdr)
                       }
                     }
                   }
@@ -1062,9 +1132,18 @@ object MpegTsSync {
                     mediaClockAnchorPts = lastOutputPts
                     mediaClockAnchorNanos = now
                   } else {
-                    val elapsedTicks = ((now - mediaClockAnchorNanos) * 90000L) / 1000000000L
-                    val expectedPts = (mediaClockAnchorPts + elapsedTicks) & FreezeFramePacer.PtsMask
-                    if (signedPtsDiff(lastOutputPts, expectedPts) > 0) {
+                    val ptsAdvanceTicks = signedPtsDiff(lastOutputPts, mediaClockAnchorPts)
+                    if (ptsAdvanceTicks >= 0L && ptsAdvanceTicks <= 300000L * 90L) {
+                      val wallElapsedTicks = ((now - mediaClockAnchorNanos) * 90000L) / 1000000000L
+                      val creditTicks = ptsAdvanceTicks - wallElapsedTicks
+                      if (creditTicks > MaxMediaClockBurstCreditTicks) {
+                        mediaClockAnchorPts = (lastOutputPts - MaxMediaClockBurstCreditTicks) & FreezeFramePacer.PtsMask
+                        mediaClockAnchorNanos = now
+                      } else if (wallElapsedTicks >= 90000L && creditTicks >= 0L) {
+                        mediaClockAnchorPts = (mediaClockAnchorPts + wallElapsedTicks) & FreezeFramePacer.PtsMask
+                        mediaClockAnchorNanos = now
+                      }
+                    } else {
                       mediaClockAnchorPts = lastOutputPts
                       mediaClockAnchorNanos = now
                     }
@@ -1173,7 +1252,7 @@ object MpegTsSync {
                 val expectedPts = (mediaClockAnchorPts + elapsedTicks) & FreezeFramePacer.PtsMask
                 signedPtsDiff(expectedPts, lastOutputPts)
               } else 0L
-            val isSilent = videoSilenceNanos >= freezeThreshold.toNanos
+            val isSilent = videoSilenceNanos >= freezeThreshold.toNanos && ptsDeficitTicks >= 0L
             val isDeficit = ptsDeficitTicks >= thresholdTicks && videoSilenceNanos >= freezeTickInterval.toNanos
             if (isSilent || isDeficit) {
               if (!freezeActive) {
@@ -1204,6 +1283,9 @@ object MpegTsSync {
               while (f < framesToEmit) {
                 val basePts = if (lastOutputPts >= 0) lastOutputPts else 90000L
                 lastOutputPts = (basePts + FreezeFramePacer.DefaultVideoStepTicks) & FreezeFramePacer.PtsMask
+                lastOutputDts = lastOutputPts
+                val currentTr = freezeTemporalRef
+                freezeTemporalRef = (freezeTemporalRef + 1) & 0x3FF
                 val _ = b ++= FreezeFramePacer.synthesizeVideoFreezeFrame(
                   vpid
                 , headers.videoStreamType
@@ -1211,6 +1293,8 @@ object MpegTsSync {
                 , includePcr = true
                 , maxSliceRow
                 , () => nextOutboundCc(vpid, hasPayload = true)
+                , temporalReference = currentTr
+                , mbWidth = lockedMbWidth
                 )
                 headers.audioPids.foreach { apid =>
                   val stOpt = headers.audioStreamTypes.get(apid)

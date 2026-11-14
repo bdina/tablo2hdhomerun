@@ -201,6 +201,23 @@ object FreezeFramePacer {
     result
   }
 
+  def extractMpeg2MacroblockWidth(seqHeader: ByteString): Int = {
+    if (seqHeader.length >= 12 &&
+        seqHeader(0) == 0x00.toByte &&
+        seqHeader(1) == 0x00.toByte &&
+        seqHeader(2) == 0x01.toByte &&
+        (seqHeader(3) & 0xFF) == 0xB3) {
+      val horizontalSize = ((seqHeader(4) & 0xFF) << 4) | ((seqHeader(5) & 0xF0) >> 4)
+      if (horizontalSize >= 160 && horizontalSize <= 1920) {
+        math.max(1, math.min(120, (horizontalSize + 15) / 16))
+      } else {
+        120
+      }
+    } else {
+      120
+    }
+  }
+
   def hasMpeg2SequenceHeader(arr: Array[Byte], offset: Int, len: Int): Boolean = {
     if (offset < 0 || len < 4 || offset + len > arr.length) {
       false
@@ -626,13 +643,58 @@ object FreezeFramePacer {
     b.result()
   }
 
+  private val MbAddrIncrementVlc: Array[(Int, Int)] = Array(
+    (0, 0),
+    (0x01, 1),  (0x03, 3),  (0x02, 3),  (0x03, 4),  (0x02, 4),
+    (0x03, 5),  (0x02, 5),  (0x07, 7),  (0x06, 7),  (0x0B, 8),
+    (0x0A, 8),  (0x09, 8),  (0x08, 8),  (0x07, 8),  (0x06, 8),
+    (0x17, 10), (0x16, 10), (0x15, 10), (0x14, 10), (0x13, 10),
+    (0x12, 10), (0x23, 11), (0x22, 11), (0x21, 11), (0x20, 11),
+    (0x1F, 11), (0x1E, 11), (0x1D, 11), (0x1C, 11), (0x1B, 11),
+    (0x1A, 11), (0x19, 11), (0x18, 11)
+  )
+
+  private def encodeFullWidthSlicePayload(mbWidth: Int): Array[Byte] = {
+    val out = new Array[Byte](16)
+    var writeIdx = 0
+    var bitBuf = 0L
+    var bitCount = 0
+
+    def appendBits(code: Int, len: Int): Unit = {
+      bitBuf = (bitBuf << len) | (code.toLong & ((1L << len) - 1L))
+      bitCount += len
+      while (bitCount >= 8) {
+        bitCount -= 8
+        out(writeIdx) = ((bitBuf >>> bitCount) & 0xFFL).toByte
+        writeIdx += 1
+      }
+    }
+
+    appendBits(0x127, 12)
+    var rem = math.max(1, math.min(119, mbWidth - 1))
+    while (rem > 33) {
+      appendBits(0x08, 11)
+      rem -= 33
+    }
+    val (vlcCode, vlcLen) = MbAddrIncrementVlc(rem)
+    appendBits(vlcCode, vlcLen)
+    appendBits(0x07, 5)
+    if (bitCount > 0) {
+      out(writeIdx) = ((bitBuf << (8 - bitCount)) & 0xFFL).toByte
+      writeIdx += 1
+    }
+    Arrays.copyOf(out, writeIdx)
+  }
+
   def synthesizeVideoFreezeFrame(
       videoPid: Int,
       videoStreamType: Option[Int],
       pts: Long,
       includePcr: Boolean,
       maxSliceRow: Int,
-      nextCc: () => Int
+      nextCc: () => Int,
+      temporalReference: Int = 0,
+      mbWidth: Int = 0
   ): ByteString = {
     val isH264 = videoStreamType.contains(0x1B)
 
@@ -644,32 +706,54 @@ object FreezeFramePacer {
       System.arraycopy(slice, 0, out, aud.length, slice.length)
       out
     } else {
+      val tr = temporalReference & 0x3FF
       val picHdr = Array[Byte](
         0x00.toByte, 0x00.toByte, 0x01.toByte, 0x00.toByte,
-        0x00.toByte, 0x17.toByte, 0xFF.toByte, 0xF8.toByte
+        ((tr >> 2) & 0xFF).toByte, (((tr & 0x03) << 6) | 0x17).toByte, 0xFF.toByte, 0xF8.toByte
       )
       val picExt = Array[Byte](
         0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
         0x11.toByte, 0x1F.toByte, 0xF3.toByte, 0x41.toByte, 0x80.toByte
       )
       val sliceRows = math.max(1, math.min(maxSliceRow, 68))
-      val out = new Array[Byte](picHdr.length + picExt.length + (sliceRows * 6))
-      System.arraycopy(picHdr, 0, out, 0, picHdr.length)
-      var writePos = picHdr.length
-      System.arraycopy(picExt, 0, out, writePos, picExt.length)
-      writePos += picExt.length
-      var row = 1
-      while (row <= sliceRows) {
-        out(writePos) = 0x00.toByte
-        out(writePos + 1) = 0x00.toByte
-        out(writePos + 2) = 0x01.toByte
-        out(writePos + 3) = row.toByte
-        out(writePos + 4) = 0x38.toByte
-        out(writePos + 5) = 0x00.toByte
-        writePos += 6
-        row += 1
+      if (mbWidth <= 1) {
+        val out = new Array[Byte](picHdr.length + picExt.length + (sliceRows * 6))
+        System.arraycopy(picHdr, 0, out, 0, picHdr.length)
+        var writePos = picHdr.length
+        System.arraycopy(picExt, 0, out, writePos, picExt.length)
+        writePos += picExt.length
+        var row = 1
+        while (row <= sliceRows) {
+          out(writePos) = 0x00.toByte
+          out(writePos + 1) = 0x00.toByte
+          out(writePos + 2) = 0x01.toByte
+          out(writePos + 3) = row.toByte
+          out(writePos + 4) = 0x38.toByte
+          out(writePos + 5) = 0x00.toByte
+          writePos += 6
+          row += 1
+        }
+        out
+      } else {
+        val slicePayload = encodeFullWidthSlicePayload(mbWidth)
+        val sliceLen = 4 + slicePayload.length
+        val out = new Array[Byte](picHdr.length + picExt.length + (sliceRows * sliceLen))
+        System.arraycopy(picHdr, 0, out, 0, picHdr.length)
+        var writePos = picHdr.length
+        System.arraycopy(picExt, 0, out, writePos, picExt.length)
+        writePos += picExt.length
+        var row = 1
+        while (row <= sliceRows) {
+          out(writePos) = 0x00.toByte
+          out(writePos + 1) = 0x00.toByte
+          out(writePos + 2) = 0x01.toByte
+          out(writePos + 3) = row.toByte
+          System.arraycopy(slicePayload, 0, out, writePos + 4, slicePayload.length)
+          writePos += sliceLen
+          row += 1
+        }
+        out
       }
-      out
     }
 
     val pesHeaderLen = 19

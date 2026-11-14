@@ -2218,5 +2218,214 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = out.slice(188, 376) shouldBe vPusiFrame
       out.drop(376) shouldBe vContSlice
     }
+
+    "cacheFlow should rebase immediately with strictly monotonic DTS and PTS on sub-500ms freeze resumption with M=3 B-frame GOP" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 60.millis
+          , freezeTickInterval = 25.millis
+          , latestMetricsRef = Some(latestMetricsRef)
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      // Initial keyframe at PTS = 90009, DTS = 81000
+      val vInit = buildVideoPesPacket(videoPid, pts = 90009L, dtsOpt = Some(81000L), cc = 1, isKeyframe = true)
+      val _ = queue.offer(pat ++ pmt ++ vInit).isEnqueued shouldBe true
+
+      // Trigger a short (~110ms) sub-500ms freeze so FreezeFramePacer advances lastOutputPts/Dts by 3..6 frames (9009..18018 ticks < 45000)
+      Thread.sleep(115L)
+
+      // Resume with contiguous broadcast PTS/DTS GOP (where inPts = 93012, inDts = 84003 would jump backward without freeze-resume rebase)
+      val vResumeI = buildVideoPesPacket(videoPid, pts = 93012L, dtsOpt = Some(84003L), cc = 2, isKeyframe = true)
+      val vResumeB1 = buildVideoPesPacket(videoPid, pts = 87006L, dtsOpt = Some(87006L), cc = 3, sliceRow = Some(1))
+      val vResumeB2 = buildVideoPesPacket(videoPid, pts = 90009L, dtsOpt = Some(90009L), cc = 4, sliceRow = Some(1))
+      val vResumeP = buildVideoPesPacket(videoPid, pts = 102021L, dtsOpt = Some(93012L), cc = 5, sliceRow = Some(1))
+      val _ = queue.offer(vResumeI ++ vResumeB1 ++ vResumeB2 ++ vResumeP).isEnqueued shouldBe true
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val pktCount = emitted.length / 188
+
+      val videoPesTimestamps = scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      var i = 0
+      while (i < pktCount) {
+        val pkt = emitted.slice(i * 188, (i + 1) * 188).toArray
+        val pid = (((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF))
+        if (pid == videoPid) {
+          val pesOff = FreezeFramePacer.findPesHeaderOffset(pkt, 0)
+          if (pesOff >= 0) {
+            FreezeFramePacer.readPtsDts(pkt, pesOff, 188).foreach { case (pts, dtsOpt) =>
+              videoPesTimestamps += ((pts, dtsOpt.getOrElse(pts)))
+            }
+          }
+        }
+        i += 1
+      }
+
+      // 1 initial + >= 3 synthetic freeze frames + 4 resumed GOP frames
+      val _ = videoPesTimestamps.size should be >= 8
+      // Every single emitted video frame across the freeze and resumption must have strictly increasing DTS (+3003 ticks on resumption)
+      var idx = 1
+      while (idx < videoPesTimestamps.size) {
+        val prevDts = videoPesTimestamps(idx - 1)._2
+        val curDts = videoPesTimestamps(idx)._2
+        val _ = MpegTsSync.signedPtsDiff(curDts, prevDts) should be > 0L
+        idx += 1
+      }
+      val resumedGop = videoPesTimestamps.takeRight(4)
+      val (iPts, iDts) = resumedGop(0)
+      val (b1Pts, b1Dts) = resumedGop(1)
+      val (b2Pts, b2Dts) = resumedGop(2)
+      val (pPts, pDts) = resumedGop(3)
+      // Decode order (DTS) steps by exact +3003 ticks across I -> B1 -> B2 -> P
+      val _ = (b1Dts - iDts) shouldBe 3003L
+      val _ = (b2Dts - b1Dts) shouldBe 3003L
+      val _ = (pDts - b2Dts) shouldBe 3003L
+      // Presentation order (PTS) preserves B1 < B2 < I < P
+      val _ = b1Pts should be < b2Pts
+      val _ = b2Pts should be < iPts
+      val _ = iPts should be < pPts
+      latestMetricsRef.get().ptsScrubs shouldBe 0L
+    }
+
+    "cacheFlow should bypass single-packet outlier trap on > 2s freeze resumption, preserving Frame 1, interleaved audio, and B-frame order" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 60.millis
+          , freezeTickInterval = 25.millis
+          , latestMetricsRef = Some(latestMetricsRef)
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      val vInit = buildVideoPesPacket(videoPid, pts = 90009L, dtsOpt = Some(81000L), cc = 1, isKeyframe = true)
+      val aInit = buildAudioPesPacket(audioPid, pts = 82000L, cc = 1, withValidSyncword = true)
+      val _ = queue.offer(pat ++ pmt ++ vInit ++ aInit).isEnqueued shouldBe true
+
+      Thread.sleep(110L)
+
+      // Resume after a simulated > 5-second upstream PTS jump (inPts = 600009 > 90009 + 180000 MaxSinglePacketPtsJumpTicks)
+      val vResumeI = buildVideoPesPacket(videoPid, pts = 600009L, dtsOpt = Some(591000L), cc = 2, isKeyframe = true)
+      val aInterleaved1 = buildAudioPesPacket(audioPid, pts = 592000L, cc = 2, withValidSyncword = true)
+      val aInterleaved2 = buildAudioPesPacket(audioPid, pts = 594880L, cc = 3, withValidSyncword = true)
+      val vResumeB1 = buildVideoPesPacket(videoPid, pts = 594003L, dtsOpt = Some(594003L), cc = 3, sliceRow = Some(1))
+      val vResumeB2 = buildVideoPesPacket(videoPid, pts = 597006L, dtsOpt = Some(597006L), cc = 4, sliceRow = Some(1))
+      val vResumeP = buildVideoPesPacket(videoPid, pts = 609018L, dtsOpt = Some(600009L), cc = 5, sliceRow = Some(1))
+
+      val _ = queue.offer(vResumeI ++ aInterleaved1 ++ aInterleaved2 ++ vResumeB1 ++ vResumeB2 ++ vResumeP).isEnqueued shouldBe true
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val pktCount = emitted.length / 188
+      val videoPes = scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      var i = 0
+      while (i < pktCount) {
+        val pkt = emitted.slice(i * 188, (i + 1) * 188).toArray
+        val pid = (((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF))
+        if (pid == videoPid) {
+          val pesOff = FreezeFramePacer.findPesHeaderOffset(pkt, 0)
+          if (pesOff >= 0) {
+            FreezeFramePacer.readPtsDts(pkt, pesOff, 188).foreach { case (pts, dtsOpt) =>
+              videoPes += ((pts, dtsOpt.getOrElse(pts)))
+            }
+          }
+        }
+        i += 1
+      }
+
+      val snap = latestMetricsRef.get()
+      // Zero false outlier scrubs; all 5 live video frames and all 3 live audio frames are clean
+      val _ = snap.ptsScrubs shouldBe 0L
+      val _ = snap.videoFramesTotal shouldBe 5L
+      val _ = snap.videoFramesClean shouldBe 5L
+      val _ = snap.audioFramesTotal shouldBe 3L
+      val _ = snap.audioFramesClean shouldBe 3L
+
+      val resumedGop = videoPes.takeRight(4)
+      val (iPts, iDts) = resumedGop(0)
+      val (b1Pts, b1Dts) = resumedGop(1)
+      val (b2Pts, b2Dts) = resumedGop(2)
+      val (pPts, pDts) = resumedGop(3)
+      val _ = (b1Dts - iDts) shouldBe 3003L
+      val _ = (b2Dts - b1Dts) shouldBe 3003L
+      val _ = (pDts - b2Dts) shouldBe 3003L
+      val _ = b1Pts should be < b2Pts
+      val _ = b2Pts should be < iPts
+      iPts should be < pPts
+    }
+
+    "cacheFlow should preserve burst credit across a 60-frame (2.0s) HLS segment burst without falsely triggering FreezeFramePacer" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 128)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 100.millis
+          , freezeTickInterval = 25.millis
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      // Deliver a 60-frame (2.0s PTS = 180,180 ticks) segment burst in a single offer (< 20ms)
+      val burstFrames = (0 until 60).map { idx =>
+        val pts = 90000L + (idx * 3003L)
+        buildVideoPesPacket(
+          videoPid
+        , pts = pts
+        , dtsOpt = Some(pts)
+        , cc = (idx + 1) & 0x0F
+        , isKeyframe = (idx % 15 == 0)
+        , sliceRow = if (idx % 15 == 0) None else Some(1)
+        )
+      }.foldLeft(ByteString.empty)(_ ++ _)
+
+      val _ = queue.offer(pat ++ pmt ++ burstFrames).isEnqueued shouldBe true
+
+      // Wait 130ms (1.3x freezeThreshold = 100ms, well within the 2.0s segment burst credit)
+      Thread.sleep(130L)
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val pktCount = emitted.length / 188
+      var videoPacketCount = 0
+      var i = 0
+      while (i < pktCount) {
+        val pkt = emitted.slice(i * 188, (i + 1) * 188)
+        val pid = (((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF))
+        if (pid == videoPid) {
+          videoPacketCount += 1
+        }
+        i += 1
+      }
+      // Exactly 60 live video packets emitted; zero synthetic freeze-frame packets triggered
+      videoPacketCount shouldBe 60
+    }
   }
 }

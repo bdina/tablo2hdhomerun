@@ -360,6 +360,25 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = false, targetDurationSec = 4, defaultPollSec = 2) shouldBe 500L
   }
 
+  it should "apply 75% adaptive poll delay (1502ms) for nominal Tablo 2.002s segments with targetDuration 2" in {
+    val p = M3U8.Playlist(
+      targetDuration = 2
+    , mediaSequence = 40
+    , segments = Seq(
+        M3U8.Segment("s40.ts", 2.002, None, None)
+      , M3U8.Segment("s41.ts", 2.002, None, None)
+      )
+    , isEndList = false
+    )
+    val state0 = HlsPlaylistPoller.initial("http://host/pl.m3u8")
+    val stateAfterAdvance = HlsPlaylistPoller.onPlaylist(state0, p, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, _) => next
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit")
+    }
+    val _ = HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = true, targetDurationSec = 2, defaultPollSec = 2) shouldBe 1502L
+    HlsPlaylistPoller.pollDelayMs(stateAfterAdvance, playlistAdvanced = false, targetDurationSec = 2, defaultPollSec = 2) shouldBe 500L
+  }
+
   it should "return pollDelayMinMs (500ms) whenever playlistAdvanced is false" in {
     val stateZeroDuration = HlsPlaylistPoller.PollState(
       baseUrl = "http://host/pl.m3u8"

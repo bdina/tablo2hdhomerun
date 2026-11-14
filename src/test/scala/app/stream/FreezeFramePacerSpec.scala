@@ -132,6 +132,28 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       opt.get._2 shouldBe 45
     }
 
+    "extract macroblock width from sequence headers for 1080i, 720p, and 480i" in {
+      val hdr1080 = ByteString(
+        0x00, 0x00, 0x01, 0xB3.toByte,
+        0x78, 0x04, 0x38, 0x12,
+        0x34, 0x56, 0x78, 0x9A.toByte
+      )
+      val hdr720 = ByteString(
+        0x00, 0x00, 0x01, 0xB3.toByte,
+        0x50, 0x02, 0xD0.toByte, 0x12,
+        0x34, 0x56, 0x78, 0x9A.toByte
+      )
+      val hdr480 = ByteString(
+        0x00, 0x00, 0x01, 0xB3.toByte,
+        0x2D, 0x01, 0xE0.toByte, 0x12,
+        0x34, 0x56, 0x78, 0x9A.toByte
+      )
+      val _ = FreezeFramePacer.extractMpeg2MacroblockWidth(hdr1080) shouldBe 120
+      val _ = FreezeFramePacer.extractMpeg2MacroblockWidth(hdr720) shouldBe 80
+      val _ = FreezeFramePacer.extractMpeg2MacroblockWidth(hdr480) shouldBe 45
+      FreezeFramePacer.extractMpeg2MacroblockWidth(ByteString.empty) shouldBe 120
+    }
+
     "clamp out-of-bounds slice start codes in-place" in {
       val payload = Array[Byte](
         0x00.toByte, 0x00.toByte, 0x01.toByte, 0x99.toByte,
@@ -412,6 +434,61 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = pesOffset should be >= 0
       val ptsDts = FreezeFramePacer.readPtsDts(arr, pesOffset, 188)
       ptsDts shouldBe Some((90000L, Some(90000L)))
+    }
+
+    "synthesize full-width MPEG-2 video freeze frame packets with temporal_reference and skipped-MB slices" in {
+      var cc = 0
+      val nextCc = () => { val c = cc; cc = (cc + 1) & 0x0F; c }
+      val bs1080 = FreezeFramePacer.synthesizeVideoFreezeFrame(
+        0x0100, None, 180000L, includePcr = true, maxSliceRow = 68, nextCc, temporalReference = 7, mbWidth = 120
+      )
+      val _ = (bs1080.length % 188) shouldBe 0
+      val pktCount = bs1080.length / 188
+      val _ = pktCount shouldBe 5
+      val arr = bs1080.toArray
+
+      val esBuilder = ByteString.newBuilder
+      var p = 0
+      while (p < pktCount) {
+        val base = p * 188
+        val _ = arr(base) shouldBe 0x47.toByte
+        val _ = (arr(base + 3) & 0x0F) shouldBe p
+        val afc = (arr(base + 3) & 0x30) >> 4
+        val payloadOff = if (afc == 1) base + 4 else base + 5 + (arr(base + 4) & 0xFF)
+        val startOff = if (p == 0) payloadOff + 19 else payloadOff
+        val _ = esBuilder.putBytes(arr, startOff, (base + 188) - startOff)
+        p += 1
+      }
+      val es = esBuilder.result().toArray
+      val _ = es.slice(0, 4) shouldBe Array[Byte](0x00, 0x00, 0x01, 0x00)
+      val decodedTr = ((es(4) & 0xFF) << 2) | ((es(5) & 0xC0) >>> 6)
+      val _ = decodedTr shouldBe 7
+      val picCodingType = (es(5) >>> 3) & 0x07
+      val _ = picCodingType shouldBe 2
+
+      var row = 1
+      while (row <= 68) {
+        val sliceOff = 17 + (row - 1) * 12
+        val _ = es(sliceOff) shouldBe 0x00.toByte
+        val _ = es(sliceOff + 1) shouldBe 0x00.toByte
+        val _ = es(sliceOff + 2) shouldBe 0x01.toByte
+        val _ = (es(sliceOff + 3) & 0xFF) shouldBe row
+        val _ = es(sliceOff + 4) shouldBe 0x12.toByte
+        val _ = es(sliceOff + 5) shouldBe 0x70.toByte
+        val _ = es(sliceOff + 10) shouldBe 0x26.toByte
+        val _ = es(sliceOff + 11) shouldBe 0x70.toByte
+        row += 1
+      }
+
+      val bs720 = FreezeFramePacer.synthesizeVideoFreezeFrame(
+        0x0100, Some(0x02), 270000L, includePcr = false, maxSliceRow = 45, nextCc, temporalReference = 515, mbWidth = 80
+      )
+      val _ = (bs720.length % 188) shouldBe 0
+      val arr720 = bs720.toArray
+      val pesOff720 = FreezeFramePacer.findPesHeaderOffset(arr720, 0)
+      val es720Off = pesOff720 + 19
+      val decodedTr720 = ((arr720(es720Off + 4) & 0xFF) << 2) | ((arr720(es720Off + 5) & 0xC0) >>> 6)
+      decodedTr720 shouldBe 515
     }
 
     "synthesize valid H.264 video freeze frame packet" in {
