@@ -936,6 +936,10 @@ object TabloLegacy {
         , video_details: VideoDetails
         )
         case object NoAvailableTunersError extends Exception("No available tuners")
+        case class ChannelNotFoundError(message: String) extends Exception(message)
+        case class TuneFailedError(message: String) extends Exception(message)
+        case class NoVideoDataError(message: String) extends Exception(message)
+        case class SystemBusyError(message: String) extends Exception(message)
         object JsonProtocol {
           import TabloLegacy.Response.JsonProtocol.uriFormat
           implicit val videoDetailsFormat: JsonFormat[VideoDetails] = jsonFormat2(VideoDetails.apply)
@@ -951,8 +955,69 @@ object TabloLegacy {
         }
       }
 
+      private def classifyLegacyWatchFailure(
+        status: StatusCode
+      , body: String
+      ): Throwable = {
+        val codeInt = status.intValue()
+        val (category, truncated) = HDHomeRunError.classifyUpstreamHttpFailure(status, body)
+        category match {
+          case HDHomeRunError.FailureCategory.ChannelNotFound =>
+            Response.ChannelNotFoundError(s"watch $codeInt: $truncated")
+          case HDHomeRunError.FailureCategory.NoAvailableTuners =>
+            Response.NoAvailableTunersError
+          case HDHomeRunError.FailureCategory.WeakSignal | HDHomeRunError.FailureCategory.TuneFailed | HDHomeRunError.FailureCategory.EmptyBodyTuneFailure =>
+            Response.TuneFailedError(s"watch $codeInt: $truncated")
+          case HDHomeRunError.FailureCategory.SystemBusy =>
+            Response.SystemBusyError(s"watch $codeInt: $truncated")
+        }
+      }
+
+      /** Classifies Legacy Tablo GET /server/tuners responses before JSON unmarshaling. */
+      def classifyTunersResponse(status: StatusCode, body: String): Either[Throwable, Seq[Response.Tuners]] = {
+        import Response.Tuners.JsonProtocol.tunersFormat
+        if (status.isSuccess()) {
+          Try(body.parseJson.convertTo[Seq[Response.Tuners]]).toEither.left.map { ex =>
+            Response.SystemBusyError(s"invalid tuner status response: ${ex.getMessage}")
+          }
+        } else {
+          val truncated = LogConfig.truncate(Option(body).getOrElse("").trim)
+          Left(Response.SystemBusyError(s"tuners ${status.intValue()}: $truncated"))
+        }
+      }
+
+      /** Classifies Legacy Tablo POST /guide/channels/{id}/watch responses before JSON unmarshaling. */
+      def classifyWatchResponse(status: StatusCode, body: String): Either[Throwable, Response.WatchResponse] = {
+        import Response.JsonProtocol.watchResponseFormat
+        if (status.isSuccess()) {
+          Try(body.parseJson.convertTo[Response.WatchResponse]).toEither match {
+            case Right(watch) =>
+              if (watch.playlist_url.toString.trim.nonEmpty) Right(watch)
+              else Left(Response.NoVideoDataError("No playlist URL returned"))
+            case Left(ex) =>
+              Left(Response.TuneFailedError(s"invalid watch response: ${ex.getMessage}"))
+          }
+        } else {
+          Left(classifyLegacyWatchFailure(status, body))
+        }
+      }
+
+      private def rejectResponse(
+        error: HDHomeRunError
+      , contextLabel: String
+      , cause: Option[Throwable] = None
+      , bodyOverride: Option[String] = None
+      ): HttpResponse =
+        HDHomeRunError.rejectResponse(
+          log = log
+        , error = error
+        , context = contextLabel
+        , reason = cause.flatMap(ex => Option(ex.getMessage)).getOrElse(error.reason)
+        , cause = cause
+        , bodyOverride = bodyOverride
+        )
+
       def streamChannel(channelId: Long): pekko.http.scaladsl.server.Route = {
-        import Response.JsonProtocol._
         import app.stream.{MpegTsSync, ResilientHlsSource, StreamMetrics}
 
         val streamId = java.util.UUID.randomUUID.toString.take(8)
@@ -964,17 +1029,25 @@ object TabloLegacy {
 
         val tunersFuture: Future[Seq[Response.Tuners]] =
           HttpCtx.singleRequest(Request.Tuners.httpRequest).flatMap { response =>
-            import Response.Tuners.JsonProtocol.tunersFormat
             log.debug("[channel] http GET /server/tuners status={}", response.status.intValue())
-            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[Response.Tuners]])
+            Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
+              classifyTunersResponse(response.status, body) match {
+                case Right(tuners) => Future.successful(tuners)
+                case Left(err) => Future.failed(err)
+              }
+            }
           }
 
-        def watchChannel(): Future[Response.WatchResponse] = {
+        def watchChannel(): Future[Response.WatchResponse] =
           HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
             log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
-            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Response.WatchResponse])
+            Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
+              classifyWatchResponse(response.status, body) match {
+                case Right(watch) => Future.successful(watch)
+                case Left(err) => Future.failed(err)
+              }
+            }
           }
-        }
 
         def startWatchSession(checkTuners: Boolean): Future[Response.WatchResponse] = {
           val availableFuture =
@@ -1079,17 +1152,20 @@ object TabloLegacy {
               )
             )
           case Failure(Response.NoAvailableTunersError) =>
-            log.info("[channel] no available tuners streamId={} channelId={}", streamId, channelId)
             complete(
-              HttpResponse(
-                StatusCodes.ServiceUnavailable
-              , headers = List(pekko.http.scaladsl.model.headers.RawHeader("X-HDHomeRun-Error", "805 All Tuners In Use"))
-              , entity = "No available tuners"
+              rejectResponse(
+                HDHomeRunError.AllTunersInUse
+              , contextLabel = s"streamId=$streamId channelId=$channelId"
               )
             )
           case Failure(ex) =>
-            log.warn("[channel] stream start failed streamId={} channelId={}", streamId, channelId, ex)
-            complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+            complete(
+              rejectResponse(
+                HDHomeRunError.fromThrowable(ex)
+              , contextLabel = s"streamId=$streamId channelId=$channelId"
+              , cause = Some(ex)
+              )
+            )
         }
       }
 
@@ -1149,14 +1225,32 @@ object TabloLegacy {
                       case Some(channelId) =>
                         streamChannel(channelId)
                       case None =>
-                        complete(HttpResponse(StatusCodes.NotFound, entity = s"Channel v$guideNumber not found"))
+                        complete(
+                          rejectResponse(
+                            HDHomeRunError.UnknownChannel
+                          , contextLabel = s"guideNumber=v$guideNumber"
+                          , bodyOverride = Some(s"Channel v$guideNumber not found")
+                          )
+                        )
                     }
                   case Failure(ex) =>
-                    log.warn("[auto] failed to resolve guideNumber={} from lineup", guideNumber, ex)
-                    complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to resolve channel lineup"))
+                    complete(
+                      rejectResponse(
+                        HDHomeRunError.SystemBusy
+                      , contextLabel = s"guideNumber=v$guideNumber"
+                      , cause = Some(ex)
+                      , bodyOverride = Some("Unable to resolve channel lineup")
+                      )
+                    )
                 }
               case None =>
-                complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "Channel lineup not available"))
+                complete(
+                  rejectResponse(
+                    HDHomeRunError.SystemBusy
+                  , contextLabel = s"guideNumber=v$guideNumber"
+                  , bodyOverride = Some("Channel lineup not available")
+                  )
+                )
             }
           }
         }

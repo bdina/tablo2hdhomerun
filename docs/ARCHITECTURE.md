@@ -237,7 +237,7 @@ Streams fan out to subscribers via a 1024-element `BroadcastHub` buffer. When ne
       actively draining the BroadcastHub via a background sink to avoid upstream backpressure stalls
    b. If idle grace expires without reconnection, DELETE /player/sessions/{token} to release hardware tuner
    c. If upstream ends on its own (when a finite STREAM_RECOVERY_TIMEOUT_SEC is configured and reached), the runner tears down and SessionManager removes the entry immediately (no idle grace)
-6. If no tuners: return 503 Service Unavailable
+6. On pre-stream failure (prior to HTTP 200 commit), return SiliconDust HTTP error responses via `HDHomeRunError` with `X-HDHomeRun-Error` headers (`404` + `801 Unknown Channel`, `503` + `803 System Busy` / `805 All Tuners In Use` / `806 Tune Failed` / `807 No Video Data`)
 ```
 
 ### Program Guide Workflow
@@ -357,6 +357,7 @@ tablo2hdhomerun/
 │   │   │   └── StreamMetrics.scala      # Signal/feed/symbol quality snapshot & HLS collector
 │   │   └── tuner/                       # Tablo legacy & 4th gen implementations
 │   │       ├── HDHomeRunDiscovery.scala # UDP 65001 broadcast discovery responder
+│   │       ├── HDHomeRunError.scala     # SiliconDust HTTP status & X-HDHomeRun-Error mapper
 │   │       ├── HDHomeRunStatus.scala    # SiliconDust GET /status.json tuner telemetry model
 │   │       ├── Tablo4thGen.scala        # 4th gen API, SessionManager, WatchSession
 │   │       └── TabloLegacy.scala        # Legacy Tablo API

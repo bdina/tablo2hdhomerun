@@ -532,7 +532,7 @@ onComplete(acquireFut) {
 1. Generate `clientId = UUID`
 2. Ask SessionManager `Acquire(channelId, clientId, replyTo)`
 3. On `Attached`, serve chunked `video/mp2t` from `source`, with `watchTermination` → `Release`
-4. On `Rejected(NoTuners)` / `Rejected(Failed(_))`, return the same class of HTTP errors as today
+4. On `Rejected(NoTuners)` / `Rejected(Failed(_))` (prior to HTTP `200 OK` pre-roll commit), return SiliconDust HTTP error status + `X-HDHomeRun-Error` via `HDHomeRunError` (`801 Unknown Channel`, `803 System Busy`, `805 All Tuners In Use`, `806 Tune Failed`, `807 No Video Data`)
 
 ### SessionManager (typed actor)
 
@@ -573,7 +573,7 @@ the current per-request path, but as **one instance per channel lease**.
 
 | Event | Behavior |
 |-------|----------|
-| Initial watch fails while Opening | `WatchSession.retryInitialTune` retries with 2s backoff up to `WatchSession.initialTuneTimeout` (`STREAM_RECOVERY_TIMEOUT_SEC` if > 0, or 60s opening budget when `<= 0`) before `AcquireFailed` → `Rejected(Failed(_))`; `WatchSession.classifyWatch503` inspects HTTP 503 response bodies to distinguish tuner exhaustion from weak-signal RF lock failures; client receives pre-roll null keepalive |
+| Initial watch fails while Opening | `WatchSession.retryInitialTune` retries with 2s backoff up to `WatchSession.initialTuneTimeout` (`STREAM_RECOVERY_TIMEOUT_SEC` if > 0, or 60s opening budget when `<= 0`) before `AcquireFailed` → `Rejected(Failed(_))`; `WatchSession.classifyWatch503` / `classifyWatchFailure` inspect HTTP status and JSON payloads to distinguish tuner exhaustion (`NoAvailableTuners` → `805`), weak-signal lock failure (`NoSignalLock` → `806`), missing channel (`ChannelNotFound` → `801`), missing playlist/pre-check-in HLS termination (`NoVideoData` → `807`), and transient busy/auth errors (`SystemBusy` → `803`), returning `X-HDHomeRun-Error` when HTTP headers have not yet been committed; client receives pre-roll null keepalive while waiting |
 | Client releases while Opening | Waiter removed; if all waiters release, `SessionManager` invokes the `Opening.cancel` handle from `SessionRunner.startCancellable` so `retryInitialTune` ceases immediately (and releases any in-flight Tablo session that completes after cancellation) |
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source (`playlistRollover`); hub stays; clients seamless |

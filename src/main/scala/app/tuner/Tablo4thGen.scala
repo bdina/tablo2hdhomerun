@@ -7,7 +7,7 @@ import pekko.actor.typed.scaladsl.AskPattern.{Askable, schedulerFromActorSystem}
 import pekko.actor.typed.scaladsl.Behaviors
 import pekko.actor.typed.{ActorRef, ActorSystem, Behavior}
 import pekko.http.scaladsl.Http
-import pekko.http.scaladsl.model.{ContentTypes, HttpEntity, HttpMethod, HttpMethods, HttpRequest, HttpResponse, MediaType, StatusCode, StatusCodes, Uri}
+import pekko.http.scaladsl.model.{ContentTypes, HttpEntity, HttpHeader, HttpMethod, HttpMethods, HttpRequest, HttpResponse, MediaType, StatusCode, StatusCodes, Uri}
 import pekko.http.scaladsl.server.Directives._
 import pekko.stream.scaladsl.{BroadcastHub, Keep, Source}
 import pekko.stream.{KillSwitches, UniqueKillSwitch}
@@ -60,6 +60,10 @@ object Tablo4thGen {
     case class SessionDeleteFailed(message: String) extends Exception(message) with Error
     case object SessionTokenMissing extends Exception("Session token missing") with Error
     case class WatchFailed(message: String) extends Exception(message) with Error
+    case class NoSignalLock(message: String) extends Exception(message) with Error
+    case class NoVideoData(message: String) extends Exception(message) with Error
+    case class ChannelNotFound(message: String) extends Exception(message) with Error
+    case class SystemBusy(message: String) extends Exception(message) with Error
   }
 
   object Auth {
@@ -1120,15 +1124,27 @@ object Tablo4thGen {
         if (configuredRecoveryTimeoutSec > 0) configuredRecoveryTimeoutSec.seconds
         else initialTuneTimeoutSec.seconds
 
-      def classifyWatch503(body: String): Tablo4thGen.Error = {
-        val trimmed = body.trim
-        val lower = trimmed.toLowerCase
-        if (lower.contains("tuner")) {
-          Tablo4thGen.Error.NoAvailableTuners
-        } else if (trimmed.nonEmpty) {
-          Tablo4thGen.Error.WatchFailed(s"watch 503: ${LogConfig.truncate(trimmed)}")
-        } else {
-          Tablo4thGen.Error.WatchFailed("watch 503: service unavailable (signal lock or tuner busy)")
+      def classifyWatch503(body: String): Tablo4thGen.Error =
+        classifyWatchFailure(StatusCodes.ServiceUnavailable, body)
+
+      /** Classifies non-2xx HTTP responses from Tablo /guide/channels/{id}/watch. */
+      def classifyWatchFailure(status: StatusCode, body: String): Tablo4thGen.Error = {
+        val codeInt = status.intValue()
+        val (category, truncated) = HDHomeRunError.classifyUpstreamHttpFailure(status, body)
+        category match {
+          case HDHomeRunError.FailureCategory.ChannelNotFound =>
+            Tablo4thGen.Error.ChannelNotFound(s"watch $codeInt: $truncated")
+          case HDHomeRunError.FailureCategory.NoAvailableTuners =>
+            Tablo4thGen.Error.NoAvailableTuners
+          case HDHomeRunError.FailureCategory.WeakSignal =>
+            Tablo4thGen.Error.NoSignalLock(s"watch $codeInt: $truncated")
+          case HDHomeRunError.FailureCategory.SystemBusy =>
+            Tablo4thGen.Error.SystemBusy(s"watch $codeInt: $truncated")
+          case HDHomeRunError.FailureCategory.EmptyBodyTuneFailure =>
+            Tablo4thGen.Error.WatchFailed("watch 503: service unavailable (signal lock or tuner busy)")
+          case HDHomeRunError.FailureCategory.TuneFailed =>
+            val prefix = if (status == StatusCodes.ServiceUnavailable) "watch 503:" else s"watch failed: $codeInt"
+            Tablo4thGen.Error.WatchFailed(s"$prefix $truncated")
         }
       }
 
@@ -1193,7 +1209,7 @@ object Tablo4thGen {
         fromResponse(response, None)
 
       def fromResponse(response: Response.Watch4thGenResponse, fallbackToken: Option[String]): Either[String, Session] =
-        response.playlist_url match {
+        response.playlist_url.map(_.trim).filter(_.nonEmpty) match {
           case Some(url) =>
             Right(Session(
               token = response.token.orElse(fallbackToken)
@@ -1837,7 +1853,7 @@ object Tablo4thGen {
                     }
                   case status if !status.isSuccess() =>
                     Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
-                      Future.failed(Tablo4thGen.Error.WatchFailed(s"watch failed: ${status.intValue()} ${LogConfig.truncate(body.trim)}"))
+                      Future.failed(WatchSession.classifyWatchFailure(status, body))
                     }
                   case _ =>
                     Unmarshal(response.entity).to[String].map { body =>
@@ -1920,7 +1936,7 @@ object Tablo4thGen {
               case Right(newSession) =>
                 Future.successful(newSession)
               case Left(message) =>
-                Future.failed(Tablo4thGen.Error.WatchFailed(message))
+                Future.failed(Tablo4thGen.Error.NoVideoData(message))
             }
           }
 
@@ -2211,7 +2227,7 @@ object Tablo4thGen {
                   checkedIn = true
                   val cause = result match {
                     case Failure(ex) => ex
-                    case Success(_) => Tablo4thGen.Error.WatchFailed("stream ended before check-in")
+                    case Success(_) => Tablo4thGen.Error.NoVideoData("stream ended before check-in")
                   }
                   onFailed(cause)
                 }
@@ -2343,6 +2359,26 @@ object Tablo4thGen {
       , pekko.http.scaladsl.model.headers.RawHeader("Access-Control-Allow-Headers", "*")
       )
 
+      def rejectStreamResponse(
+        error: HDHomeRunError
+      , channelDisplay: String
+      , channelId: String
+      , clientId: String
+      , reason: String
+      , cause: Option[Throwable] = None
+      , extraHeaders: Seq[HttpHeader] = Nil
+      , bodyOverride: Option[String] = None
+      ): HttpResponse =
+        HDHomeRunError.rejectResponse(
+          log = log
+        , error = error
+        , context = s"channel=$channelDisplay channelId=$channelId clientId=$clientId"
+        , reason = reason
+        , cause = cause
+        , extraHeaders = extraHeaders
+        , bodyOverride = bodyOverride
+        )
+
       def fetchAndRewritePlaylist(channelId: String, playlistUrl: String): Future[HttpResponse] =
         HttpCtx.singleRequest(HttpRequest(uri = playlistUrl)).flatMap { resp =>
           if (resp.status.isSuccess()) {
@@ -2365,7 +2401,17 @@ object Tablo4thGen {
             }
           } else {
             val _ = resp.entity.discardBytes()
-            Future.successful(HttpResponse(resp.status, entity = "Failed to fetch upstream playlist").withHeaders(corsHeaders))
+            Future.successful(
+              rejectStreamResponse(
+                HDHomeRunError.NoVideoData
+              , channelDisplay = Lineup.channelLabel(channelId)
+              , channelId = channelId
+              , clientId = s"hls-$channelId"
+              , reason = s"upstream playlist status ${resp.status.intValue()}"
+              , extraHeaders = corsHeaders
+              , bodyOverride = Some("Failed to fetch upstream playlist")
+              )
+            )
           }
         }
 
@@ -2373,6 +2419,7 @@ object Tablo4thGen {
 
       def fetchHlsPlaylist(channelId: String): Future[HttpResponse] = {
         val hlsClientId = s"hls-$channelId"
+        val channelDisplay = Lineup.channelLabel(channelId)
         sessionManager.ask[Option[SessionManager.TabloSessionMeta]](replyTo =>
           SessionManager.Request.GetSessionMeta(channelId, replyTo)
         ).flatMap {
@@ -2392,14 +2439,54 @@ object Tablo4thGen {
                     case Some(meta) =>
                       fetchAndRewritePlaylist(channelId, meta.playlistUrl)
                     case None =>
-                      Future.successful(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to get session playlist"))
+                      Future.successful(
+                        rejectStreamResponse(
+                          HDHomeRunError.SystemBusy
+                        , channelDisplay = channelDisplay
+                        , channelId = channelId
+                        , clientId = hlsClientId
+                        , reason = "session meta missing after attach"
+                        , extraHeaders = corsHeaders
+                        , bodyOverride = Some("Unable to get session playlist")
+                        )
+                      )
                   }
                 case SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners) =>
-                  Future.successful(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
+                  Future.successful(
+                    rejectStreamResponse(
+                      HDHomeRunError.AllTunersInUse
+                    , channelDisplay = channelDisplay
+                    , channelId = channelId
+                    , clientId = hlsClientId
+                    , reason = "no available tuners"
+                    , extraHeaders = corsHeaders
+                    )
+                  )
                 case SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)) =>
-                  Future.successful(HttpResponse(StatusCodes.InternalServerError, entity = s"Unable to start stream: ${ex.getMessage}"))
+                  Future.successful(
+                    rejectStreamResponse(
+                      HDHomeRunError.fromThrowable(ex)
+                    , channelDisplay = channelDisplay
+                    , channelId = channelId
+                    , clientId = hlsClientId
+                    , reason = Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)
+                    , cause = Some(ex)
+                    , extraHeaders = corsHeaders
+                    )
+                  )
               }
             }
+        }.recover {
+          case ex =>
+            rejectStreamResponse(
+              HDHomeRunError.fromThrowable(ex)
+            , channelDisplay = channelDisplay
+            , channelId = channelId
+            , clientId = hlsClientId
+            , reason = Option(ex.getMessage).getOrElse(ex.getClass.getSimpleName)
+            , cause = Some(ex)
+            , extraHeaders = corsHeaders
+            )
         }
       }
 
@@ -2452,25 +2539,54 @@ object Tablo4thGen {
             }
         }
 
-        val preRollEnabled = Option(AppContext.config).forall(_.proxy.enablePreRollKeepAlive)
-        if (!preRollEnabled) {
-          onComplete(acquireFut) {
+        def completeAcquireResult(
+          result: Try[SessionManager.Response.Acquire]
+        , attachedLogTag: String
+        ): pekko.http.scaladsl.server.Route =
+          result match {
             case Success(SessionManager.Response.Attached(source)) =>
-              log.info("[channel] attached channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
+              log.info("[channel] {} channel={} channelId={} clientId={}", attachedLogTag, channelDisplay, channelId, clientId)
               val tracked = trackClientStream(channelId, clientId, source)
               respondWithHeaders(streamingHeaders) {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }
             case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners)) =>
-              log.info("[channel] no available tuners channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
-              complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
+              complete(
+                rejectStreamResponse(
+                  HDHomeRunError.AllTunersInUse
+                , channelDisplay = channelDisplay
+                , channelId = channelId
+                , clientId = clientId
+                , reason = "no available tuners"
+                )
+              )
             case Success(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex))) =>
-              log.warn("[channel] acquire failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
-              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+              complete(
+                rejectStreamResponse(
+                  HDHomeRunError.fromThrowable(ex)
+                , channelDisplay = channelDisplay
+                , channelId = channelId
+                , clientId = clientId
+                , reason = Option(ex.getMessage).getOrElse("acquire failed")
+                , cause = Some(ex)
+                )
+              )
             case Failure(ex) =>
-              log.warn("[channel] acquire ask failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
-              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+              complete(
+                rejectStreamResponse(
+                  HDHomeRunError.fromThrowable(ex)
+                , channelDisplay = channelDisplay
+                , channelId = channelId
+                , clientId = clientId
+                , reason = Option(ex.getMessage).getOrElse("acquire ask failed")
+                , cause = Some(ex)
+                )
+              )
           }
+
+        val preRollEnabled = Option(AppContext.config).forall(_.proxy.enablePreRollKeepAlive)
+        if (!preRollEnabled) {
+          onComplete(acquireFut)(completeAcquireResult(_, "attached"))
         } else {
           import org.apache.pekko.actor.typed.scaladsl.adapter._
           val fastWindow = 50.millis
@@ -2479,18 +2595,8 @@ object Tablo4thGen {
           val initialDecision = Future.firstCompletedOf(Seq(acquireAttempt, fastTimer))(ec)
 
           onComplete(initialDecision) {
-            case Success(Some(SessionManager.Response.Attached(source))) =>
-              log.info("[channel] fast-attached channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
-              val tracked = trackClientStream(channelId, clientId, source)
-              respondWithHeaders(streamingHeaders) {
-                complete(HttpEntity.Chunked.fromData(contentType, tracked))
-              }
-            case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners))) =>
-              log.info("[channel] no available tuners channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
-              complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "No available tuners"))
-            case Success(Some(SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)))) =>
-              log.warn("[channel] acquire failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
-              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+            case Success(Some(resp)) =>
+              completeAcquireResult(Success(resp), "fast-attached")
             case Success(None) =>
               log.info("[channel] pre-roll keepalive active channel={} channelId={} clientId={}", channelDisplay, channelId, clientId)
               val realSourceFut: Future[Source[ByteString, NotUsed]] = acquireFut.flatMap {
@@ -2499,7 +2605,7 @@ object Tablo4thGen {
                   Future.successful(source)
                 case SessionManager.Response.Rejected(SessionManager.RejectReason.NoTuners) =>
                   log.info("[channel] no available tuners channel={} channelId={} clientId={}", Lineup.channelLabel(channelId), channelId, clientId)
-                  Future.failed(new RuntimeException("No available tuners"))
+                  Future.failed(Tablo4thGen.Error.NoAvailableTuners)
                 case SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)) =>
                   log.warn("[channel] acquire failed channel={} channelId={} clientId={}", Lineup.channelLabel(channelId), channelId, clientId, ex)
                   Future.failed(ex)
@@ -2514,8 +2620,7 @@ object Tablo4thGen {
                 complete(HttpEntity.Chunked.fromData(contentType, tracked))
               }
             case Failure(ex) =>
-              log.warn("[channel] initialDecision failed channel={} channelId={} clientId={}", channelDisplay, channelId, clientId, ex)
-              complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to stream channel"))
+              completeAcquireResult(Failure(ex), "fast-attached")
           }
         }
       }
@@ -2650,14 +2755,41 @@ object Tablo4thGen {
                     case Some(channelId) =>
                       streamChannel(channelId)
                     case None =>
-                      complete(HttpResponse(StatusCodes.NotFound, entity = s"Channel v$guideNumber not found"))
+                      complete(
+                        rejectStreamResponse(
+                          HDHomeRunError.UnknownChannel
+                        , channelDisplay = s"v$guideNumber"
+                        , channelId = s"v$guideNumber"
+                        , clientId = "auto"
+                        , reason = "channel not found in lineup"
+                        , bodyOverride = Some(s"Channel v$guideNumber not found")
+                        )
+                      )
                   }
                 case Failure(ex) =>
-                  log.warn("[auto] failed to resolve guideNumber={} from lineup", guideNumber, ex)
-                  complete(HttpResponse(StatusCodes.InternalServerError, entity = "Unable to resolve channel lineup"))
+                  complete(
+                    rejectStreamResponse(
+                      HDHomeRunError.SystemBusy
+                    , channelDisplay = s"v$guideNumber"
+                    , channelId = s"v$guideNumber"
+                    , clientId = "auto"
+                    , reason = "lineup resolution failed"
+                    , cause = Some(ex)
+                    , bodyOverride = Some("Unable to resolve channel lineup")
+                    )
+                  )
               }
             case None =>
-              complete(HttpResponse(StatusCodes.ServiceUnavailable, entity = "Channel lineup not available"))
+              complete(
+                rejectStreamResponse(
+                  HDHomeRunError.SystemBusy
+                , channelDisplay = s"v$guideNumber"
+                , channelId = s"v$guideNumber"
+                , clientId = "auto"
+                , reason = "lineup actor unavailable"
+                , bodyOverride = Some("Channel lineup not available")
+                )
+              )
           }
         }
       }

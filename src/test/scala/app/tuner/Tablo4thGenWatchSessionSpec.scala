@@ -47,8 +47,9 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     }
   }
 
-  it should "fail when playlist url is missing" in {
-    Tablo4thGen.Channel.WatchSession.fromResponse(response(playlistUrl = None)) shouldBe Left("No playlist URL returned")
+  it should "fail when playlist url is missing or blank" in {
+    val _ = Tablo4thGen.Channel.WatchSession.fromResponse(response(playlistUrl = None)) shouldBe Left("No playlist URL returned")
+    Tablo4thGen.Channel.WatchSession.fromResponse(response(playlistUrl = Some("   "))) shouldBe Left("No playlist URL returned")
   }
 
   it should "preserve fallback token when response omits token" in {
@@ -299,14 +300,33 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     Tablo4thGen.Channel.WatchSession.initialTuneTimeout(25) shouldBe 25.seconds
   }
 
-  "WatchSession.classifyWatch503" should "distinguish tuner exhaustion from signal lock or generic 503 failures" in {
+  "WatchSession.classifyWatch503" should "distinguish tuner exhaustion from signal lock, busy, or generic 503 failures" in {
     val _ = Tablo4thGen.Channel.WatchSession.classifyWatch503("""{"error":"No available tuners"}""") shouldBe Tablo4thGen.Error.NoAvailableTuners
     val signalErr = Tablo4thGen.Channel.WatchSession.classifyWatch503("""{"error":"Weak signal: failed to lock channel"}""")
-    val _ = signalErr shouldBe a[Tablo4thGen.Error.WatchFailed]
+    val _ = signalErr shouldBe a[Tablo4thGen.Error.NoSignalLock]
     val _ = signalErr.getMessage should include("Weak signal")
+    val jsonSignalErr = Tablo4thGen.Channel.WatchSession.classifyWatch503(
+      """{"error":{"code":"playback_failed","details":"no_signal_lock","description":"Unable to tune or get signal lock"}}"""
+    )
+    val _ = jsonSignalErr shouldBe a[Tablo4thGen.Error.NoSignalLock]
+    val _ = HDHomeRunError.fromThrowable(jsonSignalErr) shouldBe HDHomeRunError.TuneFailed
+    val busyErr = Tablo4thGen.Channel.WatchSession.classifyWatch503("""{"error":"System busy: channel scan"}""")
+    val _ = busyErr shouldBe a[Tablo4thGen.Error.SystemBusy]
     val emptyErr = Tablo4thGen.Channel.WatchSession.classifyWatch503("")
     val _ = emptyErr shouldBe a[Tablo4thGen.Error.WatchFailed]
     emptyErr.getMessage should include("watch 503")
+  }
+
+  "WatchSession.classifyWatchFailure" should "classify non-503 status codes into typed errors" in {
+    import org.apache.pekko.http.scaladsl.model.StatusCodes
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.NotFound, """{"error":"not_found"}""") shouldBe a[Tablo4thGen.Error.ChannelNotFound]
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.Unauthorized, "") shouldBe a[Tablo4thGen.Error.SystemBusy]
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.Forbidden, "") shouldBe a[Tablo4thGen.Error.SystemBusy]
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.BadGateway, "") shouldBe a[Tablo4thGen.Error.SystemBusy]
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.GatewayTimeout, "") shouldBe a[Tablo4thGen.Error.SystemBusy]
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.Conflict, """{"error":"no_available_tuners"}""") shouldBe Tablo4thGen.Error.NoAvailableTuners
+    val _ = Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.ServiceUnavailable, """{"error":{"details":"no_signal_lock"}}""") shouldBe a[Tablo4thGen.Error.NoSignalLock]
+    Tablo4thGen.Channel.WatchSession.classifyWatchFailure(StatusCodes.InternalServerError, "unexpected error") shouldBe a[Tablo4thGen.Error.WatchFailed]
   }
 
   "WatchSession.retryInitialTune" should "stop retrying immediately when cancelled" in {

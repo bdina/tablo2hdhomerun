@@ -242,7 +242,7 @@ Every 30 seconds (and on stream completion), an `INFO` log line is emitted:
 ### Plex Live TV & DVR Recommendations
 
 1. **Cold Tuning & Pre-Roll Keep-Alive**: Tablo 4th Gen hardware takes 8.5 to 9.0 seconds to lock onto an OTA broadcast frequency and start internal transcoding. Plex Media Server's Live TV grabber times out if zero bytes are received within ~9 seconds. With `STREAM_PRE_ROLL_KEEP_ALIVE=true` (enabled by default), `tablo2hdhomerun` responds immediately with `HTTP 200 OK Chunked` and trickles ISO/IEC 13818-1 compliant MPEG-TS null packets (~100 kbps) to keep Plex's connection alive and active. As soon as the Tablo tuner finishes locking, the stream transitions seamlessly to live broadcast.
-2. **Channel Lineup Cleanup**: In Plex Web (**Settings $\rightarrow$ Live TV & DVR $\rightarrow$ Channels**), disable any un-tunable or weak subchannels (for example, subchannels that return HTTP 503 "No available tuners" due to weak antenna reception). This prevents Plex from automatically attempting to route tuning requests to inactive or unreceivable frequencies.
+2. **Channel Lineup Cleanup**: In Plex Web (**Settings $\rightarrow$ Live TV & DVR $\rightarrow$ Channels**), disable any un-tunable or weak subchannels (for example, subchannels that consistently fail to lock due to weak antenna reception). Pre-stream failures (as well as Legacy watch errors, tuner exhaustion, and unknown channels) return SiliconDust `X-HDHomeRun-Error` headers (`801 Unknown Channel`, `803 System Busy`, `805 All Tuners In Use`, `806 Tune Failed`, `807 No Video Data`); note that once `HTTP 200 OK` pre-roll keepalive bytes start flowing to keep Plex waiting across 4th-gen cold retries, HTTP cannot retroactively emit a trailing `503`.
 3. **All-Day Viewing & Transcode Scratch Sizing**: Plex Media Server retains an unpruned live time-shift buffer in `/transcode` for the entire duration of a live TV session (~1.2–5.5 GB/hour depending on broadcast bitrate, or ~10 GB over 7.5 hours). For all-day TV watching (8–16+ hours), mount `/transcode` to an NVMe/SSD directory or size your `tmpfs` ramdisk to at least `24G` (`tmpfs: - /transcode:size=24G,mode=1777`) so Plex does not abort the session with `No space left on device`.
 4. **Ideal End-User Experience & Failure Recovery**:
    - **Continuous Playback During Instability**: When OTA reception drops or the Tablo tuner hiccups, Plex clients (Apple TV, iOS, Android TV, Roku, Plex Web) remain in active playback state instead of exiting with fatal error dialogs ("Playback Error" or "Can't Play This: Format isn't supported").
@@ -351,6 +351,7 @@ docker run -d \
 | `POST /lineup.post?scan=abort` | Empty / 200 OK | Abort channel scan |
 | `GET /lineup.m3u` | `application/x-mpegURL` | Open standard M3U channel playlist with EXTINF tags |
 | `GET /channel/{id}` | `video/mp2t` | Continuous chunked MPEG-TS stream (for Plex, HDHR clients) |
+| `GET /auto/v{guideNumber}` | `video/mp2t` | Resolve virtual channel guide number and stream MPEG-TS (with SiliconDust `X-HDHomeRun-Error` error headers) |
 | `GET /channel/{id}.m3u8` | `application/x-mpegURL` | Native HLS playlist with rewritten proxied segment URIs |
 | `GET /channel/{id}/segment/{url}` | `video/mp2t` | Proxied HLS video segment with CORS and caching headers |
 | `GET /guide.xml` | `text/xml` | XMLTV program guide |
