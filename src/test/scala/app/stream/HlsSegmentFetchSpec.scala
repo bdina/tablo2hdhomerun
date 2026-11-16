@@ -11,7 +11,10 @@ import org.apache.pekko.http.scaladsl.model.headers.RawHeader
 @RunWith(classOf[JUnitRunner])
 class HlsSegmentFetchSpec extends AnyFlatSpec with Matchers {
 
-  private val rangeRequest = HlsSegmentFetch.RangeRequest(offset = 1000L, length = 500L)
+  private val rangeRequest = HlsSegmentFetch.RangeRequest.create(offset = 1000L, length = 500L) match {
+    case req: HlsSegmentFetch.RangeRequest => req
+    case err: RangeError => throw err
+  }
 
   "HlsSegmentFetch.validateRangedResponse" should "accept matching 206 Content-Range" in {
     val headers = Seq(RawHeader("Content-Range", "bytes 1000-1499/5000"))
@@ -124,9 +127,10 @@ class HlsSegmentFetchSpec extends AnyFlatSpec with Matchers {
     val _ = HlsSegmentFetch.buildSegmentRequest("http://host/seg.ts", None).getHeader("Range").isPresent shouldBe false
   }
 
-  "HlsSegmentFetch.RangeRequest" should "reject negative offset or non-positive length" in {
-    val _ = an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(-1L, 100L)
-    val _ = an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(0L, 0L)
-    an[IllegalArgumentException] should be thrownBy HlsSegmentFetch.RangeRequest(100L, -10L)
+  "HlsSegmentFetch.RangeRequest.create" should "reject negative offset or non-positive length as RangeError" in {
+    val _ = HlsSegmentFetch.RangeRequest.create(-1L, 100L) shouldBe a[RangeError.InvalidOffset]
+    val _ = HlsSegmentFetch.RangeRequest.create(0L, 0L) shouldBe a[RangeError.InvalidLength]
+    val _ = HlsSegmentFetch.RangeRequest.create(100L, -10L) shouldBe a[RangeError.InvalidLength]
+    RangeError.InvalidOffset(-1L).getStackTrace shouldBe empty
   }
 }

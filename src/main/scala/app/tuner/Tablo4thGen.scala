@@ -29,15 +29,16 @@ import org.slf4j.LoggerFactory
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Success, Try, boundary}
+import scala.util.boundary.break
 
 import spray.json._
 import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
 import app.config.TabloAuthEnv
-import app.stream.{HlsPlaylistPoller, MpegTsSync, StreamBackend}
-import app.sys.LogConfig
+import app.stream.{HlsError, HlsPlaylistPoller, MpegTsSync, StreamBackend}
+import app.sys.{LogConfig, SafeJson}
 
 object Tablo4thGen {
   val log = LoggerFactory.getLogger(this.getClass)
@@ -45,26 +46,8 @@ object Tablo4thGen {
   val LIGHTHOUSE_BASE_URL = "https://lighthousetv.ewscloud.com/api/v2"
   val USER_AGENT = "Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)"
 
-  sealed trait Error extends Exception
-  object Error {
-    case object MissingEmail extends Exception("TABLO_EMAIL is required for 4th gen mode") with Error
-    case object MissingPassword extends Exception("TABLO_PASSWORD is required for 4th gen mode") with Error
-    case class LoginFailed(message: String) extends Exception(s"Login failed: $message") with Error
-    case object NoProfilesFound extends Exception("No profiles found in account") with Error
-    case class DeviceNotFound(name: String) extends Exception(s"No device found matching name: $name") with Error
-    case object NoDevicesFound extends Exception("No devices found in account") with Error
-    case class SelectFailed(message: String) extends Exception(s"Select failed: $message") with Error
-    case object NoAvailableTuners extends Exception("No available tuners") with Error
-    case object WatchCancelled extends Exception("Watch cancelled") with Error
-    case class SessionFailed(message: String, status: Option[StatusCode] = None) extends Exception(message) with Error
-    case class SessionDeleteFailed(message: String) extends Exception(message) with Error
-    case object SessionTokenMissing extends Exception("Session token missing") with Error
-    case class WatchFailed(message: String) extends Exception(message) with Error
-    case class NoSignalLock(message: String) extends Exception(message) with Error
-    case class NoVideoData(message: String) extends Exception(message) with Error
-    case class ChannelNotFound(message: String) extends Exception(message) with Error
-    case class SystemBusy(message: String) extends Exception(message) with Error
-  }
+  type Error = FourthGenError
+  val Error = FourthGenError
 
   object Auth {
     val log = LoggerFactory.getLogger(this.getClass)
@@ -100,123 +83,188 @@ object Tablo4thGen {
     import scala.concurrent.Await
     import pekko.http.scaladsl.unmarshalling.Unmarshal
 
+    case class TabloCredentials(email: String, password: String)
+    case class SelectedTarget(profile: AccountProfile, device: AccountDevice)
+
     @volatile private var _authContext: Option[AuthContext] = None
     @volatile private var _tabloAuth: Option[TabloAuthEnv] = None
 
     def authContext: Option[AuthContext] = _authContext
 
+    def validateCredentials(tabloAuth: TabloAuthEnv): TabloCredentials | FourthGenError = boundary {
+      val email = tabloAuth.email match {
+        case Some(value) => value
+        case None =>
+          log.error("[auth] missing env name=TABLO_EMAIL")
+          break(FourthGenError.MissingEmail)
+      }
+      val password = tabloAuth.password match {
+        case Some(value) => value
+        case None =>
+          log.error("[auth] missing env name=TABLO_PASSWORD")
+          break(FourthGenError.MissingPassword)
+      }
+      TabloCredentials(email, password)
+    }
+
+    def selectProfileAndDevice(
+      accountInfo: AccountInfo
+    , deviceNameFilter: Option[String]
+    ): SelectedTarget | FourthGenError = boundary {
+      val profile = accountInfo.profiles.flatMap(_.headOption) match {
+        case Some(p) => p
+        case None    => break(FourthGenError.NoProfilesFound)
+      }
+      val devices = accountInfo.devices.getOrElse(Seq.empty)
+      val device = deviceNameFilter match {
+        case Some(name) =>
+          devices.find(_.name.toLowerCase.contains(name.toLowerCase)) match {
+            case Some(d) => d
+            case None    => break(FourthGenError.DeviceNotFound(name))
+          }
+        case None =>
+          devices.find(_.reachability.contains("local")).orElse(devices.headOption) match {
+            case Some(d) => d
+            case None    => break(FourthGenError.NoDevicesFound)
+          }
+      }
+      SelectedTarget(profile, device)
+    }
+
     def authenticate(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): Future[AuthContext] = {
-      val HttpCtx = Http()
-
-      val tablo = AppContext.config.tablo
-      val email = tabloAuth.email.getOrElse {
-        log.error("[auth] missing env name=TABLO_EMAIL")
-        throw Tablo4thGen.Error.MissingEmail
-      }
-      val password = tabloAuth.password.getOrElse {
-        log.error("[auth] missing env name=TABLO_PASSWORD")
-        throw Tablo4thGen.Error.MissingPassword
-      }
-
-      log.info("[auth] initialize email={}", email)
-
       import JsonProtocol._
       implicit val ec = system.executionContext
 
-      for {
-        loginResp <- {
-          val loginUri = Uri(s"$LIGHTHOUSE_BASE_URL/login/")
-          val loginBody = LoginRequest(email, password).toJson.compactPrint
-          log.debug("[auth] http POST /login/")
-          val request = HttpRequest(
-            method = HttpMethods.POST
-          , uri = loginUri
-          , entity = HttpEntity(ContentTypes.`application/json`, loginBody)
-          )
-          HttpCtx.singleRequest(request).flatMap { response =>
-            log.debug("[auth] login status={}", response.status.intValue())
-            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[LoginResponse])
-          }
-        }
-        accessToken = loginResp.access_token.getOrElse {
-          throw Tablo4thGen.Error.LoginFailed(loginResp.message.getOrElse("unknown error"))
-        }
-        accountInfo <- {
-          val accountUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/")
-          log.debug("[auth] http GET /account/")
-          import pekko.http.scaladsl.model.headers._
-          val request = HttpRequest(
-            method = HttpMethods.GET
-          , uri = accountUri
-          , headers = Seq(Authorization(OAuth2BearerToken(accessToken)))
-          )
-          HttpCtx.singleRequest(request).flatMap { response =>
-            log.debug("[auth] account status={}", response.status.intValue())
-            Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[AccountInfo])
-          }
-        }
-        profile = accountInfo.profiles.flatMap(_.headOption).getOrElse {
-          throw Tablo4thGen.Error.NoProfilesFound
-        }
-        device = {
-          val devices = accountInfo.devices.getOrElse(Seq.empty)
-          val deviceNameFilter = tablo.deviceName
-          deviceNameFilter match {
-            case Some(name) =>
-              devices.find(_.name.toLowerCase.contains(name.toLowerCase)).getOrElse {
-                throw Tablo4thGen.Error.DeviceNotFound(name)
+      validateCredentials(tabloAuth) match {
+        case err: FourthGenError => Future.failed(err)
+        case TabloCredentials(email, password) =>
+          val HttpCtx = Http()
+          val tablo = AppContext.config.tablo
+          log.info("[auth] initialize email={}", email)
+
+          def postLogin(): Future[String] = {
+            val loginUri = Uri(s"$LIGHTHOUSE_BASE_URL/login/")
+            val loginBody = LoginRequest(email, password).toJson.compactPrint
+            log.debug("[auth] http POST /login/")
+            val request = HttpRequest(
+              method = HttpMethods.POST
+            , uri = loginUri
+            , entity = HttpEntity(ContentTypes.`application/json`, loginBody)
+            )
+            HttpCtx.singleRequest(request).flatMap { response =>
+              val code = response.status.intValue()
+              log.debug("[auth] login status={}", code)
+              Unmarshal(response.entity).to[String].flatMap { body =>
+                SafeJson.parseAs[LoginResponse](body) match {
+                  case Success(loginResp) =>
+                    loginResp.access_token match {
+                      case Some(token) => Future.successful(token)
+                      case None =>
+                        val msg = loginResp.message.getOrElse(if (response.status.isSuccess()) "unknown error" else s"HTTP $code")
+                        Future.failed(FourthGenError.LoginFailed(msg))
+                    }
+                  case Failure(ex) =>
+                    if (!response.status.isSuccess()) {
+                      Future.failed(FourthGenError.LoginFailed(s"HTTP $code ${LogConfig.truncate(body)}"))
+                    } else {
+                      Future.failed(ex)
+                    }
+                }
               }
-            case None =>
-              devices.find(_.reachability.contains("local")).orElse(devices.headOption).getOrElse {
-                throw Tablo4thGen.Error.NoDevicesFound
-              }
-          }
-        }
-        _ = log.info("[auth] device selected name={} serverId={}", device.name, device.serverId)
-        selectResp <- {
-          val selectUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/select/")
-          val selectBody = SelectRequest(pid = profile.identifier, sid = device.serverId).toJson.compactPrint
-          log.debug("[auth] http POST /account/select/")
-          import pekko.http.scaladsl.model.headers._
-          val request = HttpRequest(
-            method = HttpMethods.POST
-          , uri = selectUri
-          , headers = Seq(Authorization(OAuth2BearerToken(accessToken)))
-          , entity = HttpEntity(ContentTypes.`application/json`, selectBody)
-          )
-          HttpCtx.singleRequest(request).flatMap { response =>
-            log.debug("[auth] select status={}", response.status.intValue())
-            Unmarshal(response.entity).to[String].map { body =>
-              log.debug("[auth] select body={}", LogConfig.truncate(body))
-              body.parseJson.convertTo[SelectResponse]
             }
           }
-        }
-        lighthouseToken = selectResp.token.getOrElse {
-          throw Tablo4thGen.Error.SelectFailed(selectResp.message.getOrElse("unknown error"))
-        }
-      } yield {
-        val deviceUrl = device.url.map(Uri(_)).getOrElse {
-          Uri(tablo.deviceBaseUri)
-        }
-        val ctx = AuthContext(
-          accessToken = accessToken
-        , lighthouseToken = lighthouseToken
-        , deviceKey = tablo.deviceKey
-        , hashKey = tablo.hashKey
-        , deviceUrl = deviceUrl
-        , profileId = profile.identifier
-        , serverId = device.serverId
-        )
-        _authContext = Some(ctx)
-        log.info("[auth] complete deviceUrl={}", ctx.deviceUrl)
-        ctx
+
+          def fetchAccount(accessToken: String): Future[SelectedTarget] = {
+            val accountUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/")
+            log.debug("[auth] http GET /account/")
+            import pekko.http.scaladsl.model.headers._
+            val request = HttpRequest(
+              method = HttpMethods.GET
+            , uri = accountUri
+            , headers = Seq(Authorization(OAuth2BearerToken(accessToken)))
+            )
+            HttpCtx.singleRequest(request).flatMap { response =>
+              val code = response.status.intValue()
+              log.debug("[auth] account status={}", code)
+              Unmarshal(response.entity).to[String].flatMap { body =>
+                SafeJson.parseAs[AccountInfo](body) match {
+                  case Success(accountInfo) =>
+                    selectProfileAndDevice(accountInfo, tablo.deviceName) match {
+                      case err: FourthGenError    => Future.failed(err)
+                      case target: SelectedTarget => Future.successful(target)
+                    }
+                  case Failure(ex) =>
+                    if (!response.status.isSuccess()) {
+                      Future.failed(FourthGenError.LoginFailed(s"account HTTP $code ${LogConfig.truncate(body)}"))
+                    } else {
+                      Future.failed(ex)
+                    }
+                }
+              }
+            }
+          }
+
+          def selectDevice(accessToken: String, target: SelectedTarget): Future[String] = {
+            val selectUri = Uri(s"$LIGHTHOUSE_BASE_URL/account/select/")
+            val selectBody = SelectRequest(pid = target.profile.identifier, sid = target.device.serverId).toJson.compactPrint
+            log.debug("[auth] http POST /account/select/")
+            import pekko.http.scaladsl.model.headers._
+            val request = HttpRequest(
+              method = HttpMethods.POST
+            , uri = selectUri
+            , headers = Seq(Authorization(OAuth2BearerToken(accessToken)))
+            , entity = HttpEntity(ContentTypes.`application/json`, selectBody)
+            )
+            HttpCtx.singleRequest(request).flatMap { response =>
+              val code = response.status.intValue()
+              log.debug("[auth] select status={}", code)
+              Unmarshal(response.entity).to[String].flatMap { body =>
+                log.debug("[auth] select body={}", LogConfig.truncate(body))
+                SafeJson.parseAs[SelectResponse](body) match {
+                  case Success(selectResp) =>
+                    selectResp.token match {
+                      case Some(token) => Future.successful(token)
+                      case None =>
+                        val msg = selectResp.message.getOrElse(if (response.status.isSuccess()) "unknown error" else s"HTTP $code")
+                        Future.failed(FourthGenError.SelectFailed(msg))
+                    }
+                  case Failure(ex) =>
+                    if (!response.status.isSuccess()) {
+                      Future.failed(FourthGenError.SelectFailed(s"HTTP $code ${LogConfig.truncate(body)}"))
+                    } else {
+                      Future.failed(ex)
+                    }
+                }
+              }
+            }
+          }
+
+          for {
+            accessToken <- postLogin()
+            target <- fetchAccount(accessToken)
+            _ = log.info("[auth] device selected name={} serverId={}", target.device.name, target.device.serverId)
+            lighthouseToken <- selectDevice(accessToken, target)
+          } yield {
+            val deviceUrl = target.device.url.map(Uri(_)).getOrElse(Uri(tablo.deviceBaseUri))
+            val ctx = AuthContext(
+              accessToken = accessToken
+            , lighthouseToken = lighthouseToken
+            , deviceKey = tablo.deviceKey
+            , hashKey = tablo.hashKey
+            , deviceUrl = deviceUrl
+            , profileId = target.profile.identifier
+            , serverId = target.device.serverId
+            )
+            _authContext = Some(ctx)
+            log.info("[auth] complete deviceUrl={}", ctx.deviceUrl)
+            ctx
+          }
       }
     }
 
-    def initialize(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): AuthContext = {
+    def initialize(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): Try[AuthContext] = {
       _tabloAuth = Some(tabloAuth)
-      Await.result(authenticate(tabloAuth), 30.seconds)
+      Try(Await.result(authenticate(tabloAuth), 30.seconds))
     }
 
     def refresh()(implicit system: ActorSystem[?]): Future[AuthContext] = {
@@ -227,7 +275,7 @@ object Tablo4thGen {
         case None =>
           _authContext match {
             case Some(ctx) => Future.successful(ctx)
-            case None => Future.failed(Tablo4thGen.Error.MissingEmail)
+            case None => Future.failed(FourthGenError.MissingEmail)
           }
       }
     }
@@ -522,8 +570,14 @@ object Tablo4thGen {
             if ((response.status == StatusCodes.Unauthorized || response.status == StatusCodes.Forbidden) && allowRefresh) {
               val _ = response.entity.discardBytes()
               Auth.refresh().flatMap(refreshed => fetchGuideChannels(refreshed, allowRefresh = false))
+            } else if (!response.status.isSuccess()) {
+              val code = response.status.intValue()
+              val _ = response.entity.discardBytes()
+              Future.failed(FourthGenError.SessionFailed(s"guide channels HTTP $code", Some(response.status)))
             } else {
-              Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[ChannelLineup]])
+              Unmarshal(response.entity).to[String].flatMap { body =>
+                Future.fromTry(SafeJson.parseAs[Seq[ChannelLineup]](body))
+              }
             }
           }
         }
@@ -858,7 +912,7 @@ object Tablo4thGen {
           HttpCtx.singleRequest(request).flatMap { response =>
             if (response.status.isSuccess()) {
               Unmarshal(response.entity).to[String].map { body =>
-                Try(body.parseJson.convertTo[Seq[Guide.GuideAiring]]).getOrElse(Seq.empty)
+                SafeJson.parseAs[Seq[Guide.GuideAiring]](body).getOrElse(Seq.empty)
               }
             } else {
               log.debug("[guide] airings status={} channelId={} date={}", response.status.intValue(), channelId, date)
@@ -915,25 +969,30 @@ object Tablo4thGen {
             Future.successful(Seq.empty)
           } else {
             Unmarshal(response.entity).to[String].flatMap { body =>
-              val channels = body.parseJson.convertTo[Seq[Lineup.ChannelLineup]]
-              channels.foreach(Lineup.registerChannel)
-              log.info("[guide] scan channels count={}", channels.size)
+              SafeJson.parseAs[Seq[Lineup.ChannelLineup]](body) match {
+                case Failure(ex) =>
+                  log.error("[guide] failed to parse channels JSON", ex)
+                  Future.successful(Seq.empty)
+                case Success(channels) =>
+                  channels.foreach(Lineup.registerChannel)
+                  log.info("[guide] scan channels count={}", channels.size)
 
-              val guideFutures = channels.map { channel =>
-                val (major, minor, callSign) = channel.kind match {
-                  case "ota" =>
-                    val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
-                    (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
-                  case "ott" =>
-                    val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
-                    (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
-                  case _ =>
-                    (0, 0, channel.name)
-                }
-                fetchAiringsForChannel(channel.identifier, callSign, major, minor, currentAuth)
+                  val guideFutures = channels.map { channel =>
+                    val (major, minor, callSign) = channel.kind match {
+                      case "ota" =>
+                        val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
+                        (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
+                      case "ott" =>
+                        val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
+                        (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
+                      case _ =>
+                        (0, 0, channel.name)
+                    }
+                    fetchAiringsForChannel(channel.identifier, callSign, major, minor, currentAuth)
+                  }
+
+                  Future.sequence(guideFutures)
               }
-
-              Future.sequence(guideFutures)
             }
           }
         }.recover {
@@ -1165,7 +1224,7 @@ object Tablo4thGen {
           if (isCancelled()) {
             val _ = promise.tryFailure(Tablo4thGen.Error.WatchCancelled)
           } else {
-            tune(n).onComplete {
+            Try(tune(n)).fold(Future.failed, identity).onComplete {
               case Success(session) =>
                 if (isCancelled()) {
                   onCancelRelease(session)
@@ -1205,19 +1264,28 @@ object Tablo4thGen {
 
       def keepalivePath(token: String): String = s"${sessionPath(token)}/keepalive"
 
-      def fromResponse(response: Response.Watch4thGenResponse): Either[String, Session] =
-        fromResponse(response, None)
-
-      def fromResponse(response: Response.Watch4thGenResponse, fallbackToken: Option[String]): Either[String, Session] =
+      def decodeSession(
+        response: Response.Watch4thGenResponse
+      , fallbackToken: Option[String] = None
+      ): Session | FourthGenError =
         response.playlist_url.map(_.trim).filter(_.nonEmpty) match {
           case Some(url) =>
-            Right(Session(
+            Session(
               token = response.token.orElse(fallbackToken)
             , expires = response.expires.flatMap(value => scala.util.Try(java.time.Instant.parse(value)).toOption)
             , keepalive = response.keepalive
             , playlistUrl = url
-            ))
-          case None => Left("No playlist URL returned")
+            )
+          case None => FourthGenError.NoVideoData("No playlist URL returned")
+        }
+
+      def fromResponse(response: Response.Watch4thGenResponse): Either[String, Session] =
+        fromResponse(response, None)
+
+      def fromResponse(response: Response.Watch4thGenResponse, fallbackToken: Option[String]): Either[String, Session] =
+        decodeSession(response, fallbackToken) match {
+          case session: Session   => Right(session)
+          case err: FourthGenError => Left(err.getMessage)
         }
 
       def keepaliveDelaySec(session: Session, now: java.time.Instant = java.time.Instant.now()): Option[Int] =
@@ -1856,9 +1924,9 @@ object Tablo4thGen {
                       Future.failed(WatchSession.classifyWatchFailure(status, body))
                     }
                   case _ =>
-                    Unmarshal(response.entity).to[String].map { body =>
+                    Unmarshal(response.entity).to[String].flatMap { body =>
                       log.debug("[channel] watch body={} leaseId={}", LogConfig.truncate(body), leaseId)
-                      body.parseJson.convertTo[Response.Watch4thGenResponse]
+                      Future.fromTry(SafeJson.parseAs[Response.Watch4thGenResponse](body))
                     }
                 }
               }
@@ -1890,8 +1958,11 @@ object Tablo4thGen {
             }(ec)
           }
 
-        def parseSessionResponse(body: String, fallbackToken: Option[String]): Either[String, WatchSession.Session] =
-          WatchSession.fromResponse(body.parseJson.convertTo[Response.Watch4thGenResponse], fallbackToken)
+        def parseSessionResponse(body: String, fallbackToken: Option[String]): WatchSession.Session | FourthGenError =
+          SafeJson.parseAs[Response.Watch4thGenResponse](body) match {
+            case Failure(ex) => FourthGenError.SessionFailed(Option(ex.getMessage).getOrElse("invalid session JSON"))
+            case Success(resp) => WatchSession.decodeSession(resp, fallbackToken)
+          }
 
         def requestSession(
           path: String
@@ -1905,14 +1976,15 @@ object Tablo4thGen {
             if (response.status.isSuccess()) {
               Unmarshal(response.entity).to[String].flatMap { body =>
                 parseSessionResponse(body, fallbackToken) match {
-                  case Right(session) => Future.successful(session)
-                  case Left(message) => Future.failed(Tablo4thGen.Error.SessionFailed(message))
+                  case session: WatchSession.Session    => Future.successful(session)
+                  case err: FourthGenError.NoVideoData => Future.failed(FourthGenError.SessionFailed(err.getMessage))
+                  case err: FourthGenError             => Future.failed(err)
                 }
               }
             } else {
               val _ = response.entity.discardBytes()
               Future.failed(
-                Tablo4thGen.Error.SessionFailed(
+                FourthGenError.SessionFailed(
                   s"session ${method.value} failed: ${response.status.intValue()}"
                 , Some(response.status)
                 )
@@ -1927,16 +1999,16 @@ object Tablo4thGen {
               log.debug("[channel] keepalive POST {} leaseId={}", WatchSession.keepalivePath(token), leaseId)
               requestSession(WatchSession.keepalivePath(token), HttpMethods.POST, Some(token))
             case None =>
-              Future.failed(Tablo4thGen.Error.SessionTokenMissing)
+              Future.failed(FourthGenError.SessionTokenMissing)
           }
 
         def retuneWatchSession(): Future[WatchSession.Session] =
           watchChannel().flatMap { data =>
-            WatchSession.fromResponse(data) match {
-              case Right(newSession) =>
+            WatchSession.decodeSession(data) match {
+              case newSession: WatchSession.Session =>
                 Future.successful(newSession)
-              case Left(message) =>
-                Future.failed(Tablo4thGen.Error.NoVideoData(message))
+              case err: FourthGenError =>
+                Future.failed(err)
             }
           }
 
@@ -2061,7 +2133,7 @@ object Tablo4thGen {
                     case WatchSession.ProbeOutcome.ClosedByTablo =>
                       log.warn("[channel] session closed by tablo channel={} leaseId={}, triggering cold retune", channelDisplay, leaseId)
                       sessionClosedByTablo.set(true)
-                      streamKillSwitch.get().foreach(_.abort(app.stream.HlsBackend.HlsError.SessionEnded))
+                      streamKillSwitch.get().foreach(_.abort(HlsError.SessionEnded))
                       Future.successful(false)
 
                     case WatchSession.ProbeOutcome.ProbeExhausted =>
@@ -2072,7 +2144,7 @@ object Tablo4thGen {
                       , channelDisplay
                       , leaseId
                       )
-                      streamKillSwitch.get().foreach(_.abort(app.stream.HlsBackend.HlsError.SessionEnded))
+                      streamKillSwitch.get().foreach(_.abort(HlsError.SessionEnded))
                       Future.successful(false)
                   }
                 }
@@ -2873,11 +2945,13 @@ object Tablo4thGen {
       log.debug("[tuner-state] http GET /server/tuners uri={}", tunersUri)
       Http().singleRequest(request).flatMap { response =>
         if (response.status.isSuccess()) {
-          Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[TunerSlot]])
+          Unmarshal(response.entity).to[String].flatMap { body =>
+            Future.fromTry(SafeJson.parseAs[Seq[TunerSlot]](body))
+          }
         } else {
           val statusCode = response.status.intValue()
           val _ = response.entity.discardBytes()
-          Future.failed(new RuntimeException(s"Tablo /server/tuners returned HTTP $statusCode"))
+          Future.failed(FourthGenError.SystemBusy(s"Tablo /server/tuners returned HTTP $statusCode"))
         }
       }
     }
@@ -2905,12 +2979,16 @@ object Tablo4thGen {
         log.debug("[tuner-state] http GET {} uri={}", trimmedPath, channelUri)
         Http().singleRequest(request).flatMap { response =>
           if (response.status.isSuccess()) {
-            Unmarshal(response.entity).to[String].map { body =>
-              val obj = body.parseJson.convertTo[Lineup.DeviceChannelObject]
-              if (obj.channel.source.forall(_ == "ota")) {
-                val _ = Lineup.registerDeviceChannel(obj)
+            Unmarshal(response.entity).to[String].flatMap { body =>
+              SafeJson.parseAs[Lineup.DeviceChannelObject](body) match {
+                case Success(obj) =>
+                  if (obj.channel.source.forall(_ == "ota")) {
+                    val _ = Lineup.registerDeviceChannel(obj)
+                  }
+                  Future.successful(Some(obj))
+                case Failure(ex) =>
+                  Future.failed(ex)
               }
-              Some(obj)
             }
           } else {
             val statusCode = response.status.intValue()
@@ -3128,9 +3206,10 @@ object Tablo4thGen {
       log.debug("[startup] server/info status={}", response.status.intValue())
       if (response.status.isSuccess()) {
         Unmarshal(response.entity).to[String].map { body =>
-          val serverInfo = body.parseJson.convertTo[Channel.Response.ServerInfo]
-          val tuners = serverInfo.detectedTuners.getOrElse(2)
-          tuners
+          SafeJson.parseAs[Channel.Response.ServerInfo](body)
+            .toOption
+            .flatMap(_.detectedTuners)
+            .getOrElse(2)
         }
       } else {
         val _ = response.entity.discardBytes()

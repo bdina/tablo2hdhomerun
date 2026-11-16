@@ -386,4 +386,54 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     val _ = ex shouldBe Tablo4thGen.Error.WatchCancelled
     releasedToken.get() shouldBe Some("leaked-tok")
   }
+
+  "WatchSession.decodeSession" should "return Session or FourthGenError union values without throwing" in {
+    val _ = app.tuner.WatchSession.decodeSession(response()) match {
+      case session: Tablo4thGen.Channel.WatchSession.Session =>
+        session.playlistUrl shouldBe "http://example.com/playlist.m3u8"
+      case err: FourthGenError =>
+        fail(s"expected session, got $err")
+    }
+    val _ = app.tuner.WatchSession.decodeSession(response(playlistUrl = None)) shouldBe
+      FourthGenError.NoVideoData("No playlist URL returned")
+    FourthGenError.NoVideoData("x").getStackTrace shouldBe empty
+  }
+
+  "Tablo4thGen.Auth validators" should "return union domain errors instead of throwing" in {
+    val missingEmail = app.config.TabloAuthEnv(email = None, password = Some("secret"))
+    val missingPass = app.config.TabloAuthEnv(email = Some("user@example.com"), password = None)
+    val validEnv = app.config.TabloAuthEnv(email = Some("user@example.com"), password = Some("secret"))
+
+    val _ = Tablo4thGen.Auth.validateCredentials(missingEmail) shouldBe FourthGenError.MissingEmail
+    val _ = Tablo4thGen.Auth.validateCredentials(missingPass) shouldBe FourthGenError.MissingPassword
+    val _ = Tablo4thGen.Auth.validateCredentials(validEnv) shouldBe Tablo4thGen.Auth.TabloCredentials("user@example.com", "secret")
+
+    val profile = Tablo4thGen.Auth.AccountProfile("p1", "Main")
+    val localDev = Tablo4thGen.Auth.AccountDevice("s1", "Living Room", None, None, Some("local"))
+    val remoteDev = Tablo4thGen.Auth.AccountDevice("s2", "Basement", None, None, Some("remote"))
+
+    val noProfiles = Tablo4thGen.Auth.AccountInfo(None, Some(Seq.empty), Some(Seq(localDev)), None, None)
+    val _ = Tablo4thGen.Auth.selectProfileAndDevice(noProfiles, None) shouldBe FourthGenError.NoProfilesFound
+
+    val noDevices = Tablo4thGen.Auth.AccountInfo(None, Some(Seq(profile)), Some(Seq.empty), None, None)
+    val _ = Tablo4thGen.Auth.selectProfileAndDevice(noDevices, None) shouldBe FourthGenError.NoDevicesFound
+
+    val withDevices = Tablo4thGen.Auth.AccountInfo(None, Some(Seq(profile)), Some(Seq(remoteDev, localDev)), None, None)
+    val _ = Tablo4thGen.Auth.selectProfileAndDevice(withDevices, Some("Kitchen")) shouldBe FourthGenError.DeviceNotFound("Kitchen")
+    val _ = Tablo4thGen.Auth.selectProfileAndDevice(withDevices, Some("basement")) shouldBe Tablo4thGen.Auth.SelectedTarget(profile, remoteDev)
+    Tablo4thGen.Auth.selectProfileAndDevice(withDevices, None) shouldBe Tablo4thGen.Auth.SelectedTarget(profile, localDev)
+  }
+
+  "Tablo4thGen.Auth.initialize" should "return Failure(FourthGenError.MissingEmail) instead of throwing" in {
+    val sys = org.apache.pekko.actor.typed.ActorSystem(
+      org.apache.pekko.actor.typed.scaladsl.Behaviors.empty[Any]
+    , "auth-init-failure-spec"
+    )
+    try {
+      Tablo4thGen.Auth.initialize(app.config.TabloAuthEnv(email = None, password = None))(sys) shouldBe
+        scala.util.Failure(FourthGenError.MissingEmail)
+    } finally {
+      sys.terminate()
+    }
+  }
 }

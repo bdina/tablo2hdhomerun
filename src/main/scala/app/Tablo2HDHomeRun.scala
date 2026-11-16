@@ -181,55 +181,60 @@ object Tablo2HDHomeRun {
 
     logStartupConfig(config)
 
-    val routes = config.tablo.gen match {
+    val maybeRoutes = config.tablo.gen match {
       case TabloGen.FourthGen =>
         implicit val sys: ActorSystem[?] = context.system
-        val authContext = app.tuner.Tablo4thGen.Auth.initialize(tabloAuth)
-        val tuners = config.proxy.tunerCount match {
-          case Some(overrideCount) =>
-            log.info("[startup] using configured tunerCount override={}", overrideCount)
-            overrideCount
-          case None =>
-            val detected = app.tuner.Tablo4thGen.detectTunerCount(authContext)
-            log.info("[startup] detected 4th gen hardware tuner count={}", detected)
-            detected
-        }
-        if (AppContext.discover != null && AppContext.discover.TunerCount != tuners) {
-          AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
-        }
-        val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
-        val sessionManager = context.spawn(
-          app.tuner.Tablo4thGen.Channel.SessionManager.withCancel(
-            startRunner = { (channelId, self) =>
-              app.tuner.Tablo4thGen.Channel.SessionRunner.startCancellable(
-                channelId = channelId
+        app.tuner.Tablo4thGen.Auth.initialize(tabloAuth) match {
+          case Failure(err) =>
+            log.error("[startup] 4th gen authentication failed: {}", err.getMessage)
+            None
+          case Success(authContext) =>
+            val tuners = config.proxy.tunerCount match {
+              case Some(overrideCount) =>
+                log.info("[startup] using configured tunerCount override={}", overrideCount)
+                overrideCount
+              case None =>
+                val detected = app.tuner.Tablo4thGen.detectTunerCount(authContext)
+                log.info("[startup] detected 4th gen hardware tuner count={}", detected)
+                detected
+            }
+            if (AppContext.discover != null && AppContext.discover.TunerCount != tuners) {
+              AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
+            }
+            val lineup = context.spawn(app.tuner.Tablo4thGen.Lineup.LineupActor(authContext), "lineup-actor-4thgen")
+            val sessionManager = context.spawn(
+              app.tuner.Tablo4thGen.Channel.SessionManager.withCancel(
+                startRunner = { (channelId, self) =>
+                  app.tuner.Tablo4thGen.Channel.SessionRunner.startCancellable(
+                    channelId = channelId
+                  , authContext = authContext
+                  , onCheckIn = (meta, hubSource, teardown, cachedHeaders) =>
+                      self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.CheckIn(channelId, meta, hubSource, teardown, cachedHeaders)
+                  , onFailed = cause =>
+                      self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.AcquireFailed(channelId, cause)
+                  , onUpstreamEnded = endedLeaseId =>
+                      self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.UpstreamEnded(channelId, endedLeaseId)
+                  )
+                }
+              , totalTuners = tuners
+              , idleGrace = config.proxy.idleGraceSec.seconds
+              )
+            , "session-manager-4thgen"
+            )
+            val tunerStateActor = context.spawn(
+              app.tuner.Tablo4thGen.TunerState.TunerStateActor()
+            , "tuner-state-actor-4thgen"
+            )
+            if (config.proxy.tunerStatePollIntervalSec > 0) {
+              val _ = app.tuner.Tablo4thGen.TunerState.startStream(
+                tunerStateActor = tunerStateActor
+              , sessionManager = sessionManager
               , authContext = authContext
-              , onCheckIn = (meta, hubSource, teardown, cachedHeaders) =>
-                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.CheckIn(channelId, meta, hubSource, teardown, cachedHeaders)
-              , onFailed = cause =>
-                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.AcquireFailed(channelId, cause)
-              , onUpstreamEnded = endedLeaseId =>
-                  self ! app.tuner.Tablo4thGen.Channel.SessionManager.Command.UpstreamEnded(channelId, endedLeaseId)
+              , pollInterval = config.proxy.tunerStatePollIntervalSec.seconds
               )
             }
-          , totalTuners = tuners
-          , idleGrace = config.proxy.idleGraceSec.seconds
-          )
-        , "session-manager-4thgen"
-        )
-        val tunerStateActor = context.spawn(
-          app.tuner.Tablo4thGen.TunerState.TunerStateActor()
-        , "tuner-state-actor-4thgen"
-        )
-        if (config.proxy.tunerStatePollIntervalSec > 0) {
-          val _ = app.tuner.Tablo4thGen.TunerState.startStream(
-            tunerStateActor = tunerStateActor
-          , sessionManager = sessionManager
-          , authContext = authContext
-          , pollInterval = config.proxy.tunerStatePollIntervalSec.seconds
-          )
+            Some(app.tuner.Tablo4thGen.routes(lineup, sessionManager, authContext))
         }
-        app.tuner.Tablo4thGen.routes(lineup, sessionManager, authContext)
       case TabloGen.Legacy =>
         implicit val sys: ActorSystem[?] = context.system
         val tuners = config.proxy.tunerCount match {
@@ -245,12 +250,16 @@ object Tablo2HDHomeRun {
           AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
         }
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
-        Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route(lineup) ~ Guide.route ~ Favicon.route
+        Some(Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route(lineup) ~ Guide.route ~ Favicon.route)
     }
 
-    startHttp(config, routes, daemon)
-
-    Behaviors.empty
+    maybeRoutes match {
+      case Some(routes) =>
+        startHttp(config, routes, daemon)
+        Behaviors.empty
+      case None =>
+        Behaviors.stopped
+    }
   }
 
   implicit def system: ActorSystem[pekko.NotUsed] = AppContext.system

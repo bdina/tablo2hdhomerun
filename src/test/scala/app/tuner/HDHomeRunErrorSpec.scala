@@ -11,7 +11,7 @@ import org.scalatestplus.junit.JUnitRunner
 import java.io.IOException
 import java.util.concurrent.{CompletionException, ExecutionException, TimeoutException}
 
-import app.stream.{HlsBackend, ResilientHlsSource}
+import app.stream.{HlsBackend, HlsError, ResilientHlsSource}
 
 @RunWith(classOf[JUnitRunner])
 class HDHomeRunErrorSpec extends AnyFlatSpec with Matchers {
@@ -95,5 +95,14 @@ class HDHomeRunErrorSpec extends AnyFlatSpec with Matchers {
     val _ = HDHomeRunError.fromThrowable(new ExecutionException(new CompletionException(Tablo4thGen.Error.NoSignalLock("wrapped")))) shouldBe HDHomeRunError.TuneFailed
     val _ = HDHomeRunError.fromThrowable(new StreamTcpException("connect failed")) shouldBe HDHomeRunError.SystemBusy
     HDHomeRunError.fromThrowable(new RuntimeException("unexpected")) shouldBe HDHomeRunError.TuneFailed
+  }
+
+  "Flat error ADTs" should "preserve NoStackTrace and alias compatibility" in {
+    val _ = HlsBackend.HlsError.SessionEnded shouldBe HlsError.SessionEnded
+    val _ = Tablo4thGen.Error.NoAvailableTuners shouldBe FourthGenError.NoAvailableTuners
+    val _ = TabloLegacy.Channel.Response.NoAvailableTunersError shouldBe LegacyError.NoAvailableTunersError
+    val _ = FourthGenError.NoAvailableTuners.getStackTrace shouldBe empty
+    val _ = LegacyError.NoAvailableTunersError.getStackTrace shouldBe empty
+    HlsError.SessionEnded.getStackTrace shouldBe empty
   }
 }

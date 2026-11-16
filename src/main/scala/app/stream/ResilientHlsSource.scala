@@ -31,7 +31,9 @@ object ResilientHlsSource {
 
   val MPEGTS_DISCONTINUITY_PACKET: ByteString = MpegTsSync.MPEGTS_DISCONTINUITY_PACKET
 
-  final class StallTimeoutException(message: String) extends java.util.concurrent.TimeoutException(message)
+  final class StallTimeoutException(message: String)
+    extends java.util.concurrent.TimeoutException(message)
+      with scala.util.control.NoStackTrace
 
   private sealed trait Elem
   private final case class Real(data: ByteString) extends Elem

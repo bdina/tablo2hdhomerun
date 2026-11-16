@@ -56,9 +56,9 @@ object HlsPlaylistPoller {
       case emit @ Emit(next, segments) if segments.isEmpty && shouldProbeSession(next) =>
         checkSessionAlive().map { alive =>
           if (alive) emit
-          else Fail(HlsBackend.HlsError.SessionEnded)
+          else Fail(HlsError.SessionEnded)
         }
-      case fail @ Fail(HlsBackend.HlsError.PlaylistFetchError(status))
+      case fail @ Fail(HlsError.PlaylistFetchError(status))
           if status == org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound =>
         checkSessionAlive().map { alive =>
           val nextFailures = state.fetchFailures + 1
@@ -72,7 +72,7 @@ object HlsPlaylistPoller {
             , Seq.empty
             )
           } else if (!alive) {
-            Fail(HlsBackend.HlsError.SessionEnded)
+            Fail(HlsError.SessionEnded)
           } else {
             fail
           }
@@ -145,15 +145,16 @@ object HlsPlaylistPoller {
   , defaultPollSec: Int
   ): Outcome = {
     if (playlist.isEndList) {
-      Fail(HlsBackend.HlsError.SessionEnded)
+      Fail(HlsError.SessionEnded)
     } else {
       val allSegments = segmentInfos(state.baseUrl, playlist)
       val newLastSeq = playlist.mediaSequence + playlist.segments.size
       val isReset =
         state.lastSeq > 0 &&
-        allSegments.nonEmpty &&
-        (allSegments.last.sequence < (state.lastSeq - math.max(sequenceResetThreshold, allSegments.size)) ||
-          (playlist.mediaSequence <= 1 && allSegments.last.sequence < state.lastSeq))
+        allSegments.lastOption.exists { lastSeg =>
+          lastSeg.sequence < (state.lastSeq - math.max(sequenceResetThreshold, allSegments.size)) ||
+            (playlist.mediaSequence <= 1 && lastSeg.sequence < state.lastSeq)
+        }
       val isFirstPoll = state.lastSeq == 0 || isReset
       val effectiveLastSeq = if (isReset) 0 else state.lastSeq
       val candidates = if (isFirstPoll) {
@@ -188,7 +189,7 @@ object HlsPlaylistPoller {
 
   def isFatalError(error: Throwable): Boolean =
     error match {
-      case HlsBackend.HlsError.PlaylistFetchError(status) =>
+      case HlsError.PlaylistFetchError(status) =>
         import org.apache.pekko.http.scaladsl.model.StatusCodes
         status == StatusCodes.NotFound ||
         status == StatusCodes.Gone ||
@@ -203,14 +204,14 @@ object HlsPlaylistPoller {
     } else {
       val n = state.fetchFailures + 1
       if (n >= maxFetchFailures) {
-        Fail(HlsBackend.HlsError.PollExhausted)
+        Fail(HlsError.PollExhausted)
       } else {
         Emit(state.copy(fetchFailures = n), Seq.empty)
       }
     }
 
   def onFetchError(state: PollState, maxFetchFailures: Int): Outcome =
-    onFetchError(state, maxFetchFailures, HlsBackend.HlsError.PollExhausted)
+    onFetchError(state, maxFetchFailures, HlsError.PollExhausted)
 
   def onPlaylistNotModified(state: PollState): Outcome =
     Emit(

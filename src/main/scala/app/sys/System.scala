@@ -13,9 +13,21 @@ import pekko.stream.scaladsl.{Keep, Sink, Source}
 import org.slf4j.{Logger, LoggerFactory}
 
 import scala.concurrent.duration._
-import scala.util.{Failure, Success, Try}
+import scala.util.{Failure, Success, Try, boundary}
+import scala.util.boundary.break
+import scala.util.control.NoStackTrace
 
 import app.AppContext
+
+/** Typed domain failures for local filesystem and transcoding workflows. */
+sealed trait TranscodeError extends Exception with NoStackTrace
+
+object TranscodeError {
+  case class DuplicateFile(f: File) extends Exception(s"duplicate file: $f") with TranscodeError
+  case class IncompleteFile(f: File) extends Exception(s"incomplete file: $f") with TranscodeError
+  case class InvalidPath(f: File) extends Exception(s"file has no parent directory: $f") with TranscodeError
+  case class MissingXattr(path: Path) extends Exception(s"user-defined file attributes unsupported for path: $path") with TranscodeError
+}
 
 object FsUtil {
   import java.nio.charset.Charset
@@ -29,10 +41,11 @@ object FsUtil {
       val LOCK = "lock"
       val ENCODED = "encoded"
     }
-    def write(path: Path, key: String, value: String): Try[Int] = Try {
-      val xattr = Files.getFileAttributeView(path, classOf[Xattr])
-      xattr.write(key, Charset.defaultCharset.encode(value))
-    }
+    def write(path: Path, key: String, value: String): Try[Int] =
+      Option(Files.getFileAttributeView(path, classOf[Xattr])) match {
+        case Some(xattr) => Try(xattr.write(key, Charset.defaultCharset.encode(value)))
+        case None        => Failure(TranscodeError.MissingXattr(path))
+      }
     def lock(path: Path): Try[Unit] =
       write(path, Key.FS_STATE, Value.LOCK).map(_ => ())
     def encoded(path: Path): Try[Unit] =
@@ -118,11 +131,8 @@ object FFMpegDelegate {
     case class Status(code: Int, replyTo: ActorRef[Request]) extends Response
   }
 
-  trait Error extends Exception
-  object Error {
-    case class DuplicateFile(f: File) extends Exception(s"duplicate file: $f") with Error
-    case class IncompleteFile(f: File) extends Exception(s"incomplete file: $f") with Error
-  }
+  type Error = TranscodeError
+  val Error = TranscodeError
 
   def getBaseName(file: File): Option[String] = {
     val name = file.getName
@@ -147,6 +157,38 @@ object FFMpegDelegate {
     , "-global_quality", "30"
     , out
     )
+  }
+
+  val destExt = "mp4"
+  private val companionLog = LoggerFactory.getLogger(this.getClass)
+
+  /** Validates transcode input readiness and acquires the extended-attribute lock without throwing. */
+  def prepare(file: File): Try[Path] = boundary {
+    val path = file.toPath
+
+    val result = FsUtil.Attr.lock(path)
+    companionLog.debug("[transcode] lock path={} success={}", path, result.isSuccess)
+
+    val parent = Option(file.getParentFile) match {
+      case Some(p) => p
+      case None    => break(Failure(TranscodeError.InvalidPath(file)))
+    }
+
+    val destName =
+      getBaseName(file)
+        .map(n => s"${n}.${destExt}")
+        .getOrElse("")
+
+    val destFile = Paths.get(parent.toPath.toString, destName)
+    if (destFile.toFile.exists) {
+      companionLog.warn("[transcode] duplicate destination file={}", file)
+      break(Failure(TranscodeError.DuplicateFile(file)))
+    }
+    if (file.lastModified > System.currentTimeMillis - 30000) {
+      companionLog.warn("[transcode] file still copying file={}", file)
+      break(Failure(TranscodeError.IncompleteFile(file)))
+    }
+    Success(file.toPath)
   }
 
   def apply(file: File): Behavior[Request] =
@@ -214,32 +256,7 @@ case class FFMpegDelegate(
 
   def getBaseName(file: File): Option[String] = FFMpegDelegate.getBaseName(file)
 
-  val destExt = "mp4"
-
-  def prepare(file: File): Try[Path] = {
-    val path = file.toPath
-
-    val result = FsUtil.Attr.lock(path)
-    log.debug("[transcode] lock path={} success={}", path, result.isSuccess)
-
-    val rootPath = file.getParentFile.toPath
-
-    val destName =
-      getBaseName(file)
-        .map(n => s"${n}.${destExt}")
-        .getOrElse("")
-
-    val destFile = Paths.get(rootPath.toString, destName)
-    if (destFile.toFile.exists) {
-      log.warn("[transcode] duplicate destination file={}", file)
-      Failure(Error.DuplicateFile(file))
-    } else if (file.lastModified > System.currentTimeMillis - 30000) {
-      log.warn("[transcode] file still copying file={}", file)
-      Failure(Error.IncompleteFile(file))
-    } else {
-      Success(file.toPath)
-    }
-  }
+  def prepare(file: File): Try[Path] = FFMpegDelegate.prepare(file)
 
   def release(file: File): Try[Unit] = {
     val path = file.toPath

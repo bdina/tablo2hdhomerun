@@ -18,7 +18,7 @@ import spray.json._
 import scala.concurrent.duration._
 
 import app.config.AppConfig
-import app.tuner.HDHomeRunError
+import app.tuner.{HDHomeRunError, LegacyError}
 import app.tuner.TabloLegacy._
 import app.tuner.TabloLegacy.Response.Discover
 
@@ -170,31 +170,39 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
   }
 
   "TabloLegacy.Channel response classifiers" should "map tuner and watch HTTP responses cleanly" in {
-    val _ = Channel.classifyTunersResponse(StatusCodes.OK, """[{"in_use":false}]""").map(_.size) shouldBe Right(1)
-    val _ = Channel.classifyTunersResponse(StatusCodes.ServiceUnavailable, """{"error":"busy"}""")
-      .left.map(HDHomeRunError.fromThrowable) shouldBe Left(HDHomeRunError.SystemBusy)
+    def expectTunersError(status: StatusCode, body: String, expected: HDHomeRunError): Unit =
+      Channel.classifyTunersResponse(status, body) match {
+        case err: LegacyError => val _ = HDHomeRunError.fromThrowable(err) shouldBe expected
+        case other => fail(s"expected LegacyError, got $other")
+      }
+
+    def expectWatchError(status: StatusCode, body: String, expected: HDHomeRunError): Unit =
+      Channel.classifyWatchResponse(status, body) match {
+        case err: LegacyError => val _ = HDHomeRunError.fromThrowable(err) shouldBe expected
+        case other => fail(s"expected LegacyError, got $other")
+      }
+
+    Channel.classifyTunersResponse(StatusCodes.OK, """[{"in_use":false}]""") match {
+      case err: LegacyError => fail(s"unexpected error: $err")
+      case tuners: Seq[?]   => val _ = tuners.size shouldBe 1
+    }
+    expectTunersError(StatusCodes.ServiceUnavailable, """{"error":"busy"}""", HDHomeRunError.SystemBusy)
+    expectTunersError(StatusCodes.OK, "{malformed", HDHomeRunError.SystemBusy)
 
     val validWatch = """{"token":"tok1","expires":"2026-01-01T00:00:00Z","keepalive":120,"playlist_url":"http://127.0.0.1/pl.m3u8","video_details":{"width":1920,"height":1080}}"""
-    val _ = Channel.classifyWatchResponse(StatusCodes.OK, validWatch).map(_.token) shouldBe Right("tok1")
+    Channel.classifyWatchResponse(StatusCodes.OK, validWatch) match {
+      case w: Channel.Response.WatchResponse => val _ = w.token shouldBe "tok1"
+      case err: LegacyError => fail(s"unexpected error: $err")
+    }
 
     val blankPlaylist = """{"token":"tok1","expires":"2026-01-01T00:00:00Z","keepalive":120,"playlist_url":"","video_details":{"width":1920,"height":1080}}"""
-    val _ = Channel.classifyWatchResponse(StatusCodes.OK, blankPlaylist)
-      .left.map(HDHomeRunError.fromThrowable) shouldBe Left(HDHomeRunError.NoVideoData)
-
-    val _ = Channel.classifyWatchResponse(StatusCodes.NotFound, """{"error":"not_found","message":"missing"}""")
-      .left.map(HDHomeRunError.fromThrowable) shouldBe Left(HDHomeRunError.UnknownChannel)
-
-    val _ = Channel.classifyWatchResponse(StatusCodes.Conflict, """{"error":"no_available_tuners"}""")
-      .left.map(HDHomeRunError.fromThrowable) shouldBe Left(HDHomeRunError.AllTunersInUse)
-
-    val _ = Channel.classifyWatchResponse(StatusCodes.ServiceUnavailable, """{"error":"weak signal"}""")
-      .left.map(HDHomeRunError.fromThrowable) shouldBe Left(HDHomeRunError.TuneFailed)
-
-    val _ = Channel.classifyWatchResponse(StatusCodes.InternalServerError, """{"error":"internal_error"}""")
-      .left.map(HDHomeRunError.fromThrowable) shouldBe Left(HDHomeRunError.TuneFailed)
-
-    Channel.classifyWatchResponse(StatusCodes.ServiceUnavailable, """{"error":"system_busy"}""")
-      .left.map(HDHomeRunError.fromThrowable) shouldBe Left(HDHomeRunError.SystemBusy)
+    expectWatchError(StatusCodes.OK, blankPlaylist, HDHomeRunError.NoVideoData)
+    expectWatchError(StatusCodes.OK, "{malformed", HDHomeRunError.TuneFailed)
+    expectWatchError(StatusCodes.NotFound, """{"error":"not_found","message":"missing"}""", HDHomeRunError.UnknownChannel)
+    expectWatchError(StatusCodes.Conflict, """{"error":"no_available_tuners"}""", HDHomeRunError.AllTunersInUse)
+    expectWatchError(StatusCodes.ServiceUnavailable, """{"error":"weak signal"}""", HDHomeRunError.TuneFailed)
+    expectWatchError(StatusCodes.InternalServerError, """{"error":"internal_error"}""", HDHomeRunError.TuneFailed)
+    expectWatchError(StatusCodes.ServiceUnavailable, """{"error":"system_busy"}""", HDHomeRunError.SystemBusy)
   }
 
   "Legacy GET /channel/:id" should "emit SiliconDust X-HDHomeRun-Error headers for upstream Tablo errors" in {

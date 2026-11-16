@@ -267,17 +267,18 @@ object FreezeFramePacer {
         } else if (code == 0xB2) {
           i = end
         } else if (code == 0xB3) {
-          if (i + 12 <= end && lockedSeqHeader.isDefined) {
-            val locked = lockedSeqHeader.get
-            if (locked.length >= 12 && (locked.length == 12 || (arr(i + 11) & 0x03) == (locked(11) & 0x03))) {
-              var differs = false
-              var k = 0
-              while (k < 12) {
-                if (arr(i + k) != locked(k)) differs = true
-                k += 1
-              }
-              if (differs) {
-                val _ = locked.take(12).copyToArray(arr, i)
+          if (i + 12 <= end) {
+            lockedSeqHeader.foreach { locked =>
+              if (locked.length >= 12 && (locked.length == 12 || (arr(i + 11) & 0x03) == (locked(11) & 0x03))) {
+                var differs = false
+                var k = 0
+                while (k < 12) {
+                  if (arr(i + k) != locked(k)) differs = true
+                  k += 1
+                }
+                if (differs) {
+                  val _ = locked.take(12).copyToArray(arr, i)
+                }
               }
             }
           }
@@ -580,29 +581,29 @@ object FreezeFramePacer {
 
       val remainingPes = totalPesLen - offset
 
-      if (isFirst && pcrBaseOpt.isDefined) {
-        val pcrBase = pcrBaseOpt.get
-        if (remainingPes >= 176) {
-          pkt(3) = (0x30 | cc).toByte
-          pkt(4) = 7.toByte
-          pkt(5) = 0x10.toByte
-          writePcrBase(pkt, 0, pcrBase)
-          System.arraycopy(pesBytes, offset, pkt, 12, 176)
-          offset += 176
-        } else {
-          pkt(3) = (0x30 | cc).toByte
-          val afLen = 183 - remainingPes
-          pkt(4) = afLen.toByte
-          pkt(5) = 0x10.toByte
-          writePcrBase(pkt, 0, pcrBase)
-          System.arraycopy(pesBytes, offset, pkt, 5 + afLen, remainingPes)
-          offset += remainingPes
-        }
-      } else {
-        if (remainingPes >= 184) {
-          pkt(3) = (0x10 | cc).toByte
-          System.arraycopy(pesBytes, offset, pkt, 4, 184)
-          offset += 184
+      (isFirst, pcrBaseOpt) match {
+        case (true, Some(pcrBase)) =>
+          if (remainingPes >= 176) {
+            pkt(3) = (0x30 | cc).toByte
+            pkt(4) = 7.toByte
+            pkt(5) = 0x10.toByte
+            writePcrBase(pkt, 0, pcrBase)
+            System.arraycopy(pesBytes, offset, pkt, 12, 176)
+            offset += 176
+          } else {
+            pkt(3) = (0x30 | cc).toByte
+            val afLen = 183 - remainingPes
+            pkt(4) = afLen.toByte
+            pkt(5) = 0x10.toByte
+            writePcrBase(pkt, 0, pcrBase)
+            System.arraycopy(pesBytes, offset, pkt, 5 + afLen, remainingPes)
+            offset += remainingPes
+          }
+        case _ =>
+          if (remainingPes >= 184) {
+            pkt(3) = (0x10 | cc).toByte
+            System.arraycopy(pesBytes, offset, pkt, 4, 184)
+            offset += 184
         } else {
           val stuffBytes = 184 - remainingPes
           if (stuffBytes == 1) {

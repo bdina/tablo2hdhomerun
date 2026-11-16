@@ -141,6 +141,9 @@ after recovery timeout).
 Placement sketch (names can move during implementation):
 
 ```text
+app.tuner.FourthGenError / LegacyError         // flat NoStackTrace error ADTs + WatchSession/SessionManager/SessionRunner aliases in app.tuner
+app.stream.HlsError / RangeError               // flat NoStackTrace stream/range error ADTs
+app.sys.SafeJson / TranscodeError              // Try-based Spray-JSON decoding & transcode errors
 app.tuner.Tablo4thGen.Channel.SessionManager   // typed actor
 app.tuner.Tablo4thGen.Channel.SessionRunner    // object / functions
 ```
@@ -573,7 +576,7 @@ the current per-request path, but as **one instance per channel lease**.
 
 | Event | Behavior |
 |-------|----------|
-| Initial watch fails while Opening | `WatchSession.retryInitialTune` retries with 2s backoff up to `WatchSession.initialTuneTimeout` (`STREAM_RECOVERY_TIMEOUT_SEC` if > 0, or 60s opening budget when `<= 0`) before `AcquireFailed` → `Rejected(Failed(_))`; `WatchSession.classifyWatch503` / `classifyWatchFailure` inspect HTTP status and JSON payloads to distinguish tuner exhaustion (`NoAvailableTuners` → `805`), weak-signal lock failure (`NoSignalLock` → `806`), missing channel (`ChannelNotFound` → `801`), missing playlist/pre-check-in HLS termination (`NoVideoData` → `807`), and transient busy/auth errors (`SystemBusy` → `803`), returning `X-HDHomeRun-Error` when HTTP headers have not yet been committed; client receives pre-roll null keepalive while waiting |
+| Initial watch fails while Opening | `WatchSession.retryInitialTune` retries with 2s backoff up to `WatchSession.initialTuneTimeout` (`STREAM_RECOVERY_TIMEOUT_SEC` if > 0, or 60s opening budget when `<= 0`) before `AcquireFailed` → `Rejected(Failed(_))`; `WatchSession.classifyWatch503` / `classifyWatchFailure` inspect HTTP status and JSON payloads to distinguish tuner exhaustion (`FourthGenError.NoAvailableTuners` → `805`), weak-signal lock failure (`FourthGenError.NoSignalLock` → `806`), missing channel (`FourthGenError.ChannelNotFound` → `801`), missing playlist/pre-check-in HLS termination (`FourthGenError.NoVideoData` → `807`), and transient busy/auth errors (`FourthGenError.SystemBusy` → `803`), returning `X-HDHomeRun-Error` when HTTP headers have not yet been committed; `WatchSession.decodeSession` and `Tablo4thGen.Auth` return Scala 3 union types (`Session | FourthGenError`, `TabloCredentials | FourthGenError`, `SelectedTarget | FourthGenError`) and `Auth.initialize` returns `Try[AuthContext]` without throwing; client receives pre-roll null keepalive while waiting |
 | Client releases while Opening | Waiter removed; if all waiters release, `SessionManager` invokes the `Opening.cancel` handle from `SessionRunner.startCancellable` so `retryInitialTune` ceases immediately (and releases any in-flight Tablo session that completes after cancellation) |
 | Keepalive fails | Existing retry / fetch session; retune if needed; clients unaffected |
 | Playlist URL change | Inner kill/restart under resilient source (`playlistRollover`); hub stays; clients seamless |

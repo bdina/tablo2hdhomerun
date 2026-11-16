@@ -1,6 +1,5 @@
 package app.tuner
 
-import java.io.File
 import java.net.InetAddress
 
 import org.apache.pekko
@@ -27,7 +26,7 @@ import DefaultJsonProtocol._
 import app.{AppContext, Tablo2HDHomeRun}
 import app.config.ConfigTypes.{HostAddress, HttpProtocol, Port}
 import app.stream.StreamBackend
-import app.sys.LogConfig
+import app.sys.{LogConfig, SafeJson}
 
 object TabloLegacy {
   val log = Tablo2HDHomeRun.log
@@ -199,11 +198,6 @@ object TabloLegacy {
           case object ScanFailed extends Command
         }
 
-        trait Error extends Exception
-        object Error {
-          case class ServerError(f: File) extends Exception(s"server error: $f") with Error
-        }
-
         val log = LoggerFactory.getLogger(this.getClass)
 
         implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
@@ -219,7 +213,15 @@ object TabloLegacy {
               .singleRequest(Proxy.Request.httpRequest)
               .flatMap { response =>
                 log.debug("[lineup] http GET /guide/channels status={}", response.status.intValue())
-                Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]])
+                if (!response.status.isSuccess()) {
+                  val code = response.status.intValue()
+                  val _ = response.entity.discardBytes()
+                  Future.failed(LegacyError.SystemBusyError(s"lineup GET /guide/channels failed: HTTP $code"))
+                } else {
+                  Unmarshal(response.entity).to[String].flatMap { body =>
+                    Future.fromTry(SafeJson.parseAs[Seq[String]](body))
+                  }
+                }
               }
               .flatMap { paths =>
                 import JsonProtocol._
@@ -229,7 +231,15 @@ object TabloLegacy {
                   .flatMap { entity =>
                     HttpCtx.singleRequest(Proxy.Request.postRequest(entity)).flatMap { response =>
                       log.debug("[lineup] http POST /batch status={}", response.status.intValue())
-                      Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Map[String, ChannelObject]])
+                      if (!response.status.isSuccess()) {
+                        val code = response.status.intValue()
+                        val _ = response.entity.discardBytes()
+                        Future.failed(LegacyError.SystemBusyError(s"lineup POST /batch failed: HTTP $code"))
+                      } else {
+                        Unmarshal(response.entity).to[String].flatMap { body =>
+                          Future.fromTry(SafeJson.parseAs[Map[String, ChannelObject]](body))
+                        }
+                      }
                     }
                   }
               }
@@ -624,26 +634,22 @@ object TabloLegacy {
               if (response.status.isSuccess()) {
                 Unmarshal(response.entity).to[String].map { body =>
                   log.debug("[guide] response body={}", LogConfig.truncate(body))
-                  Try { // try to parse as JSON array of programs
-                    import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
-                    body
-                      .parseJson
-                      .convertTo[Seq[Proxy.Response.TabloProgram]]
-                      .map(Proxy.Response.convertToProgram(_, channelId))
-                  }
-                  .getOrElse {
-                    Try { // if that fails, try to parse as a single program object
-                      import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
-                      val program = body.parseJson.convertTo[Proxy.Response.TabloProgram]
-                      Seq(Proxy.Response.convertToProgram(program, channelId))
-                    }
+                  import Proxy.Response.TabloProgram.JsonProtocol.tabloProgramFormat
+                  SafeJson
+                    .parseAs[Seq[Proxy.Response.TabloProgram]](body)
+                    .map(_.map(Proxy.Response.convertToProgram(_, channelId)))
+                    .orElse(
+                      SafeJson
+                        .parseAs[Proxy.Response.TabloProgram](body)
+                        .map(program => Seq(Proxy.Response.convertToProgram(program, channelId)))
+                    )
                     .getOrElse {
                       log.warn("[guide] parse failed uri={}", uri)
                       Seq.empty
                     }
-                  }
                 }
               } else {
+                val _ = response.entity.discardBytes()
                 log.debug("[guide] http GET {} status={}", uri, response.status.intValue())
                 Future.successful(Seq.empty)
               }
@@ -681,7 +687,9 @@ object TabloLegacy {
           HttpCtx.singleRequest(Proxy.Request.httpRequest(channelsUri)).flatMap { response =>
             log.debug("[guide] http GET /guide/channels status={}", response.status.intValue())
             if (response.status.isSuccess()) {
-              Unmarshal(response.entity).to[String].map(_.parseJson.convertTo[Seq[String]]).flatMap { paths =>
+              Unmarshal(response.entity).to[String].flatMap { body =>
+                Future.fromTry(SafeJson.parseAs[Seq[String]](body))
+              }.flatMap { paths =>
                 import Lineup.JsonProtocol._
                 import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
                 Marshal(paths.toJson)
@@ -694,8 +702,16 @@ object TabloLegacy {
                       entity = entity.withContentType(ContentTypes.`application/json`)
                     )
                     HttpCtx.singleRequest(batchRequest).flatMap { batchResponse =>
-                      log.debug("[guide] http POST /batch status={}", batchResponse.status.intValue())
-                      Unmarshal(batchResponse.entity).to[String].map(_.parseJson.convertTo[Map[String, Lineup.ChannelObject]])
+                      val batchCode = batchResponse.status.intValue()
+                      log.debug("[guide] http POST /batch status={}", batchCode)
+                      if (batchResponse.status.isSuccess()) {
+                        Unmarshal(batchResponse.entity).to[String].flatMap { body =>
+                          Future.fromTry(SafeJson.parseAs[Map[String, Lineup.ChannelObject]](body))
+                        }
+                      } else {
+                        val _ = batchResponse.entity.discardBytes()
+                        Future.failed(LegacyError.SystemBusyError(s"guide POST /batch failed: HTTP $batchCode"))
+                      }
                     }
                   }
               }.flatMap { channelData =>
@@ -717,6 +733,7 @@ object TabloLegacy {
                 Future.sequence(channelFutures.toSeq)
               }
             } else {
+              val _ = response.entity.discardBytes()
               log.warn("[guide] channels fetch failed status={}", response.status.intValue())
               Future.successful(Seq.empty)
             }
@@ -935,11 +952,15 @@ object TabloLegacy {
         , bif_url_hd: Option[Uri]
         , video_details: VideoDetails
         )
-        case object NoAvailableTunersError extends Exception("No available tuners")
-        case class ChannelNotFoundError(message: String) extends Exception(message)
-        case class TuneFailedError(message: String) extends Exception(message)
-        case class NoVideoDataError(message: String) extends Exception(message)
-        case class SystemBusyError(message: String) extends Exception(message)
+        val NoAvailableTunersError = LegacyError.NoAvailableTunersError
+        type ChannelNotFoundError = LegacyError.ChannelNotFoundError
+        val ChannelNotFoundError = LegacyError.ChannelNotFoundError
+        type TuneFailedError = LegacyError.TuneFailedError
+        val TuneFailedError = LegacyError.TuneFailedError
+        type NoVideoDataError = LegacyError.NoVideoDataError
+        val NoVideoDataError = LegacyError.NoVideoDataError
+        type SystemBusyError = LegacyError.SystemBusyError
+        val SystemBusyError = LegacyError.SystemBusyError
         object JsonProtocol {
           import TabloLegacy.Response.JsonProtocol.uriFormat
           implicit val videoDetailsFormat: JsonFormat[VideoDetails] = jsonFormat2(VideoDetails.apply)
@@ -958,47 +979,48 @@ object TabloLegacy {
       private def classifyLegacyWatchFailure(
         status: StatusCode
       , body: String
-      ): Throwable = {
+      ): LegacyError = {
         val codeInt = status.intValue()
         val (category, truncated) = HDHomeRunError.classifyUpstreamHttpFailure(status, body)
         category match {
           case HDHomeRunError.FailureCategory.ChannelNotFound =>
-            Response.ChannelNotFoundError(s"watch $codeInt: $truncated")
+            LegacyError.ChannelNotFoundError(s"watch $codeInt: $truncated")
           case HDHomeRunError.FailureCategory.NoAvailableTuners =>
-            Response.NoAvailableTunersError
+            LegacyError.NoAvailableTunersError
           case HDHomeRunError.FailureCategory.WeakSignal | HDHomeRunError.FailureCategory.TuneFailed | HDHomeRunError.FailureCategory.EmptyBodyTuneFailure =>
-            Response.TuneFailedError(s"watch $codeInt: $truncated")
+            LegacyError.TuneFailedError(s"watch $codeInt: $truncated")
           case HDHomeRunError.FailureCategory.SystemBusy =>
-            Response.SystemBusyError(s"watch $codeInt: $truncated")
+            LegacyError.SystemBusyError(s"watch $codeInt: $truncated")
         }
       }
 
       /** Classifies Legacy Tablo GET /server/tuners responses before JSON unmarshaling. */
-      def classifyTunersResponse(status: StatusCode, body: String): Either[Throwable, Seq[Response.Tuners]] = {
+      def classifyTunersResponse(status: StatusCode, body: String): Seq[Response.Tuners] | LegacyError = {
         import Response.Tuners.JsonProtocol.tunersFormat
         if (status.isSuccess()) {
-          Try(body.parseJson.convertTo[Seq[Response.Tuners]]).toEither.left.map { ex =>
-            Response.SystemBusyError(s"invalid tuner status response: ${ex.getMessage}")
+          SafeJson.parseAs[Seq[Response.Tuners]](body) match {
+            case Success(tuners) => tuners
+            case Failure(ex)     => LegacyError.SystemBusyError(s"invalid tuner status response: ${ex.getMessage}")
           }
         } else {
           val truncated = LogConfig.truncate(Option(body).getOrElse("").trim)
-          Left(Response.SystemBusyError(s"tuners ${status.intValue()}: $truncated"))
+          LegacyError.SystemBusyError(s"tuners ${status.intValue()}: $truncated")
         }
       }
 
       /** Classifies Legacy Tablo POST /guide/channels/{id}/watch responses before JSON unmarshaling. */
-      def classifyWatchResponse(status: StatusCode, body: String): Either[Throwable, Response.WatchResponse] = {
+      def classifyWatchResponse(status: StatusCode, body: String): Response.WatchResponse | LegacyError = {
         import Response.JsonProtocol.watchResponseFormat
         if (status.isSuccess()) {
-          Try(body.parseJson.convertTo[Response.WatchResponse]).toEither match {
-            case Right(watch) =>
-              if (watch.playlist_url.toString.trim.nonEmpty) Right(watch)
-              else Left(Response.NoVideoDataError("No playlist URL returned"))
-            case Left(ex) =>
-              Left(Response.TuneFailedError(s"invalid watch response: ${ex.getMessage}"))
+          SafeJson.parseAs[Response.WatchResponse](body) match {
+            case Success(watch) =>
+              if (watch.playlist_url.toString.trim.nonEmpty) watch
+              else LegacyError.NoVideoDataError("No playlist URL returned")
+            case Failure(ex) =>
+              LegacyError.TuneFailedError(s"invalid watch response: ${ex.getMessage}")
           }
         } else {
-          Left(classifyLegacyWatchFailure(status, body))
+          classifyLegacyWatchFailure(status, body)
         }
       }
 
@@ -1032,8 +1054,8 @@ object TabloLegacy {
             log.debug("[channel] http GET /server/tuners status={}", response.status.intValue())
             Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
               classifyTunersResponse(response.status, body) match {
-                case Right(tuners) => Future.successful(tuners)
-                case Left(err) => Future.failed(err)
+                case err: LegacyError                        => Future.failed(err)
+                case tuners: Seq[Response.Tuners] @unchecked => Future.successful(tuners)
               }
             }
           }
@@ -1043,8 +1065,8 @@ object TabloLegacy {
             log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
             Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
               classifyWatchResponse(response.status, body) match {
-                case Right(watch) => Future.successful(watch)
-                case Left(err) => Future.failed(err)
+                case err: LegacyError             => Future.failed(err)
+                case watch: Response.WatchResponse => Future.successful(watch)
               }
             }
           }
@@ -1151,7 +1173,7 @@ object TabloLegacy {
                 streamWithResilience(data.playlist_url.toString)
               )
             )
-          case Failure(Response.NoAvailableTunersError) =>
+          case Failure(LegacyError.NoAvailableTunersError) =>
             complete(
               rejectResponse(
                 HDHomeRunError.AllTunersInUse
@@ -1282,9 +1304,11 @@ object TabloLegacy {
       log.debug("[startup] legacy /server/tuners status={}", response.status.intValue())
       if (response.status.isSuccess()) {
         Unmarshal(response.entity).to[String].map { body =>
-          val tuners = body.parseJson.convertTo[Seq[Channel.Response.Tuners]]
-          val count = if (tuners.nonEmpty) tuners.size else 2
-          count
+          SafeJson.parseAs[Seq[Channel.Response.Tuners]](body)
+            .toOption
+            .map(_.size)
+            .filter(_ > 0)
+            .getOrElse(2)
         }
       } else {
         val _ = response.entity.discardBytes()

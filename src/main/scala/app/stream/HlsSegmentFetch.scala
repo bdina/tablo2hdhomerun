@@ -3,16 +3,27 @@ package app.stream
 import org.apache.pekko.http.scaladsl.model.{HttpHeader, HttpRequest, StatusCode, StatusCodes}
 import org.apache.pekko.http.scaladsl.model.headers.{ByteRange, Range}
 
+import scala.util.boundary
+import scala.util.boundary.break
+
 object HlsSegmentFetch {
-  final case class RangeRequest(offset: Long, length: Long) {
-    require(offset >= 0, s"offset must be >= 0, got $offset")
-    require(length > 0, s"length must be > 0, got $length")
+  final case class RangeRequest private (offset: Long, length: Long) {
     def endInclusive: Long = offset + length - 1
+  }
+
+  object RangeRequest {
+    /** Validates and constructs a RangeRequest without throwing exceptions. */
+    def create(offset: Long, length: Long): RangeRequest | RangeError =
+      boundary {
+        if (offset < 0) break(RangeError.InvalidOffset(offset))
+        if (length <= 0) break(RangeError.InvalidLength(length))
+        new RangeRequest(offset, length)
+      }
   }
 
   sealed trait SegmentFetchDecision
   case object Accept extends SegmentFetchDecision
-  final case class Fail(error: HlsBackend.HlsError) extends SegmentFetchDecision
+  final case class Fail(error: HlsError) extends SegmentFetchDecision
   final case class Retry(reason: String) extends SegmentFetchDecision
 
   def isSafeByteRange(offset: Long, length: Long): Boolean =
@@ -72,19 +83,19 @@ object HlsSegmentFetch {
             case Some((start, end)) if start == request.offset && end <= request.endInclusive => Accept
             case Some((start, end)) =>
               if (retriesLeft > 0) Retry(s"range mismatch: expected ${request.offset}-${request.endInclusive}, got $start-$end")
-              else Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"expected ${request.offset}-${request.endInclusive}, got $start-$end"))
+              else Fail(HlsError.SegmentRangeMismatch(s"expected ${request.offset}-${request.endInclusive}, got $start-$end"))
             case None =>
               if (retriesLeft > 0) Retry("missing or invalid Content-Range")
-              else Fail(HlsBackend.HlsError.SegmentRangeMismatch("missing or invalid Content-Range"))
+              else Fail(HlsError.SegmentRangeMismatch("missing or invalid Content-Range"))
           }
         case None => Accept
       }
     } else if (status.isSuccess()) {
       if (retriesLeft > 0) Retry(s"expected 206 Partial Content, got ${status.intValue()}")
-      else Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"expected 206 Partial Content, got ${status.intValue()}"))
+      else Fail(HlsError.SegmentRangeMismatch(s"expected 206 Partial Content, got ${status.intValue()}"))
     } else if (status == StatusCodes.RangeNotSatisfiable) {
       if (retriesLeft > 0) Retry(s"range not satisfiable for ${request.offset}-${request.endInclusive}")
-      else Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"range not satisfiable for ${request.offset}-${request.endInclusive}"))
+      else Fail(HlsError.SegmentRangeMismatch(s"range not satisfiable for ${request.offset}-${request.endInclusive}"))
     } else {
       classifyStatus(status, retriesLeft)
     }
@@ -94,17 +105,17 @@ object HlsSegmentFetch {
     status match {
       case StatusCodes.NotFound =>
         if (retriesLeft > 0) Retry("segment not ready")
-        else Fail(HlsBackend.HlsError.SegmentNotReady)
+        else Fail(HlsError.SegmentNotReady)
       case StatusCodes.Unauthorized | StatusCodes.Forbidden =>
-        Fail(HlsBackend.HlsError.Unauthorized(status))
+        Fail(HlsError.Unauthorized(status))
       case StatusCodes.RangeNotSatisfiable =>
-        Fail(HlsBackend.HlsError.SegmentRangeMismatch(s"range not satisfiable (${status.intValue()})"))
+        Fail(HlsError.SegmentRangeMismatch(s"range not satisfiable (${status.intValue()})"))
       case _ if isServerError(status) =>
         if (retriesLeft > 0) Retry(s"server error ${status.intValue()}")
-        else Fail(HlsBackend.HlsError.SegmentFetchError(status))
+        else Fail(HlsError.SegmentFetchError(status))
       case _ if status.isFailure() =>
         if (retriesLeft > 0) Retry(s"segment fetch failed (${status.intValue()})")
-        else Fail(HlsBackend.HlsError.SegmentFetchError(status))
+        else Fail(HlsError.SegmentFetchError(status))
       case _ => Accept
     }
 
@@ -114,9 +125,12 @@ object HlsSegmentFetch {
   , byteRange: Option[(Long, Long)]
   , retriesLeft: Int
   ): SegmentFetchDecision =
-    safeByteRange(byteRange) match {
+    byteRange match {
       case Some((offset, length)) =>
-        validateRangedResponse(status, headers, RangeRequest(offset, length), retriesLeft)
+        RangeRequest.create(offset, length) match {
+          case req: RangeRequest => validateRangedResponse(status, headers, req, retriesLeft)
+          case _: RangeError => classifyStatus(status, retriesLeft)
+        }
       case None => classifyStatus(status, retriesLeft)
     }
 }

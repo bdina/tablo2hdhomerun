@@ -140,6 +140,7 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 - Manages FFmpeg transcoding processes
 - Handles lifecycle (start, status, stop)
 - Intel QuickSync Video (QSV) hardware acceleration support
+- Uses top-level `TranscodeError` (`NoStackTrace` value ADT, aliased as `FFMpegDelegate.Error`) and `Try[Path]` with `boundary`/`break` instead of throwing exceptions during file validation and extended-attribute locking
 
 #### TunerStateActor (4th Gen)
 
@@ -237,7 +238,7 @@ Streams fan out to subscribers via a 1024-element `BroadcastHub` buffer. When ne
       actively draining the BroadcastHub via a background sink to avoid upstream backpressure stalls
    b. If idle grace expires without reconnection, DELETE /player/sessions/{token} to release hardware tuner
    c. If upstream ends on its own (when a finite STREAM_RECOVERY_TIMEOUT_SEC is configured and reached), the runner tears down and SessionManager removes the entry immediately (no idle grace)
-6. On pre-stream failure (prior to HTTP 200 commit), return SiliconDust HTTP error responses via `HDHomeRunError` with `X-HDHomeRun-Error` headers (`404` + `801 Unknown Channel`, `503` + `803 System Busy` / `805 All Tuners In Use` / `806 Tune Failed` / `807 No Video Data`)
+6. On pre-stream failure (prior to HTTP 200 commit), return SiliconDust HTTP error responses via `HDHomeRunError` with `X-HDHomeRun-Error` headers (`404` + `801 Unknown Channel`, `503` + `803 System Busy` / `805 All Tuners In Use` / `806 Tune Failed` / `807 No Video Data`). Domain error ADTs (`FourthGenError`, `LegacyError`, `HlsError`, `RangeError`, `TranscodeError` extending `NoStackTrace`) and startup `Auth.initialize` (`Try[AuthContext]`) return deterministic `Try`, union (`A | E`), or `Future.failed` values without project `throw`s; JSON decoding goes through `SafeJson.parseAs` after HTTP status validation.
 ```
 
 ### Program Guide Workflow
@@ -343,11 +344,15 @@ tablo2hdhomerun/
 │   ├── scala/app/
 │   │   ├── Tablo2HDHomeRun.scala        # Main application
 │   │   ├── config/                      # Typed configuration (AppConfig)
+│   │   ├── sys/                         # System utilities, config logging, transcode & JSON helpers
+│   │   │   ├── SafeJson.scala           # Safe Try-based Spray-JSON decoding
+│   │   │   └── System.scala             # FsUtil, FsScan, FFMpegDelegate, TranscodeError
 │   │   ├── stream/                      # Stream backends & MPEG-TS sanitization
 │   │   │   ├── StreamBackend.scala      # Trait and factory
 │   │   │   ├── FFmpegBackend.scala      # FFmpeg subprocess backend
 │   │   │   ├── FreezeFramePacer.scala   # MPEG-2/H.264/audio sanitization & freeze synthesis
 │   │   │   ├── HlsBackend.scala         # HLS-native backend
+│   │   │   ├── HlsError.scala           # Flat HlsError & RangeError ADTs (NoStackTrace)
 │   │   │   ├── HlsPlaylistFetch.scala   # Conditional playlist request helpers
 │   │   │   ├── HlsPlaylistPoller.scala  # Adaptive HLS polling & session-presence probing
 │   │   │   ├── HlsSegmentFetch.scala    # Byte-range segment fetch validation
@@ -360,7 +365,8 @@ tablo2hdhomerun/
 │   │       ├── HDHomeRunError.scala     # SiliconDust HTTP status & X-HDHomeRun-Error mapper
 │   │       ├── HDHomeRunStatus.scala    # SiliconDust GET /status.json tuner telemetry model
 │   │       ├── Tablo4thGen.scala        # 4th gen API, SessionManager, WatchSession
-│   │       └── TabloLegacy.scala        # Legacy Tablo API
+│   │       ├── TabloLegacy.scala        # Legacy Tablo API
+│   │       └── TunerErrors.scala        # Flat FourthGenError, LegacyError ADTs & package aliases
 │   └── resources/META-INF/
 │       └── native-image/                # GraalVM configuration
 │           └── reachability-metadata.json

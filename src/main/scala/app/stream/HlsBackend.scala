@@ -7,7 +7,7 @@ import pekko.actor.typed.ActorSystem
 import pekko.http.scaladsl
 
 import scaladsl.Http
-import scaladsl.model.{HttpRequest, StatusCode, StatusCodes}
+import scaladsl.model.{HttpRequest, StatusCodes}
 import scaladsl.model.headers.{ByteRange, Range}
 import scaladsl.unmarshalling.Unmarshal
 
@@ -30,16 +30,8 @@ object HlsBackend extends StreamBackend {
   override def name: String = "hls"
   val defaultPollSec: Int = 2
 
-  sealed trait HlsError extends Throwable
-  object HlsError {
-    case class PlaylistFetchError(status: StatusCode) extends RuntimeException(s"playlist fetch failed: ${status}") with HlsError
-    case class SegmentFetchError(status: StatusCode) extends RuntimeException(s"segment fetch failed: ${status}") with HlsError
-    case class SegmentRangeMismatch(detail: String) extends RuntimeException(s"segment range mismatch: $detail") with HlsError
-    case class Unauthorized(status: StatusCode) extends RuntimeException(s"segment unauthorized: ${status}") with HlsError
-    case object SegmentNotReady extends RuntimeException("newest segment not ready") with HlsError
-    case object SessionEnded extends RuntimeException("playlist ended (EXT-X-ENDLIST)") with HlsError
-    case object PollExhausted extends RuntimeException("playlist poll failures exhausted") with HlsError
-  }
+  type HlsError = app.stream.HlsError
+  val HlsError = app.stream.HlsError
 
   private[stream] def pollOutcomeToFuture(
     outcome: HlsPlaylistPoller.Outcome
@@ -73,7 +65,7 @@ object HlsBackend extends StreamBackend {
     def fetchPlaylistBody(url: String)(implicit mat: pekko.stream.Materializer): Future[String] =
       fetchPlaylist(url, HlsPlaylistFetch.Validators()).flatMap {
         case Left(body) => Future.successful(body)
-        case Right(_) => Future.failed(new IllegalStateException("unexpected 304 without validators"))
+        case Right(_) => Future.failed(HlsError.UnexpectedNotModified)
       }
     def fetchPlaylist(
       url: String
@@ -127,20 +119,20 @@ object HlsBackend extends StreamBackend {
           .mapMaterializedValue(_ => pekko.NotUsed)
       }
       def failSource(error: HlsError): Source[ByteString, ?] = Source.failed(error)
-      def attemptFetch(retriesLeft: Int): Source[ByteString, ?] = {
-        if (byteRange.isDefined && HlsSegmentFetch.safeByteRange(byteRange).isEmpty) {
-          val (offset, length) = byteRange.get
-          log.warn("[stream:hls] skipping segment with invalid byte range label={} offset={} length={} url={}", label, offset, length, url)
-          Source.empty[ByteString]
-        } else {
-          val request = HlsSegmentFetch.safeByteRange(byteRange) match {
-            case Some((offset, length)) =>
-              log.debug("[stream:hls] segment range fetch label={} offset={} length={} url={}", label, offset, length, url)
-              HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
-            case None =>
-              HttpRequest(uri = url)
-          }
-        Source.futureSource(
+      def attemptFetch(retriesLeft: Int): Source[ByteString, ?] =
+        byteRange match {
+          case Some((offset, length)) if !HlsSegmentFetch.isSafeByteRange(offset, length) =>
+            log.warn("[stream:hls] skipping segment with invalid byte range label={} offset={} length={} url={}", label, offset, length, url)
+            Source.empty[ByteString]
+          case _ =>
+            val request = HlsSegmentFetch.safeByteRange(byteRange) match {
+              case Some((offset, length)) =>
+                log.debug("[stream:hls] segment range fetch label={} offset={} length={} url={}", label, offset, length, url)
+                HttpRequest(uri = url).addHeader(Range(ByteRange(offset, offset + length - 1)))
+              case None =>
+                HttpRequest(uri = url)
+            }
+            Source.futureSource(
           http.singleRequest(request).map { response =>
             HlsSegmentFetch.decideSegmentResponse(
               response.status
@@ -169,7 +161,6 @@ object HlsBackend extends StreamBackend {
             retryAfter(retriesLeft, s"segment fetch error: ${ex.getMessage}", attemptFetch(retriesLeft - 1))
           }
         ).mapMaterializedValue(_ => pekko.NotUsed)
-        }
       }
       attemptFetch(maxSegmentRetries)
     }
@@ -282,38 +273,39 @@ object HlsBackend extends StreamBackend {
                   , label
                   )
                 }
-                if (segments.nonEmpty && state.stallPolls >= HlsPlaylistPoller.sessionProbeIntervalPolls) {
-                  log.info(
-                    "[stream:hls] playlist resumed after stall label={} stallPolls={} seq={}"
-                  , label
-                  , state.stallPolls
-                  , segments.head.sequence
-                  )
-                }
-                if (state.lastSeq > 0 && segments.nonEmpty && segments.head.sequence > state.lastSeq) {
-                  val gap = segments.head.sequence - state.lastSeq
-                  metricsCollector.foreach(_.onSequenceGap(gap))
-                  log.warn(
-                    "[stream:hls] sequence gap detected label={} expected={} received={} gap={}"
-                  , label
-                  , state.lastSeq
-                  , segments.head.sequence
-                  , gap
-                  )
-                }
-                if (segments.nonEmpty && !state.loggedFirstSegment) {
-                  val head = segments.head
-                  val last = segments.last
-                  val rangeDesc = HlsSegmentFetch.safeByteRange(head.byteRange).map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
-                  log.info(
-                    "[stream:hls] emit label={} count={} firstSeq={} lastSeq={} firstUrl={}{}"
-                  , label
-                  , segments.size
-                  , head.sequence
-                  , last.sequence
-                  , LogConfig.truncate(head.url)
-                  , rangeDesc
-                  )
+                segments.headOption.foreach { head =>
+                  if (state.stallPolls >= HlsPlaylistPoller.sessionProbeIntervalPolls) {
+                    log.info(
+                      "[stream:hls] playlist resumed after stall label={} stallPolls={} seq={}"
+                    , label
+                    , state.stallPolls
+                    , head.sequence
+                    )
+                  }
+                  if (state.lastSeq > 0 && head.sequence > state.lastSeq) {
+                    val gap = head.sequence - state.lastSeq
+                    metricsCollector.foreach(_.onSequenceGap(gap))
+                    log.warn(
+                      "[stream:hls] sequence gap detected label={} expected={} received={} gap={}"
+                    , label
+                    , state.lastSeq
+                    , head.sequence
+                    , gap
+                    )
+                  }
+                  if (!state.loggedFirstSegment) {
+                    val lastSeq = segments.lastOption.map(_.sequence).getOrElse(head.sequence)
+                    val rangeDesc = HlsSegmentFetch.safeByteRange(head.byteRange).map { case (o, l) => s" range=$o-${o + l - 1}" }.getOrElse("")
+                    log.info(
+                      "[stream:hls] emit label={} count={} firstSeq={} lastSeq={} firstUrl={}{}"
+                    , label
+                    , segments.size
+                    , head.sequence
+                    , lastSeq
+                    , LogConfig.truncate(head.url)
+                    , rangeDesc
+                    )
+                  }
                 }
                 Future.successful(Some((next, segments)))
             }

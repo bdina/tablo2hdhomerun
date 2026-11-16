@@ -221,9 +221,12 @@ object HDHomeRunDiscovery {
             val _ = Try(channel.close())
           }
         }
-      }.recover { case ex =>
-        log.warn("[discovery] could not bind UDP port={}, auto-discovery disabled: {}", Port, ex.getMessage)
-        new AutoCloseable { override def close(): Unit = () }
-      }.get
+      }.fold(
+        ex => {
+          log.warn("[discovery] could not bind UDP port={}, auto-discovery disabled: {}", Port, ex.getMessage)
+          new AutoCloseable { override def close(): Unit = () }
+        }
+      , identity
+      )
     }
 }

@@ -13,7 +13,7 @@ import scala.util.Try
 
 import spray.json._
 
-import app.stream.{HlsBackend, ResilientHlsSource}
+import app.stream.{HlsError, ResilientHlsSource}
 import app.sys.LogConfig
 import org.slf4j.Logger
 
@@ -200,27 +200,27 @@ object HDHomeRunError {
 
   /** Maps internal 4th Gen, Legacy, stream, and transport exceptions to SiliconDust HDHomeRun errors. */
   def fromThrowable(ex: Throwable): HDHomeRunError = unwrap(ex) match {
-    case Tablo4thGen.Error.NoAvailableTuners => AllTunersInUse
-    case TabloLegacy.Channel.Response.NoAvailableTunersError => AllTunersInUse
-    case _: Tablo4thGen.Error.ChannelNotFound => UnknownChannel
-    case _: TabloLegacy.Channel.Response.ChannelNotFoundError => UnknownChannel
-    case _: Tablo4thGen.Error.NoSignalLock => TuneFailed
-    case _: Tablo4thGen.Error.WatchFailed => TuneFailed
-    case _: TabloLegacy.Channel.Response.TuneFailedError => TuneFailed
-    case _: Tablo4thGen.Error.NoVideoData => NoVideoData
-    case _: TabloLegacy.Channel.Response.NoVideoDataError => NoVideoData
-    case _: HlsBackend.HlsError => NoVideoData
+    case FourthGenError.NoAvailableTuners => AllTunersInUse
+    case LegacyError.NoAvailableTunersError => AllTunersInUse
+    case _: FourthGenError.ChannelNotFound => UnknownChannel
+    case _: LegacyError.ChannelNotFoundError => UnknownChannel
+    case _: FourthGenError.NoSignalLock => TuneFailed
+    case _: FourthGenError.WatchFailed => TuneFailed
+    case _: LegacyError.TuneFailedError => TuneFailed
+    case _: FourthGenError.NoVideoData => NoVideoData
+    case _: LegacyError.NoVideoDataError => NoVideoData
+    case _: HlsError => NoVideoData
     case _: ResilientHlsSource.StallTimeoutException => NoVideoData
-    case _: Tablo4thGen.Error.SystemBusy => SystemBusy
-    case Tablo4thGen.Error.SessionTokenMissing => SystemBusy
-    case _: Tablo4thGen.Error.SessionFailed => SystemBusy
-    case _: Tablo4thGen.Error.SessionDeleteFailed => SystemBusy
-    case Tablo4thGen.Error.WatchCancelled => SystemBusy
-    case _: Tablo4thGen.Error.LoginFailed => SystemBusy
-    case _: Tablo4thGen.Error.DeviceNotFound => SystemBusy
-    case _: Tablo4thGen.Error.SelectFailed => SystemBusy
-    case Tablo4thGen.Error.MissingEmail | Tablo4thGen.Error.MissingPassword | Tablo4thGen.Error.NoProfilesFound | Tablo4thGen.Error.NoDevicesFound => SystemBusy
-    case _: TabloLegacy.Channel.Response.SystemBusyError => SystemBusy
+    case _: FourthGenError.SystemBusy => SystemBusy
+    case FourthGenError.SessionTokenMissing => SystemBusy
+    case _: FourthGenError.SessionFailed => SystemBusy
+    case _: FourthGenError.SessionDeleteFailed => SystemBusy
+    case FourthGenError.WatchCancelled => SystemBusy
+    case _: FourthGenError.LoginFailed => SystemBusy
+    case _: FourthGenError.DeviceNotFound => SystemBusy
+    case _: FourthGenError.SelectFailed => SystemBusy
+    case FourthGenError.MissingEmail | FourthGenError.MissingPassword | FourthGenError.NoProfilesFound | FourthGenError.NoDevicesFound => SystemBusy
+    case _: LegacyError.SystemBusyError => SystemBusy
     case _: StreamTcpException | _: IOException | _: TimeoutException | _: scala.concurrent.TimeoutException => SystemBusy
     case _ => TuneFailed
   }
