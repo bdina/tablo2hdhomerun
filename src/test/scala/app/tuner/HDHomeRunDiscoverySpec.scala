@@ -108,4 +108,26 @@ class HDHomeRunDiscoverySpec extends AnyFlatSpec with Matchers {
 
     leCrc shouldBe expectedCrc
   }
+
+  it should "encode non-wildcard deviceId TLV fields accurately via VarHandle" in {
+    val pkt = buildTestDiscoverRequest(deviceType = HDHomeRunDiscovery.DeviceTypeTuner, deviceId = 0x1030001CL)
+    val parsed = HDHomeRunDiscovery.parseRequest(pkt, pkt.length)
+    val _ = parsed.map(_.deviceId) shouldBe Some(Some(0x1030001CL))
+
+    val reply = HDHomeRunDiscovery.buildReply(
+      deviceIdHex = "1030001C"
+    , tunerCount = 2
+    , baseUrl = "http://127.0.0.1:8080"
+    , lineupUrl = "http://127.0.0.1:8080/lineup.json"
+    )
+    val bb = ByteBuffer.wrap(reply)
+    val _ = (bb.getShort() & 0xFFFF) shouldBe HDHomeRunDiscovery.TypeDiscoverRpy
+    val payloadLen = bb.getShort() & 0xFFFF
+    val payloadBytes = new Array[Byte](payloadLen)
+    bb.get(payloadBytes)
+    // First TLV: TagDeviceType (0x01, len 4, value 0x00000001)
+    // Second TLV: TagDeviceId (0x02, len 4, value 0x1030001C)
+    val _ = payloadBytes.slice(0, 6) shouldBe Array[Byte](0x01, 0x04, 0x00, 0x00, 0x00, 0x01)
+    payloadBytes.slice(6, 12) shouldBe Array[Byte](0x02, 0x04, 0x10, 0x30, 0x00, 0x1C)
+  }
 }

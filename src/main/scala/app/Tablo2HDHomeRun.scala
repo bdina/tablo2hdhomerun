@@ -105,8 +105,7 @@ object Tablo2HDHomeRun {
       val targetHost =
         if (host == "0.0.0.0" || host == "::" || host == "[::]" || host == "0:0:0:0:0:0:0:0") "127.0.0.1"
         else host
-      val socket = new java.net.Socket()
-      try {
+      scala.util.Using.resource(new java.net.Socket()) { socket =>
         socket.connect(new java.net.InetSocketAddress(targetHost, port), timeoutMs)
         socket.setSoTimeout(timeoutMs)
         val out = socket.getOutputStream
@@ -118,8 +117,6 @@ object Tablo2HDHomeRun {
         )
         val statusLine = Option(reader.readLine()).getOrElse("")
         statusLine.startsWith("HTTP/1.1 200") || statusLine.startsWith("HTTP/1.0 200")
-      } finally {
-        val _ = Try(socket.close())
       }
     }.getOrElse(false)
 
@@ -129,12 +126,10 @@ object Tablo2HDHomeRun {
       .orElse {
         Try {
           Option(getClass.getResourceAsStream("/version.properties")).flatMap { in =>
-            try {
+            scala.util.Using.resource(in) { stream =>
               val props = new java.util.Properties()
-              props.load(in)
+              props.load(stream)
               Option(props.getProperty("version")).map(_.trim).filter(_.nonEmpty)
-            } finally {
-              in.close()
             }
           }
         }.toOption.flatten
@@ -143,9 +138,9 @@ object Tablo2HDHomeRun {
         Try {
           val resources = this.getClass.getClassLoader.getResources("META-INF/MANIFEST.MF")
           Iterator.continually(resources).takeWhile(_.hasMoreElements).flatMap { e =>
-            val in = e.nextElement().openStream()
-            try Option(new java.util.jar.Manifest(in).getMainAttributes.getValue("App-Version"))
-            finally in.close()
+            scala.util.Using.resource(e.nextElement().openStream()) { in =>
+              Option(new java.util.jar.Manifest(in).getMainAttributes.getValue("App-Version"))
+            }
           }.find(_.nonEmpty)
         }.toOption.flatten
       }

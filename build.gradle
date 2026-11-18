@@ -205,6 +205,8 @@ scalaCli {
 
 def javaOutputVersion = {
   def v = JavaVersion.current()
+  if (v.isCompatibleWith(JavaVersion.VERSION_25)) return 25
+  if (v.isCompatibleWith(JavaVersion.VERSION_21)) return 21
   if (v.isCompatibleWith(JavaVersion.VERSION_17)) return 17
   if (v.isCompatibleWith(JavaVersion.VERSION_11)) return 11
   return 11

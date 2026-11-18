@@ -15,12 +15,10 @@ object SlateVideoSource {
   lazy val slateBytes: ByteString = {
     val stream = getClass.getResourceAsStream(ResourcePath)
     if (stream != null) {
-      try {
-        val bytes = stream.readAllBytes()
+      scala.util.Using.resource(stream) { s =>
+        val bytes = s.readAllBytes()
         log.info(s"Loaded slate video asset ($ResourcePath): ${bytes.length} bytes")
         ByteString(bytes)
-      } finally {
-        stream.close()
       }
     } else {
       log.warn(s"Slate video asset not found on classpath: $ResourcePath; falling back to empty")

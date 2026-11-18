@@ -32,6 +32,14 @@ class Tablo4thGenHmacSpec extends AnyFlatSpec with Matchers {
     out.filter(c => (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) shouldBe out
   }
 
+  it should "preserve leading zero bytes in lowercase hex digests" in {
+    val md5 = Hmac.md5Hex("test-494")
+    val _ = md5 shouldBe "002aa897bd3f2067f6657db2302d0b34"
+    val _ = md5 should have length 32
+    val hmac = Hmac.hmacMd5Hex("data", "key")
+    hmac should have length 32
+  }
+
   "Hmac.sign" should "return auth header starting with tablo and deviceKey" in {
     val (authHeader, date) = Hmac.sign("GET", "/path", None, "hashKey", "deviceKey")
     val _ = authHeader should startWith("tablo:deviceKey:")

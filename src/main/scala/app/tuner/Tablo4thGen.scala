@@ -283,21 +283,22 @@ object Tablo4thGen {
 
   object Hmac {
     val log = LoggerFactory.getLogger(this.getClass)
+    private val LowerHex = java.util.HexFormat.of()
 
     private def secretKeySpec(key: String, algorithm: String): SecretKeySpec =
-      SecretKeySpec(key.getBytes("UTF-8"), algorithm)
+      SecretKeySpec(key.getBytes(java.nio.charset.StandardCharsets.UTF_8), algorithm)
 
     def md5Hex(input: String): String = {
       val md = MessageDigest.getInstance("MD5")
-      val digest = md.digest(input.getBytes("UTF-8"))
-      digest.map("%02x".format(_)).mkString
+      val digest = md.digest(input.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      LowerHex.formatHex(digest)
     }
 
     def hmacMd5Hex(data: String, key: String): String = {
       val mac = Mac.getInstance("HmacMD5")
       mac.init(secretKeySpec(key, "HmacMD5"))
-      val hmacBytes = mac.doFinal(data.getBytes("UTF-8"))
-      hmacBytes.map("%02x".format(_)).mkString
+      val hmacBytes = mac.doFinal(data.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+      LowerHex.formatHex(hmacBytes)
     }
 
     def sign(method: String, path: String, body: Option[String], hashKey: String, deviceKey: String): (String, String) = {

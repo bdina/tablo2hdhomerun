@@ -1,8 +1,10 @@
 package app.tuner
 
+import java.lang.invoke.{MethodHandles, VarHandle}
 import java.net.{InetSocketAddress, StandardSocketOptions}
-import java.nio.ByteBuffer
+import java.nio.{ByteBuffer, ByteOrder}
 import java.nio.channels.DatagramChannel
+import java.nio.charset.StandardCharsets
 import java.util.zip.CRC32
 
 import org.slf4j.LoggerFactory
@@ -15,6 +17,10 @@ import app.config.AppConfig
 
 object HDHomeRunDiscovery {
   val log = LoggerFactory.getLogger(this.getClass)
+
+  private val ShortBe: VarHandle = MethodHandles.byteArrayViewVarHandle(classOf[Array[Short]], ByteOrder.BIG_ENDIAN)
+  private val IntBe: VarHandle = MethodHandles.byteArrayViewVarHandle(classOf[Array[Int]], ByteOrder.BIG_ENDIAN)
+  private val IntLe: VarHandle = MethodHandles.byteArrayViewVarHandle(classOf[Array[Int]], ByteOrder.LITTLE_ENDIAN)
 
   val Port: Int = 65001
   val TypeDiscoverReq: Int = 0x0002
@@ -39,21 +45,16 @@ object HDHomeRunDiscovery {
   def parseRequest(bytes: Array[Byte], length: Int): Option[ParsedRequest] = {
     if (length < 8) None
     else {
-      val bb = ByteBuffer.wrap(bytes, 0, length)
-      val packetType = bb.getShort() & 0xFFFF
+      val packetType = (ShortBe.get(bytes, 0): Short) & 0xFFFF
       if (packetType != TypeDiscoverReq) None
       else {
-        val payloadLen = bb.getShort() & 0xFFFF
+        val payloadLen = (ShortBe.get(bytes, 2): Short) & 0xFFFF
         if (4 + payloadLen + 4 > length) None
         else {
           val crc = new CRC32()
           crc.update(bytes, 0, 4 + payloadLen)
           val expectedCrc = crc.getValue() & 0xFFFFFFFFL
-          val b0 = bytes(4 + payloadLen).toLong & 0xFFL
-          val b1 = bytes(4 + payloadLen + 1).toLong & 0xFFL
-          val b2 = bytes(4 + payloadLen + 2).toLong & 0xFFL
-          val b3 = bytes(4 + payloadLen + 3).toLong & 0xFFL
-          val leCrc = (b3 << 24) | (b2 << 16) | (b1 << 8) | b0
+          val leCrc = (IntLe.get(bytes, 4 + payloadLen): Int).toLong & 0xFFFFFFFFL
           if (expectedCrc != leCrc) {
             log.debug("[discovery] CRC mismatch expected={} got={}", expectedCrc, leCrc)
             None
@@ -76,11 +77,9 @@ object HDHomeRunDiscovery {
 
                 if (pos + tagLen <= end) {
                   if (tag == TagDeviceType && tagLen == 4) {
-                    val tbb = ByteBuffer.wrap(bytes, pos, 4)
-                    devType = Some(tbb.getInt().toLong & 0xFFFFFFFFL)
+                    devType = Some((IntBe.get(bytes, pos): Int).toLong & 0xFFFFFFFFL)
                   } else if (tag == TagDeviceId && tagLen == 4) {
-                    val ibb = ByteBuffer.wrap(bytes, pos, 4)
-                    devId = Some(ibb.getInt().toLong & 0xFFFFFFFFL)
+                    devId = Some((IntBe.get(bytes, pos): Int).toLong & 0xFFFFFFFFL)
                   }
                   pos += tagLen
                 } else {
@@ -103,9 +102,9 @@ object HDHomeRunDiscovery {
   , deviceAuth: String = "tabloauth123"
   ): Array[Byte] = {
     val devIdLong = Try(java.lang.Long.parseLong(deviceIdHex, 16)).getOrElse(0x12345678L)
-    val baseBytes = (baseUrl + "\u0000").getBytes("UTF-8")
-    val lineupBytes = (lineupUrl + "\u0000").getBytes("UTF-8")
-    val authBytes = (deviceAuth + "\u0000").getBytes("UTF-8")
+    val baseBytes = (baseUrl + "\u0000").getBytes(StandardCharsets.UTF_8)
+    val lineupBytes = (lineupUrl + "\u0000").getBytes(StandardCharsets.UTF_8)
+    val authBytes = (deviceAuth + "\u0000").getBytes(StandardCharsets.UTF_8)
 
     val baos = new java.io.ByteArrayOutputStream()
 
@@ -121,13 +120,13 @@ object HDHomeRunDiscovery {
       baos.write(value, 0, value.length)
     }
 
-    val dtBuf = ByteBuffer.allocate(4)
-    dtBuf.putInt(DeviceTypeTuner.toInt)
-    writeTlv(TagDeviceType, dtBuf.array())
+    val dtArr = new Array[Byte](4)
+    IntBe.set(dtArr, 0, DeviceTypeTuner.toInt)
+    writeTlv(TagDeviceType, dtArr)
 
-    val idBuf = ByteBuffer.allocate(4)
-    idBuf.putInt(devIdLong.toInt)
-    writeTlv(TagDeviceId, idBuf.array())
+    val idArr = new Array[Byte](4)
+    IntBe.set(idArr, 0, devIdLong.toInt)
+    writeTlv(TagDeviceId, idArr)
 
     writeTlv(TagTunerCount, Array(tunerCount.toByte))
     writeTlv(TagBaseUrl, baseBytes)
@@ -137,21 +136,17 @@ object HDHomeRunDiscovery {
     val payload = baos.toByteArray
     val payloadLen = payload.length
 
-    val packetBuf = ByteBuffer.allocate(4 + payloadLen + 4)
-    packetBuf.putShort(TypeDiscoverRpy.toShort)
-    packetBuf.putShort(payloadLen.toShort)
-    packetBuf.put(payload)
+    val packet = new Array[Byte](4 + payloadLen + 4)
+    ShortBe.set(packet, 0, TypeDiscoverRpy.toShort)
+    ShortBe.set(packet, 2, payloadLen.toShort)
+    System.arraycopy(payload, 0, packet, 4, payloadLen)
 
     val crc = new CRC32()
-    crc.update(packetBuf.array(), 0, 4 + payloadLen)
+    crc.update(packet, 0, 4 + payloadLen)
     val crcVal = crc.getValue() & 0xFFFFFFFFL
+    IntLe.set(packet, 4 + payloadLen, crcVal.toInt)
 
-    packetBuf.put((crcVal & 0xFF).toByte)
-    packetBuf.put(((crcVal >> 8) & 0xFF).toByte)
-    packetBuf.put(((crcVal >> 16) & 0xFF).toByte)
-    packetBuf.put(((crcVal >> 24) & 0xFF).toByte)
-
-    packetBuf.array()
+    packet
   }
 
   def start(config: AppConfig): AutoCloseable =
@@ -168,52 +163,47 @@ object HDHomeRunDiscovery {
 
         @volatile var running = true
 
-        val thread = new Thread(new Runnable {
-          override def run(): Unit = {
-            val buf = ByteBuffer.allocate(1500)
-            while (running && channel.isOpen) {
-              try {
-                buf.clear()
-                val sender = channel.receive(buf)
-                if (sender != null) {
-                  val length = buf.position()
-                  val bytes = buf.array()
-                  parseRequest(bytes, length) match {
-                    case Some(req) =>
-                      val matchesType =
-                        req.deviceType.contains(DeviceTypeWildcard) ||
-                        req.deviceType.contains(DeviceTypeTuner) ||
-                        req.deviceType.isEmpty
-                      val reqId = req.deviceId.getOrElse(DeviceIdWildcard)
-                      val ourIdLong = Try(java.lang.Long.parseLong(config.proxy.deviceId, 16)).getOrElse(0x12345678L)
-                      val matchesId = reqId == DeviceIdWildcard || reqId == ourIdLong
-                      if (matchesType && matchesId) {
-                        log.debug("[discovery] discover request from={}, sending reply", sender)
-                        val currentTuners = if (AppContext.discover != null) AppContext.discover.TunerCount else config.proxy.effectiveTunerCount
-                        val reply = buildReply(
-                          deviceIdHex = config.proxy.deviceId
-                        , tunerCount = currentTuners
-                        , baseUrl = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}"
-                        , lineupUrl = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}/lineup.json"
-                        )
-                        val replyBuf = ByteBuffer.wrap(reply)
-                        val _ = channel.send(replyBuf, sender)
-                      }
-                    case None => ()
-                  }
+        val _ = Thread.ofVirtual().name("hdhomerun-discovery-thread").start(() => {
+          val buf = ByteBuffer.allocate(1500)
+          while (running && channel.isOpen) {
+            try {
+              buf.clear()
+              val sender = channel.receive(buf)
+              if (sender != null) {
+                val length = buf.position()
+                val bytes = buf.array()
+                parseRequest(bytes, length) match {
+                  case Some(req) =>
+                    val matchesType =
+                      req.deviceType.contains(DeviceTypeWildcard) ||
+                      req.deviceType.contains(DeviceTypeTuner) ||
+                      req.deviceType.isEmpty
+                    val reqId = req.deviceId.getOrElse(DeviceIdWildcard)
+                    val ourIdLong = Try(java.lang.Long.parseLong(config.proxy.deviceId, 16)).getOrElse(0x12345678L)
+                    val matchesId = reqId == DeviceIdWildcard || reqId == ourIdLong
+                    if (matchesType && matchesId) {
+                      log.debug("[discovery] discover request from={}, sending reply", sender)
+                      val currentTuners = if (AppContext.discover != null) AppContext.discover.TunerCount else config.proxy.effectiveTunerCount
+                      val reply = buildReply(
+                        deviceIdHex = config.proxy.deviceId
+                      , tunerCount = currentTuners
+                      , baseUrl = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}"
+                      , lineupUrl = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}/lineup.json"
+                      )
+                      val replyBuf = ByteBuffer.wrap(reply)
+                      val _ = channel.send(replyBuf, sender)
+                    }
+                  case None => ()
                 }
-              } catch {
-                case _: java.nio.channels.AsynchronousCloseException => running = false
-                case _: java.nio.channels.ClosedChannelException => running = false
-                case NonFatal(ex) if running =>
-                  log.debug("[discovery] receive error", ex)
               }
+            } catch {
+              case _: java.nio.channels.AsynchronousCloseException => running = false
+              case _: java.nio.channels.ClosedChannelException => running = false
+              case NonFatal(ex) if running =>
+                log.debug("[discovery] receive error", ex)
             }
           }
-        }, "hdhomerun-discovery-thread")
-
-        thread.setDaemon(true)
-        thread.start()
+        })
 
         new AutoCloseable {
           override def close(): Unit = {
