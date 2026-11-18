@@ -14,7 +14,7 @@ ARG GRADLE_VERSION=9.3.1
 # Run `docker build --no-cache .` to update dependencies
 RUN apt-get update -y \
  && apt-get upgrade -y \
- && apt-get install -y wget unzip build-essential zlib1g-dev \
+ && apt-get install -y wget unzip build-essential zlib1g-dev ca-certificates \
  && apt-get autoremove --purge -y \
  && wget https://github.com/graalvm/graalvm-ce-builds/releases/download/graal-${GRAAL_VERSION}/graalvm-community-jdk-${JAVA_VERSION}_linux-x64_bin.tar.gz -P /tmp \
  && mkdir -p /opt/graalvm-community-jdk-${JAVA_VERSION} \
@@ -61,13 +61,24 @@ RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon nativeImage
 # Create the minimal runtime image
 FROM scratch AS app
 
+LABEL org.opencontainers.image.title="tablo2hdhomerun" \
+      org.opencontainers.image.description="HDHomeRun compatible network TV Tuner API proxy for Tablo TV devices (native)"
+
 ENV APP_HOME=/opt/tablo2hdhomerun
 ENV PATH=${APP_HOME}:${PATH}
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
 
 WORKDIR ${APP_HOME}
 
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /usr/share/zoneinfo /usr/share/zoneinfo
 COPY --from=build /graalvm/src/project/build/tablo2hdhomerun* ${APP_HOME}/
 
 EXPOSE 8080/tcp 65001/udp
+
+STOPSIGNAL SIGTERM
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD [ "/opt/tablo2hdhomerun/tablo2hdhomerun", "--healthcheck" ]
 
 CMD [ "./tablo2hdhomerun" , "-d" ]

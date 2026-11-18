@@ -115,11 +115,11 @@ print(f"Generated HDHomeRun DeviceID: {device_id}")
 ```
 
 ### Pre-Computed Valid Examples
-You can pick any of these valid Device IDs directly:
+You can pick any of these valid Device IDs directly (validated by `ConfigTypes.DeviceId` in `ac54fca`):
 - `1030001C` (HDHR3-US 2-tuner series)
-- `1030002A` (HDHR3-US 2-tuner series)
+- `10300026` (HDHR3-US 2-tuner series)
 - `1040001D` (HDHR4 CONNECT series)
-- `10500011` (HDHR4/5 QUATRO 4-tuner series)
+- `10500016` (HDHR4/5 QUATRO 4-tuner series)
 - `12345674` (SiliconDust checksum-compliant version of the default `12345678`)
 
 ---

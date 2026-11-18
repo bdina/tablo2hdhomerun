@@ -120,17 +120,26 @@ sourceSets {
     }
 }
 
-task repl(type:JavaExec) {
+tasks.register('repl', JavaExec) {
     mainClass = 'scala.tools.nsc.MainGenericRunner'
     classpath = sourceSets.main.runtimeClasspath + configurations.replCompiler
     standardInput = System.in
     args '-usejavacp'
 }
 
-task mergeReferenceConf {
+def generatedResourcesDir = layout.buildDirectory.dir('generated-resources')
+
+tasks.register('mergeReferenceConf') {
     description = 'Merges all reference.conf files from Pekko dependencies'
+    def pekkoJars = configurations.runtimeClasspath.elements.map { files ->
+        files.collect { it.asFile }.findAll { it.name.contains('pekko') }
+    }
+    inputs.files(pekkoJars)
+    inputs.property('projectVersion', provider { project.version.toString() })
+    outputs.dir(generatedResourcesDir)
+
     doLast {
-        def outputDir = file("${buildDir}/generated-resources")
+        def outputDir = generatedResourcesDir.get().asFile
         outputDir.mkdirs()
 
         def referenceConf = new StringBuilder()
@@ -138,8 +147,7 @@ task mergeReferenceConf {
 
         configurations.runtimeClasspath.each { jar ->
             if (jar.name.contains('pekko')) {
-                def zipFile = new java.util.zip.ZipFile(jar)
-                try {
+                new java.util.zip.ZipFile(jar).withCloseable { zipFile ->
                     def refEntry = zipFile.getEntry('reference.conf')
                     if (refEntry) {
                         referenceConf.append(zipFile.getInputStream(refEntry).text)
@@ -150,21 +158,17 @@ task mergeReferenceConf {
                         versionConf.append(zipFile.getInputStream(verEntry).text)
                         versionConf.append('\n')
                     }
-                } finally {
-                    zipFile.close()
                 }
             }
         }
 
-        file("${outputDir}/reference.conf").text = referenceConf.toString()
-        file("${outputDir}/version.conf").text = versionConf.toString()
-        file("${outputDir}/version.properties").text = "version=${project.version}\n"
+        new File(outputDir, 'reference.conf').text = referenceConf.toString()
+        new File(outputDir, 'version.conf').text = versionConf.toString()
+        new File(outputDir, 'version.properties').text = "version=${project.version}\n"
     }
 }
 
-sourceSets.main.resources.srcDirs += "${buildDir}/generated-resources"
-
-processResources.dependsOn mergeReferenceConf
+sourceSets.main.resources.srcDir(tasks.named('mergeReferenceConf'))
 
 jar {
     archiveClassifier = 'plain'

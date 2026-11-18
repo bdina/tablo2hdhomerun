@@ -214,12 +214,15 @@ object SessionManager {
     , cause: Throwable
     ) extends Command
 
-    /** Fired by scheduleOnce when IdleGrace expires. */
+    /** Fired by `Behaviors.withTimers` (`GraceTimerKey`) when IdleGrace expires. */
     case class GraceExpired(channelId: String) extends Command
 
     /** Fired when upstream completes or fails, triggering immediate teardown and removal. */
     case class UpstreamEnded(channelId: String, leaseId: String) extends Command
   }
+
+  // Request also includes ShutdownAll(replyTo: ActorRef[pekko.Done]) for CoordinatedShutdown (2a70433).
+  // Internal ChannelId, ClientId, and LeaseId keys use opaque String wrappers via SessionIds (ac54fca).
 }
 ```
 
@@ -254,8 +257,8 @@ object SessionManager {
       meta: TabloSessionMeta
     , hubSource: Source[ByteString, NotUsed]
     , teardown: () => Unit
-    , graceTimer: pekko.actor.Cancellable
     , drainSwitch: Option[UniqueKillSwitch] = None
+    , enteredAtNanos: Long = System.nanoTime()
     ) extends SessionState
   }
 }
@@ -306,9 +309,9 @@ object SessionManager {
             None
         }
       }
-      val timer = context.scheduleOnce(IdleGrace, context.self, Command.GraceExpired(channelId))
-      context.log.info("[session] idle-grace channelId={} token={}", channelId, LogConfig.truncate(live.meta.token))
-      SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, drainSwitch)
+      timers.startSingleTimer(GraceTimerKey(channelId), Command.GraceExpired(channelId.asString), IdleGrace)
+      context.log.info("[session] idle-grace channelId={} token={}", channelId.asString, LogConfig.truncate(live.meta.token))
+      SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, drainSwitch)
     }
 
     def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
@@ -355,7 +358,7 @@ object SessionManager {
             Behaviors.same
 
           case Some(idle: SessionState.IdleGrace) =>
-            idle.graceTimer.cancel()
+            timers.cancel(GraceTimerKey(channelId))
             idle.drainSwitch.foreach(_.shutdown())
             sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId))
             context.log.info("[session] grace-cancel channelId={} clientId={}", channelId, clientId)
@@ -431,8 +434,8 @@ object SessionManager {
             context.log.warn("[session] upstream-ended channelId={} clients={}", channelId, live.clientIds.size)
             teardownAndRemove(channelId, live.teardown)
           case Some(idle: SessionState.IdleGrace) if idle.meta.leaseId == leaseId =>
-            val _ = idle.graceTimer.cancel()
-            context.log.warn("[session] upstream-ended channelId={} during idle-grace", channelId)
+            timers.cancel(GraceTimerKey(channelId))
+            context.log.warn("[session] upstream-ended channelId={} during idle-grace", channelId.asString)
             teardownAndRemove(channelId, idle.teardown)
           case _ =>
             context.log.debug("[session] upstream-ended ignored channelId={} leaseId={}", channelId, leaseId)

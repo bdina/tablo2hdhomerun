@@ -40,9 +40,22 @@ WORKDIR ${tablo2hdhomerun_HOME}
 
 COPY --from=build ${OPENJDK_WORKDIR}/build/libs/tablo2hdhomerun-*.jar ${tablo2hdhomerun_HOME}/tablo2hdhomerun.jar
 
+RUN java --sun-misc-unsafe-memory-access=allow \
+         -XX:+UseCompactObjectHeaders \
+         -XX:+UseSerialGC \
+         -XX:ArchiveClassesAtExit=app-cds.jsa \
+         -Djava.net.preferIPv4Stack=true \
+         -jar tablo2hdhomerun.jar --healthcheck ; \
+    test -f app-cds.jsa
+
 EXPOSE 8080/tcp 65001/udp
 
 # And we finally create the application layer
 FROM tablo2hdhomerun-base AS tablo2hdhomerun
+LABEL org.opencontainers.image.title="tablo2hdhomerun" \
+      org.opencontainers.image.description="HDHomeRun compatible network TV Tuner API proxy for Tablo TV devices (JVM)"
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD [ "java", "--sun-misc-unsafe-memory-access=allow", "-XX:+UseCompactObjectHeaders", "-XX:+UseSerialGC", "-XX:SharedArchiveFile=app-cds.jsa", "-Xshare:auto", "-Xms4m", "-Xmx16m", "-XX:MaxNewSize=8m", "-Djava.net.preferIPv4Stack=true", "-jar", "tablo2hdhomerun.jar", "--healthcheck" ]
 ENTRYPOINT [ "java" ]
-CMD [ "--sun-misc-unsafe-memory-access=allow" , "-XX:+UseCompactObjectHeaders" , "-XX:+UseSerialGC" , "-Xms32m" , "-Xmx128m" , "-XX:MaxNewSize=64m" , "-Xss256k" , "-XX:+ExitOnOutOfMemoryError" , "-Djava.net.preferIPv4Stack=true" , "-jar" , "tablo2hdhomerun.jar" , "-d" ]
+CMD [ "--sun-misc-unsafe-memory-access=allow", "-XX:+UseCompactObjectHeaders", "-XX:+UseSerialGC", "-XX:SharedArchiveFile=app-cds.jsa", "-Xshare:auto", "-Xms32m", "-Xmx128m", "-XX:MaxNewSize=64m", "-Xss256k", "-XX:+ExitOnOutOfMemoryError", "-Djava.net.preferIPv4Stack=true", "-jar", "tablo2hdhomerun.jar", "-d" ]

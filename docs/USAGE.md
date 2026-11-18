@@ -136,7 +136,7 @@ docker run -e TABLO_IP=192.168.1.100 -e PROXY_IP=0.0.0.0 \
            -p 8080:8080 tablo2hdhomerun:jvm
 ```
 
-`Dockerfile.jvm` runs Java 25 with `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, `-Xss256k`, and `-d` enabled by default.
+`Dockerfile.jvm` runs Java 25 with a build-time AppCDS archive (`-XX:SharedArchiveFile=app-cds.jsa -Xshare:auto`), `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, `-Xss256k`, `STOPSIGNAL SIGTERM`, a built-in Docker `HEALTHCHECK`, and `-d` enabled by default.
 
 ### Option 4: Docker Native (Recommended)
 
@@ -147,7 +147,7 @@ docker run -e TABLO_IP=192.168.1.100 -e PROXY_IP=0.0.0.0 \
            tablo2hdhomerun:native
 ```
 
-The native Docker image includes Intel Media driver for QSV hardware acceleration.
+`Dockerfile.native` packages the static musl binary on `scratch` with `/etc/ssl/certs/ca-certificates.crt` (for 4th Gen cloud TLS requests), `/usr/share/zoneinfo`, `STOPSIGNAL SIGTERM`, and a built-in `HEALTHCHECK`.
 
 ## Environment Variables
 
@@ -494,7 +494,7 @@ The native image is configured with:
 - Max Heap: 128MB
 - Max New Gen: 64MB
 
-`Dockerfile.jvm` aligns the Java 25 development/JVM runtime to the same heap ceiling using `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, and `-Xss256k` (while keeping Tiered/C2 JIT compilation enabled). In `docker-compose.example.yml`, `--healthcheck` invocations override the native heap flags with `-XX:MinHeapSize=4m -XX:MaxHeapSize=16m -XX:MaxNewSize=8m` to minimize transient probe memory.
+`Dockerfile.jvm` aligns the Java 25 development/JVM runtime to the same heap ceiling using `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-XX:SharedArchiveFile=app-cds.jsa -Xshare:auto`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, and `-Xss256k` (while keeping Tiered/C2 JIT compilation enabled). In `docker-compose.example.yml` and container `HEALTHCHECK` definitions, `--healthcheck` probes override the native heap flags with `-XX:MinHeapSize=4m -XX:MaxHeapSize=16m -XX:MaxNewSize=8m` to minimize transient probe memory. `application.conf` (`2a70433`) caps Pekko HTTP `host-connection-pool.max-connections = 8` and enables graceful `CoordinatedShutdown` on `SIGTERM`.
 
 For systems with limited memory, native image heap bounds can be adjusted at build time in `build.gradle`.
 

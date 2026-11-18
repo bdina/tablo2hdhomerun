@@ -52,14 +52,14 @@ Over-the-air broadcast streams during antenna flutter, wind gusts, or fringe rec
 
 | Component | Technology |
 |-----------|------------|
-| Language | Scala 3.10.1 |
-| Runtime | JVM (Java 25+) or GraalVM Native Image |
-| HTTP Framework | Apache Pekko HTTP 2.0.0 |
-| Actor System | Apache Pekko Actor Typed 2.0.0 |
+| Language | Scala 3.10.1 (`given`/`using`, context functions, `enum`, `opaque type`, `boundary`/`break`) |
+| Runtime | JVM (Java 25+ with AppCDS, virtual threads, `VarHandle`, `HexFormat`) or GraalVM 25 Native Image |
+| HTTP Framework | Apache Pekko HTTP 2.0.0 (`host-connection-pool.max-connections = 8`) |
+| Actor System | Apache Pekko Actor Typed 2.0.0 (functional behaviors, `withTimers`, `pipeToSelf`, `CoordinatedShutdown`) |
 | JSON | Spray JSON |
 | XML | scala-xml |
 | Build | Gradle 9.3.1 with Shadow plugin 9.6.1 |
-| Containerization | Docker (Ubuntu 24.04 base) |
+| Containerization | Docker (Ubuntu 24.04 / `scratch` native & Temurin 25 Alpine JVM with `HEALTHCHECK`) |
 
 ## System Architecture
 
@@ -121,26 +121,35 @@ Built on Apache Pekko's typed actor model for concurrent, fault-tolerant process
 - Manages channel lineup cache (1-day TTL)
 - Fetches channels from Tablo `/guide/channels` and `/batch` endpoints
 - Transforms Tablo channel format to HDHomeRun JSON format
+- Coalesces concurrent cold-cache `Fetch` requests onto a single asynchronous scan via `context.pipeToSelf` (`2a70433`)
 
 #### GuideActor
 
 - Manages program guide cache (1-hour TTL)
-- Fetches program schedules for all channels
+- Fetches program schedules for all channels and coalesces cold-cache `FetchGuide` callers via `context.pipeToSelf` (`2a70433`)
 - Generates fallback programming when Tablo API unavailable
 - Singleton pattern to reduce resource usage
 
-#### FsMonitor / FsNotify
+#### FsMonitor / FsNotify / FsScan
 
-- Optional filesystem monitoring for media file transcoding
-- Scans directories for `.ts` and `.mkv` files
+- Optional filesystem monitoring for media file transcoding using functional actor behaviors and `Behaviors.withTimers` (`2a70433`)
+- `FsScan` completes directory walks via `context.pipeToSelf` and stops after replying (`2a70433`)
+- `QueueProxy` polls `FFMpegDelegate` via `withTimers` rather than stream kill switches (`2a70433`)
 - Tracks processed files via extended file attributes (`user.fs.state`)
 
 #### FFMpegDelegate
 
-- Manages FFmpeg transcoding processes
+- Functional actor managing FFmpeg transcoding processes (`2a70433`)
 - Handles lifecycle (start, status, stop)
 - Intel QuickSync Video (QSV) hardware acceleration support
-- Uses top-level `TranscodeError` (`NoStackTrace` value ADT, aliased as `FFMpegDelegate.Error`) and `Try[Path]` with `boundary`/`break` instead of throwing exceptions during file validation and extended-attribute locking
+- Uses top-level `TranscodeError` (`NoStackTrace` value ADT, aliased as `FFMpegDelegate.Error`) and `Try[Path]` with `boundary`/`break` instead of throwing exceptions during file validation and extended-attribute locking (`ae9a35e`, `8ae6357`)
+
+#### CoordinatedShutdown (`Tablo2HDHomeRun`, `2a70433`)
+
+- Orchestrates ordered graceful teardown across Pekko 2.0 phases (`pekko.coordinated-shutdown.default-phase-timeout = 10 s`):
+  1. `PhaseServiceUnbind`: unbinds the HTTP server port
+  2. `PhaseServiceRequestsDone`: stops 4th-gen `TunerState` polling and asks `SessionManager` (`ShutdownAll`) to release active/opening/idle-grace Tablo sessions
+  3. `PhaseActorSystemTerminate`: closes the UDP port 65001 discovery socket
 
 #### TunerStateActor (4th Gen)
 
@@ -331,9 +340,10 @@ The project includes custom Gradle plugins in `buildSrc/`:
 
 #### JVM & Dispatcher Runtime Configuration
 
-- **JVM Runtime Alignment (`Dockerfile.jvm`, Java 25)**: Runs with `-XX:+UseCompactObjectHeaders -XX:+UseSerialGC -Xms32m -Xmx128m -XX:MaxNewSize=64m -Xss256k -XX:+ExitOnOutOfMemoryError` (matching Native Image Serial GC and heap ceilings while keeping Tiered/C2 JIT active for representative throughput).
-- **Artifact Packaging**: `shadowJar` excludes Scala 3 compile-time `**/*.tasty` reflection metadata not needed at runtime.
-- **Pekko Dispatcher Bounds (`application.conf`)**: `default-dispatcher.fork-join-executor.parallelism-min = 2`, `internal-dispatcher.fork-join-executor.parallelism-min = 1`, and `default-blocking-io-dispatcher.thread-pool-executor.fixed-pool-size = 4` reduce idle thread stacks without capping `parallelism-max` or shrinking `SessionManager.BroadcastHubBufferSize` (`1024`).
+- **JVM Runtime Alignment (`Dockerfile.jvm`, Java 25)**: Runs with `-XX:+UseCompactObjectHeaders -XX:+UseSerialGC -XX:SharedArchiveFile=app-cds.jsa -Xshare:auto -Xms32m -Xmx128m -XX:MaxNewSize=64m -Xss256k -XX:+ExitOnOutOfMemoryError` (matching Native Image Serial GC and heap ceilings while loading a build-time AppCDS archive and keeping Tiered/C2 JIT active).
+- **Artifact & Resource Packaging**: `shadowJar` excludes Scala 3 compile-time `**/*.tasty` reflection metadata not needed at runtime, and Gradle `mergeReferenceConf` declares input JARs and `layout.buildDirectory` outputs for incremental builds.
+- **Native Container Runtime (`Dockerfile.native`)**: `FROM scratch` includes `/etc/ssl/certs/ca-certificates.crt` (`SSL_CERT_FILE`), `/usr/share/zoneinfo`, `STOPSIGNAL SIGTERM`, OCI metadata labels, and a built-in `HEALTHCHECK` probing `/opt/tablo2hdhomerun/tablo2hdhomerun --healthcheck`.
+- **Pekko Dispatcher & Pool Bounds (`application.conf`, `2a70433`)**: `default-dispatcher.fork-join-executor.parallelism-min = 2`, `internal-dispatcher.fork-join-executor.parallelism-min = 1`, `default-blocking-io-dispatcher.thread-pool-executor.fixed-pool-size = 4`, `http.host-connection-pool.max-connections = 8`, and `coordinated-shutdown.default-phase-timeout = 10 s`.
 - **Healthcheck Fast-Path**: `--healthcheck` resolves `PROXY_IP`/`PROXY_PORT` before full `AppConfig.load()` initialization and runs cleanly with `-XX:MinHeapSize=4m -XX:MaxHeapSize=16m -XX:MaxNewSize=8m`.
 
 ## Project Structure
@@ -364,7 +374,9 @@ tablo2hdhomerun/
 │   │   │   ├── HlsPlaylistPoller.scala  # Adaptive HLS polling & session-presence probing
 │   │   │   ├── HlsSegmentFetch.scala    # Byte-range segment fetch validation
 │   │   │   ├── M3U8.scala               # M3U8 playlist parser
+│   │   │   ├── MpegTsDiscontinuity.scala # MPEG-TS continuity & PCR/PTS helpers
 │   │   │   ├── MpegTsSync.scala         # Slice recovery, CC rewriting, I-frame alignment, stream metrics
+│   │   │   ├── MpegTsTypes.scala        # Opaque types (Pid, ContinuityCounter, PtsTicks, OptPts)
 │   │   │   ├── ResilientHlsSource.scala # Outer stream supervisor & keepalive
 │   │   │   └── StreamMetrics.scala      # Signal/feed/symbol quality snapshot & HLS collector
 │   │   └── tuner/                       # Tablo legacy & 4th gen implementations

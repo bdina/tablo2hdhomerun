@@ -4,6 +4,7 @@ import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
 import org.gradle.api.tasks.Input
 import org.gradle.api.tasks.InputDirectory
+import org.gradle.api.tasks.Internal
 import org.gradle.api.tasks.TaskAction
 
 class ScalaCliTask extends DefaultTask {
@@ -24,9 +25,12 @@ class ScalaCliTask extends DefaultTask {
     @Input
     Integer maxHeap = 32
 
+    @Internal
+    File outputDir = project.layout.buildDirectory.get().asFile
+
     @TaskAction
     void runCommand() {
-        project.buildDir.mkdirs()
+        outputDir.mkdirs()
 
         logger.lifecycle "Loaded project ${project} (scala ${project.ext.scala_ver})"
         def conf = project.getConfigurations()
@@ -48,7 +52,7 @@ class ScalaCliTask extends DefaultTask {
         def command = "scala-cli --power package ${sources} --scala ${project.ext.scala_ver} --native -Xasync ${dStr} -o ${project.name}"
         logger.lifecycle "Executing scala-cli command -> ${command}"
 
-        def process = command.execute(null, project.buildDir)
+        def process = command.execute(null, outputDir)
         process.consumeProcessOutput(System.out, System.err)
         process.waitFor()
 
@@ -65,6 +69,6 @@ import org.gradle.api.Project
 class ScalaCliPlugin implements Plugin<Project> {
     @Override
     void apply(Project project) {
-        project.task('scalaCli', type: ScalaCliTask)
+        project.tasks.register('scalaCli', ScalaCliTask)
     }
 }

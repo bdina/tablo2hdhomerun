@@ -40,7 +40,7 @@ class NativeImageTask extends DefaultTask {
         , "-R:MaxHeapSize=${maxHeap}m"
         , "-R:MaxNewSize=${maxNew}m"
         ]
-        def source = [ '-jar', "${project.buildDir}/libs/${project.name}-${project.version}.jar", '-o', "${project.name}" ]
+        def source = [ '-jar', "${buildDir}/libs/${project.name}-${project.version}.jar", '-o', "${project.name}" ]
         def command = EXECUTABLE + parameters*.arg + heap + source
         logger.lifecycle "Executing native-image command -> '${command.join(' ')}'"
 
@@ -61,6 +61,6 @@ import org.gradle.api.Project
 class NativeImagePlugin implements Plugin<Project> {
     @Override
     void apply(Project project) {
-        project.task('nativeImage', type: NativeImageTask)
+        project.tasks.register('nativeImage', NativeImageTask)
     }
 }
