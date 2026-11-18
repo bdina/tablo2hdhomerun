@@ -53,7 +53,7 @@ object HlsPlaylistPoller {
   , checkSessionAlive: () => Future[Boolean]
   , state: PollState = PollState("", 0, 0, 0, 0, false)
   , maxFetchFailures: Int = 4
-  )(implicit ec: ExecutionContext): Future[Outcome] =
+  )(using ec: ExecutionContext): Future[Outcome] =
     outcome match {
       case emit @ Emit(next, segments) if segments.isEmpty && shouldProbeSession(next) =>
         checkSessionAlive().map { alive =>

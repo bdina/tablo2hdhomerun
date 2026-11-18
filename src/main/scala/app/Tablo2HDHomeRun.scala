@@ -43,7 +43,7 @@ object AppContext {
   def config: AppConfig = _config
   def discover: Discover = _discover
   def updateDiscover(discover: Discover): Unit = { _discover = discover }
-  implicit def system: ActorSystem[pekko.NotUsed] = _system
+  def system: ActorSystem[pekko.NotUsed] = _system
 
   private[app] def initialize(config: AppConfig, discover: Discover): Unit = {
     _config = config
@@ -81,7 +81,7 @@ object Tablo2HDHomeRun {
     AppContext.initialize(system)
     system.whenTerminated.onComplete { _ =>
       discoveryCloser.close()
-    }(system.executionContext)
+    }(using system.executionContext)
   }
 
   private def buildDiscover(config: AppConfig): Discover =
@@ -170,7 +170,7 @@ object Tablo2HDHomeRun {
       val monitor = context.spawn(app.sys.FsMonitor(), "monitor-actor", pekko.actor.typed.Props.empty)
       context.log.debug("[scan] monitor spawned root={}", root)
 
-      implicit val timeout: pekko.util.Timeout = pekko.util.Timeout(3, java.util.concurrent.TimeUnit.SECONDS)
+      given pekko.util.Timeout = pekko.util.Timeout(3, java.util.concurrent.TimeUnit.SECONDS)
 
       val path = Paths.get(root)
       context.ask[app.sys.FsMonitor.Watch,app.sys.FsMonitor.Ack](monitor, ref => app.sys.FsMonitor.Watch(path=path,ext=Seq("ts","mkv"),replyTo=ref)) {
@@ -187,7 +187,7 @@ object Tablo2HDHomeRun {
 
     val maybeRoutes = config.tablo.gen match {
       case TabloGen.FourthGen =>
-        implicit val sys: ActorSystem[?] = context.system
+        given ActorSystem[?] = context.system
         app.tuner.Tablo4thGen.Auth.initialize(tabloAuth) match {
           case Failure(err) =>
             log.error("[startup] 4th gen authentication failed: {}", err.getMessage)
@@ -240,7 +240,7 @@ object Tablo2HDHomeRun {
             Some(app.tuner.Tablo4thGen.routes(lineup, sessionManager, authContext))
         }
       case TabloGen.Legacy =>
-        implicit val sys: ActorSystem[?] = context.system
+        given ActorSystem[?] = context.system
         val tuners = config.proxy.tunerCount match {
           case Some(overrideCount) =>
             log.info("[startup] using configured tunerCount override={}", overrideCount)
@@ -266,9 +266,9 @@ object Tablo2HDHomeRun {
     }
   }
 
-  implicit def system: ActorSystem[pekko.NotUsed] = AppContext.system
+  inline given system: ActorSystem[pekko.NotUsed] = AppContext.system
 
-  implicit def ec: scala.concurrent.ExecutionContext = system.executionContext
+  inline given ec: scala.concurrent.ExecutionContext = system.executionContext
 
   val Response = app.tuner.TabloLegacy.Response
   val Lineup = app.tuner.TabloLegacy.Lineup

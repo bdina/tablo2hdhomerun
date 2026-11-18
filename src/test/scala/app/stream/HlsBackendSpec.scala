@@ -10,7 +10,7 @@ import scala.concurrent.duration._
 
 @RunWith(classOf[JUnitRunner])
 class HlsBackendSpec extends AnyFlatSpec with Matchers with ScalaFutures {
-  implicit override val patienceConfig: PatienceConfig = PatienceConfig(timeout = 5.seconds)
+  override given patienceConfig: PatienceConfig = PatienceConfig(timeout = 5.seconds)
 
   "HlsBackend" should "have name hls" in {
     HlsBackend.name shouldBe "hls"

@@ -172,7 +172,7 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
           org.apache.pekko.pattern.after(
             300.millis
           , system.classicSystem.scheduler
-          )(scala.concurrent.Future.successful(data))(system.executionContext)
+          )(scala.concurrent.Future.successful(data))(using system.executionContext)
         )
       }
 

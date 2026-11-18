@@ -218,7 +218,6 @@ def scalaCompilerParams = [
   , '-explain'
   , '-language:noAutoTupling'
   , '-Werror'
-  , '-Wconf:msg=Implicit parameters should be provided with a `using` clause:s'
   , '-Wnonunit-statement'
   , '-Wsafe-init'
   , '-Wunused:all'

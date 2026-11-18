@@ -16,7 +16,7 @@ import DefaultJsonProtocol._
 class SafeJsonSpec extends AnyFlatSpec with Matchers {
 
   private case class SamplePayload(id: Int, name: String)
-  private implicit val sampleFormat: RootJsonFormat[SamplePayload] = jsonFormat2(SamplePayload.apply)
+  private given sampleFormat: RootJsonFormat[SamplePayload] = jsonFormat2(SamplePayload.apply)
 
   "SafeJson.parseAs" should "decode valid JSON and reject invalid payloads as Failure without throwing" in {
     val _ = SafeJson.parseAs[SamplePayload](""" {"id": 42, "name": "tablo"} """) shouldBe Success(SamplePayload(42, "tablo"))

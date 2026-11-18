@@ -19,7 +19,7 @@ class Tablo4thGenTunerStateSpec extends ScalaTestWithActorTestKit with AnyWordSp
   import Tablo4thGen.TunerState
   import TunerState.{Snapshot, TuneOrigin, TunedChannel, TunerSlot, TunerStateActor}
 
-  private implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+  private given ec: scala.concurrent.ExecutionContext = system.executionContext
 
   "TunerState.isValidChannelPath" should {
     "accept device /guide/channels/<digits> paths and reject traversal or query paths" in {
@@ -197,7 +197,7 @@ class Tablo4thGenTunerStateSpec extends ScalaTestWithActorTestKit with AnyWordSp
         }
       , pollInterval = 60.millis
       , initialDelay = 10.millis
-      )(system)
+      )(using system)
 
       val _ = eventually(timeout(3.seconds), interval(30.millis)) {
         actor ! TunerStateActor.Request.GetState(stateProbe.ref)

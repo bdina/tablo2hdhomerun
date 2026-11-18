@@ -24,7 +24,7 @@ object HDHomeRunStatus extends DefaultJsonProtocol {
   , targetIp: Option[String] = None
   )
 
-  implicit val tunerStatusFormat: RootJsonFormat[TunerStatus] = new RootJsonFormat[TunerStatus] {
+  given tunerStatusFormat: RootJsonFormat[TunerStatus] = new RootJsonFormat[TunerStatus] {
     override def write(s: TunerStatus): JsValue = {
       val fields = Vector.newBuilder[(String, JsValue)]
       fields += ("Resource" -> JsString(s.Resource))

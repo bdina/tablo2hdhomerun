@@ -14,7 +14,7 @@ import scala.concurrent.duration._
 
 @RunWith(classOf[JUnitRunner])
 class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFutures {
-  implicit override val patienceConfig: PatienceConfig = PatienceConfig(timeout = 5.seconds)
+  override given patienceConfig: PatienceConfig = PatienceConfig(timeout = 5.seconds)
 
   private def response(
     token: Option[String] = Some("watch-token")
@@ -430,7 +430,7 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     , "auth-init-failure-spec"
     )
     try {
-      Tablo4thGen.Auth.initialize(app.config.TabloAuthEnv(email = None, password = None))(sys) shouldBe
+      Tablo4thGen.Auth.initialize(app.config.TabloAuthEnv(email = None, password = None))(using sys) shouldBe
         scala.util.Failure(FourthGenError.MissingEmail)
     } finally {
       sys.terminate()

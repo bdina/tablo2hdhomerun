@@ -9,9 +9,9 @@ import spray.json._
 
 import org.apache.pekko.http.scaladsl.model.Uri
 
-import app.tuner.Tablo4thGen.Auth.JsonProtocol._
-import app.tuner.Tablo4thGen.Lineup.JsonProtocol._
-import app.tuner.Tablo4thGen.Channel.Response.JsonProtocol._
+import app.tuner.Tablo4thGen.Auth.JsonProtocol.given
+import app.tuner.Tablo4thGen.Lineup.JsonProtocol.given
+import app.tuner.Tablo4thGen.Channel.Response.JsonProtocol.given
 
 @RunWith(classOf[JUnitRunner])
 class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
@@ -87,7 +87,7 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
   }
 
   "Watch4thGenRequest" should "round-trip to JSON with extra metadata" in {
-    import app.tuner.Tablo4thGen.Channel.Request.Watch4thGenRequest.JsonProtocol._
+    import app.tuner.Tablo4thGen.Channel.Request.Watch4thGenRequest.JsonProtocol.given
     val deviceId = "531B3222-12BE-4C78-A45F-DEFBD2EF227F"
     val v = Tablo4thGen.Channel.Request.Watch4thGenRequest.forDevice(deviceId)
     val json = v.toJson
@@ -250,7 +250,7 @@ class Tablo4thGenJsonSpec extends AnyFlatSpec with Matchers {
   }
 
   "TunerSlot" should "parse active and idle entries from /server/tuners" in {
-    import app.tuner.Tablo4thGen.TunerState.JsonProtocol._
+    import app.tuner.Tablo4thGen.TunerState.JsonProtocol.given
     val json =
       """[
         |  {

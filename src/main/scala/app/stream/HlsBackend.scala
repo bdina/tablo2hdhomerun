@@ -43,6 +43,7 @@ object HlsBackend extends StreamBackend {
 
   type SegmentInfo = HlsPlaylistPoller.SegmentInfo
   type PollState = HlsPlaylistPoller.PollState
+  type WithMaterializer[A] = pekko.stream.Materializer ?=> A
 
   override def stream(
     playlistUrl: String
@@ -52,17 +53,17 @@ object HlsBackend extends StreamBackend {
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   , metricsCollector: Option[StreamMetrics.HlsCollector] = None
-  )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
+  )(using system: ActorSystem[?]): Source[ByteString, ?] = {
     import org.apache.pekko.actor.typed.scaladsl.adapter._
-    implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-    val mat: pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
+    given ec: scala.concurrent.ExecutionContext = system.executionContext
+    given pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
     val http = Http(system.toClassic)
     val bytesOut = new java.util.concurrent.atomic.AtomicLong(0L)
     val lastSeqOut = new java.util.concurrent.atomic.AtomicInteger(initialSeq)
     val hlsConfig = AppContext.config.stream.hls
     val heartbeatSec = hlsConfig.heartbeatSec
     var heartbeatTask: Option[org.apache.pekko.actor.Cancellable] = None
-    def fetchPlaylistBody(url: String)(implicit mat: pekko.stream.Materializer): Future[String] =
+    def fetchPlaylistBody(url: String): WithMaterializer[Future[String]] =
       fetchPlaylist(url, HlsPlaylistFetch.Validators()).flatMap {
         case Left(body) => Future.successful(body)
         case Right(_) => Future.failed(HlsError.UnexpectedNotModified)
@@ -70,7 +71,7 @@ object HlsBackend extends StreamBackend {
     def fetchPlaylist(
       url: String
     , validators: HlsPlaylistFetch.Validators
-    )(implicit mat: pekko.stream.Materializer): Future[Either[String, Unit]] = {
+    ): WithMaterializer[Future[Either[String, Unit]]] = {
       val headers = HlsPlaylistFetch.conditionalHeaders(validators)
       val request = HttpRequest(uri = url).withHeaders(headers)
       http.singleRequest(request).flatMap { response =>
@@ -85,7 +86,7 @@ object HlsBackend extends StreamBackend {
         }
       }
     }
-    def fetchPlaylistWithState(state: PollState)(implicit mat: pekko.stream.Materializer): Future[(PollState, Option[String])] = {
+    def fetchPlaylistWithState(state: PollState): WithMaterializer[Future[(PollState, Option[String])]] = {
       val validators = HlsPlaylistFetch.fromPollState(state)
       val headers = HlsPlaylistFetch.conditionalHeaders(validators)
       val request = HttpRequest(uri = state.baseUrl).withHeaders(headers)
@@ -145,7 +146,7 @@ object HlsBackend extends StreamBackend {
                   done.onComplete {
                     case Success(_) => ()
                     case Failure(_) => val _ = response.entity.discardBytes()
-                  }(ec)
+                  }(using ec)
                 }
               case HlsSegmentFetch.Retry(reason) if retriesLeft > 0 =>
                 val _ = response.entity.discardBytes()
@@ -164,7 +165,7 @@ object HlsBackend extends StreamBackend {
       }
       attemptFetch(maxSegmentRetries)
     }
-    def resolveMediaPlaylistUrl(url: String)(implicit mat: pekko.stream.Materializer): Future[String] =
+    def resolveMediaPlaylistUrl(url: String): WithMaterializer[Future[String]] =
       fetchPlaylistBody(url).flatMap { body =>
         val lines = body.linesIterator.map(_.trim).filter(_.nonEmpty).toVector
         val isMaster = lines.exists(_.startsWith("#EXT-X-STREAM-INF"))
@@ -179,7 +180,7 @@ object HlsBackend extends StreamBackend {
             case Some(relative) =>
               val resolved = M3U8.resolveSegmentUri(relative, url)
               log.debug("[stream:hls] master playlist variant={}", resolved)
-              resolveMediaPlaylistUrl(resolved)(mat)
+              resolveMediaPlaylistUrl(resolved)
             case None => Future.successful(url)
           }
         } else {
@@ -191,7 +192,7 @@ object HlsBackend extends StreamBackend {
             m3u8Line match {
               case Some(relative) =>
                 val resolved = M3U8.resolveSegmentUri(relative, url)
-                fetchPlaylistBody(resolved)(mat).map(_ => resolved)
+                fetchPlaylistBody(resolved).map(_ => resolved)
               case None => Future.successful(url)
             }
           }
@@ -204,9 +205,9 @@ object HlsBackend extends StreamBackend {
       , state.lastTargetDuration
       , defaultPollSec
       )
-    def step(state: PollState)(implicit mat: pekko.stream.Materializer): Future[Option[(PollState, Seq[SegmentInfo])]] = {
+    def step(state: PollState): WithMaterializer[Future[Option[(PollState, Seq[SegmentInfo])]]] = {
       val doFetch: () => Future[Option[(PollState, Seq[SegmentInfo])]] = () => {
-        fetchPlaylistWithState(state)(mat)
+        fetchPlaylistWithState(state)
           .map { case (fetchedState, bodyOpt) =>
             bodyOpt match {
               case None =>
@@ -326,12 +327,12 @@ object HlsBackend extends StreamBackend {
       heartbeatTask = Some(
         system.toClassic.scheduler.scheduleWithFixedDelay(heartbeatSec.seconds, heartbeatSec.seconds) { () =>
           log.debug("[stream:hls] heartbeat label={} lastSeq={} bytes={}", label, lastSeqOut.get(), bytesOut.get())
-        }(ec)
+        }(using ec)
       )
       Source.futureSource(
-        resolveMediaPlaylistUrl(playlistUrl)(mat).map { url =>
+        resolveMediaPlaylistUrl(playlistUrl).map { url =>
           log.debug("[stream:hls] resolved media playlist label={} url={}", label, url)
-          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s)(mat))
+          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s))
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
@@ -380,7 +381,7 @@ object HlsBackend extends StreamBackend {
                       onSeqAdvanced(seg.sequence + 1)
                     case Failure(ex) =>
                       log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)
-                  }(ec)
+                  }(using ec)
                 }
 
               countedSource

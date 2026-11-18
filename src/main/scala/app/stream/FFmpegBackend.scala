@@ -23,8 +23,8 @@ object FFmpegBackend extends StreamBackend {
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   , metricsCollector: Option[StreamMetrics.HlsCollector] = None
-  )(implicit system: ActorSystem[?]): Source[ByteString, ?] = {
-    implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+  )(using system: ActorSystem[?]): Source[ByteString, ?] = {
+    given scala.concurrent.ExecutionContext = system.executionContext
     Source.lazySource { () =>
       val ffmpegCmd = Array(
         "ffmpeg"

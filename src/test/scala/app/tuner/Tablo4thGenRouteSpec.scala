@@ -22,7 +22,7 @@ import org.apache.pekko.http.scaladsl.testkit.RouteTestTimeout
 
 trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRouteTest {
 
-  implicit def defaultTimeout: RouteTestTimeout =
+  given defaultTimeout: RouteTestTimeout =
     RouteTestTimeout(5.seconds)
 
   def typedSystem: pekko.actor.typed.ActorSystem[pekko.NotUsed] =
@@ -149,7 +149,7 @@ trait Tablo4thGenRouteSpecBase extends AnyFlatSpecLike with Matchers with Scalat
     AppContext.initialize(config, discover)
     AppContext.initialize(typedSystem)
     val lineup = createStub4thGenLineupActor()
-    Tablo4thGen.routes(lineup, sessionManager, stubAuthContext)(typedSystem)
+    Tablo4thGen.routes(lineup, sessionManager, stubAuthContext)(using typedSystem)
   }
 
   def routes(rejectNoTuners: Boolean = false, envOverrides: Map[String, String] = Map.empty): Route = {
@@ -205,7 +205,7 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
           val _ = system.scheduler.scheduleOnce(500.millis, new Runnable {
             override def run(): Unit =
               replyTo ! Tablo4thGen.Channel.SessionManager.Response.Attached(org.apache.pekko.stream.scaladsl.Source.empty)
-          })(system.dispatcher)
+          })(using system.dispatcher)
           Behaviors.same
         case _ =>
           Behaviors.same
@@ -334,12 +334,12 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
     val discover = TabloLegacy.Response.Discover("Tablo 4th Gen Proxy", config.proxy.ip, config.tablo.protocol, config.proxy.port, 2, "12345678")
     AppContext.initialize(config, discover)
     AppContext.initialize(typedSystem)
-    val routeWithTimeoutLineup = Tablo4thGen.Channel.route(mgr, Some(silentLineup), Some(stubAuthContext))(typedSystem)
+    val routeWithTimeoutLineup = Tablo4thGen.Channel.route(mgr, Some(silentLineup), Some(stubAuthContext))(using typedSystem)
     val _ = Get("/auto/v4.1") ~> routeWithTimeoutLineup ~> check {
       val _ = status shouldBe StatusCodes.ServiceUnavailable
       header("X-HDHomeRun-Error").map(_.value()) shouldBe Some("803 System Busy")
     }
-    val routeWithoutLineup = Tablo4thGen.Channel.route(mgr, None, Some(stubAuthContext))(typedSystem)
+    val routeWithoutLineup = Tablo4thGen.Channel.route(mgr, None, Some(stubAuthContext))(using typedSystem)
     val _ = Get("/auto/v4.1") ~> routeWithoutLineup ~> check {
       val _ = status shouldBe StatusCodes.ServiceUnavailable
       header("X-HDHomeRun-Error").map(_.value()) shouldBe Some("803 System Busy")

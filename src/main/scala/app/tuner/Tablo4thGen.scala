@@ -42,6 +42,7 @@ import app.sys.{LogConfig, SafeJson}
 
 object Tablo4thGen {
   val log = LoggerFactory.getLogger(this.getClass)
+  type WithSystem[A] = ActorSystem[?] ?=> A
 
   val LIGHTHOUSE_BASE_URL = "https://lighthousetv.ewscloud.com/api/v2"
   val USER_AGENT = "Tablo-FAST/1.7.0 (Mobile; iPhone; iOS 18.4)"
@@ -71,13 +72,13 @@ object Tablo4thGen {
     case class SelectResponse(token: Option[String], code: Option[Int], message: Option[String])
 
     object JsonProtocol extends DefaultJsonProtocol {
-      implicit val loginRequestFormat: JsonFormat[LoginRequest] = jsonFormat2(LoginRequest.apply)
-      implicit val loginResponseFormat: JsonFormat[LoginResponse] = jsonFormat5(LoginResponse.apply)
-      implicit val accountProfileFormat: JsonFormat[AccountProfile] = jsonFormat2(AccountProfile.apply)
-      implicit val accountDeviceFormat: JsonFormat[AccountDevice] = jsonFormat5(AccountDevice.apply)
-      implicit val accountInfoFormat: JsonFormat[AccountInfo] = jsonFormat5(AccountInfo.apply)
-      implicit val selectRequestFormat: JsonFormat[SelectRequest] = jsonFormat2(SelectRequest.apply)
-      implicit val selectResponseFormat: JsonFormat[SelectResponse] = jsonFormat3(SelectResponse.apply)
+      given loginRequestFormat: JsonFormat[LoginRequest] = jsonFormat2(LoginRequest.apply)
+      given loginResponseFormat: JsonFormat[LoginResponse] = jsonFormat5(LoginResponse.apply)
+      given accountProfileFormat: JsonFormat[AccountProfile] = jsonFormat2(AccountProfile.apply)
+      given accountDeviceFormat: JsonFormat[AccountDevice] = jsonFormat5(AccountDevice.apply)
+      given accountInfoFormat: JsonFormat[AccountInfo] = jsonFormat5(AccountInfo.apply)
+      given selectRequestFormat: JsonFormat[SelectRequest] = jsonFormat2(SelectRequest.apply)
+      given selectResponseFormat: JsonFormat[SelectResponse] = jsonFormat3(SelectResponse.apply)
     }
 
     import scala.concurrent.Await
@@ -131,9 +132,10 @@ object Tablo4thGen {
       SelectedTarget(profile, device)
     }
 
-    def authenticate(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): Future[AuthContext] = {
-      import JsonProtocol._
-      implicit val ec = system.executionContext
+    def authenticate(tabloAuth: TabloAuthEnv): WithSystem[Future[AuthContext]] = {
+      import JsonProtocol.given
+      val system = summon[ActorSystem[?]]
+      given scala.concurrent.ExecutionContext = system.executionContext
 
       validateCredentials(tabloAuth) match {
         case err: FourthGenError => Future.failed(err)
@@ -262,12 +264,12 @@ object Tablo4thGen {
       }
     }
 
-    def initialize(tabloAuth: TabloAuthEnv)(implicit system: ActorSystem[?]): Try[AuthContext] = {
+    def initialize(tabloAuth: TabloAuthEnv): WithSystem[Try[AuthContext]] = {
       _tabloAuth = Some(tabloAuth)
       Try(Await.result(authenticate(tabloAuth), 30.seconds))
     }
 
-    def refresh()(implicit system: ActorSystem[?]): Future[AuthContext] = {
+    def refresh(): WithSystem[Future[AuthContext]] = {
       _tabloAuth match {
         case Some(tabloAuth) =>
           log.info("[auth] refreshing cloud authentication tokens")
@@ -345,12 +347,12 @@ object Tablo4thGen {
     )
 
     object JsonProtocol extends DefaultJsonProtocol {
-      implicit val otaChannelInfoFormat: JsonFormat[OtaChannelInfo] = jsonFormat7(OtaChannelInfo.apply)
-      implicit val ottChannelInfoFormat: JsonFormat[OttChannelInfo] = jsonFormat7(OttChannelInfo.apply)
-      implicit val channelLineupFormat: JsonFormat[ChannelLineup] = jsonFormat5(ChannelLineup.apply)
-      implicit val deviceChannelInfoFormat: JsonFormat[DeviceChannelInfo] =
+      given otaChannelInfoFormat: JsonFormat[OtaChannelInfo] = jsonFormat7(OtaChannelInfo.apply)
+      given ottChannelInfoFormat: JsonFormat[OttChannelInfo] = jsonFormat7(OttChannelInfo.apply)
+      given channelLineupFormat: JsonFormat[ChannelLineup] = jsonFormat5(ChannelLineup.apply)
+      given deviceChannelInfoFormat: JsonFormat[DeviceChannelInfo] =
         jsonFormat(DeviceChannelInfo.apply, "call_sign", "name", "major", "minor", "network", "channel_identifier", "source")
-      implicit val deviceChannelObjectFormat: JsonFormat[DeviceChannelObject] =
+      given deviceChannelObjectFormat: JsonFormat[DeviceChannelObject] =
         jsonFormat(DeviceChannelObject.apply, "object_id", "path", "channel")
     }
 
@@ -521,8 +523,8 @@ object Tablo4thGen {
       }
 
       def apply(authContext: Auth.AuthContext): Behavior[Request] = Behaviors.setup { context =>
-        implicit val system: ActorSystem[Nothing] = context.system
-        implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
+        given ActorSystem[Nothing] = context.system
+        given scala.concurrent.ExecutionContext = context.executionContext
         var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
         var scanInProgress: Boolean = false
 
@@ -532,7 +534,7 @@ object Tablo4thGen {
           Lineup.channelToJsValue(channel, AppContext.discover.BaseURL)
 
         def fetchGuideChannels(ctx: Auth.AuthContext, allowRefresh: Boolean): Future[Seq[ChannelLineup]] = {
-          import Lineup.JsonProtocol._
+          import Lineup.JsonProtocol.given
           import pekko.http.scaladsl.unmarshalling.Unmarshal
           import pekko.http.scaladsl.model.headers._
 
@@ -648,10 +650,10 @@ object Tablo4thGen {
       val LineupStatus = Tablo2HDHomeRun.Lineup.Response.LineupStatus
     }
 
-    def route(lineupActor: ActorRef[LineupActor.Request])(implicit system: ActorSystem[?]) = {
+    def route(lineupActor: ActorRef[LineupActor.Request]): WithSystem[pekko.http.scaladsl.server.Route] = {
       path("lineup.json") {
         get {
-          implicit val timeout: pekko.util.Timeout = 3.seconds
+          given pekko.util.Timeout = 3.seconds
           val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
 
           onComplete(lineupF) {
@@ -665,7 +667,7 @@ object Tablo4thGen {
       } ~
       path("lineup_status.json") {
         get {
-          implicit val timeout: pekko.util.Timeout = 3.seconds
+          given pekko.util.Timeout = 3.seconds
           val statusF: Future[LineupActor.Response.Status] = lineupActor.ask(replyTo => LineupActor.Request.Status(replyTo))
 
           onComplete(statusF) {
@@ -700,7 +702,7 @@ object Tablo4thGen {
           if (!hlsEnabled) {
             complete(HttpResponse(StatusCodes.NotFound, entity = "HLS endpoint disabled"))
           } else {
-            implicit val timeout: pekko.util.Timeout = 3.seconds
+            given pekko.util.Timeout = 3.seconds
             val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
             onComplete(lineupF) {
               case Success(LineupActor.Response.Fetch(channels, _)) =>
@@ -749,18 +751,18 @@ object Tablo4thGen {
     )
 
     object JsonProtocol extends DefaultJsonProtocol {
-      implicit val seasonInfoFormat: JsonFormat[SeasonInfo] = jsonFormat3(SeasonInfo.apply)
-      implicit val episodeInfoFormat: JsonFormat[EpisodeInfo] = jsonFormat4(EpisodeInfo.apply)
-      implicit val movieAiringInfoFormat: JsonFormat[MovieAiringInfo] = jsonFormat3(MovieAiringInfo.apply)
-      implicit val sportEventInfoFormat: JsonFormat[SportEventInfo] = jsonFormat1(SportEventInfo.apply)
-      implicit val airingChannelFormat: JsonFormat[AiringChannel] = jsonFormat1(AiringChannel.apply)
-      implicit val guideAiringFormat: JsonFormat[GuideAiring] = jsonFormat11(GuideAiring.apply)
+      given seasonInfoFormat: JsonFormat[SeasonInfo] = jsonFormat3(SeasonInfo.apply)
+      given episodeInfoFormat: JsonFormat[EpisodeInfo] = jsonFormat4(EpisodeInfo.apply)
+      given movieAiringInfoFormat: JsonFormat[MovieAiringInfo] = jsonFormat3(MovieAiringInfo.apply)
+      given sportEventInfoFormat: JsonFormat[SportEventInfo] = jsonFormat1(SportEventInfo.apply)
+      given airingChannelFormat: JsonFormat[AiringChannel] = jsonFormat1(AiringChannel.apply)
+      given guideAiringFormat: JsonFormat[GuideAiring] = jsonFormat11(GuideAiring.apply)
     }
 
-    def route(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]) = {
+    def route(authContext: Auth.AuthContext): WithSystem[pekko.http.scaladsl.server.Route] = {
       path("guide.xml") {
         get {
-          implicit val timeout: pekko.util.Timeout = 10.seconds
+          given pekko.util.Timeout = 10.seconds
 
           val guideF: Future[GuideActor.Response.FetchGuide] =
             GuideActor.instance(authContext).ask(replyTo => GuideActor.Request.FetchGuide(replyTo))
@@ -816,17 +818,17 @@ object Tablo4thGen {
 
     private var _instance: Option[ActorRef[Request]] = None
 
-    def instance(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]): ActorRef[Request] = synchronized {
+    def instance(authContext: Auth.AuthContext): WithSystem[ActorRef[Request]] = synchronized {
       _instance.getOrElse {
-        val actor = system.systemActorOf(apply(authContext), "guide-actor-4thgen-singleton", pekko.actor.typed.Props.empty)
+        val actor = summon[ActorSystem[?]].systemActorOf(apply(authContext), "guide-actor-4thgen-singleton", pekko.actor.typed.Props.empty)
         _instance = Some(actor)
         actor
       }
     }
 
     def apply(authContext: Auth.AuthContext): Behavior[Request] = Behaviors.setup { context =>
-      implicit val system: ActorSystem[Nothing] = context.system
-      implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
+      given ActorSystem[Nothing] = context.system
+      given scala.concurrent.ExecutionContext = context.executionContext
       var cache: (scala.concurrent.duration.Deadline, Seq[Tablo2HDHomeRun.Guide.ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
       var scanInProgress: Boolean = false
 
@@ -870,7 +872,7 @@ object Tablo4thGen {
       }
 
       def fetchAiringsForChannel(channelId: String, channelName: String, major: Int, minor: Int, currentAuth: Auth.AuthContext): Future[Tablo2HDHomeRun.Guide.ChannelGuide] = {
-        import Guide.JsonProtocol._
+        import Guide.JsonProtocol.given
         import pekko.http.scaladsl.unmarshalling.Unmarshal
         import pekko.http.scaladsl.model.headers._
 
@@ -920,7 +922,7 @@ object Tablo4thGen {
       }
 
       def scan(retriedAuth: Boolean = false): Future[Seq[Tablo2HDHomeRun.Guide.ChannelGuide]] = {
-        import Lineup.JsonProtocol._
+        import Lineup.JsonProtocol.given
         import pekko.http.scaladsl.unmarshalling.Unmarshal
         import pekko.http.scaladsl.model.headers._
 
@@ -1077,7 +1079,7 @@ object Tablo4thGen {
         )
 
         object JsonProtocol extends DefaultJsonProtocol {
-          implicit val watch4thGenExtraFormat: JsonFormat[Watch4thGenExtra] = new JsonFormat[Watch4thGenExtra] {
+          given watch4thGenExtraFormat: JsonFormat[Watch4thGenExtra] = new JsonFormat[Watch4thGenExtra] {
             def write(x: Watch4thGenExtra): JsValue = JsObject(
               "deviceOS" -> JsString(x.deviceOS)
             , "deviceOSVersion" -> JsString(x.deviceOSVersion)
@@ -1112,7 +1114,7 @@ object Tablo4thGen {
                 case _ => deserializationError("Watch4thGenExtra expected")
               }
           }
-          implicit val watch4thGenRequestFormat: JsonFormat[Watch4thGenRequest] = new JsonFormat[Watch4thGenRequest] {
+          given watch4thGenRequestFormat: JsonFormat[Watch4thGenRequest] = new JsonFormat[Watch4thGenRequest] {
             def write(x: Watch4thGenRequest): JsValue = JsObject(
               "device_id" -> JsString(x.device_id)
             , "bandwidth" -> x.bandwidth.map(JsString(_)).getOrElse(JsNull)
@@ -1147,9 +1149,9 @@ object Tablo4thGen {
       case class Watch4thGenResponse(token: Option[String], expires: Option[String], keepalive: Option[Int], playlist_url: Option[String])
 
       object JsonProtocol extends DefaultJsonProtocol {
-        implicit val serverModelFormat: JsonFormat[ServerModel] = jsonFormat2(ServerModel.apply)
-        implicit val serverInfoFormat: JsonFormat[ServerInfo] = jsonFormat2(ServerInfo.apply)
-        implicit val watch4thGenResponseFormat: JsonFormat[Watch4thGenResponse] = jsonFormat4(Watch4thGenResponse.apply)
+        given serverModelFormat: JsonFormat[ServerModel] = jsonFormat2(ServerModel.apply)
+        given serverInfoFormat: JsonFormat[ServerInfo] = jsonFormat2(ServerInfo.apply)
+        given watch4thGenResponseFormat: JsonFormat[Watch4thGenResponse] = jsonFormat4(Watch4thGenResponse.apply)
       }
     }
 
@@ -1197,7 +1199,7 @@ object Tablo4thGen {
       , timeoutBudget: FiniteDuration
       , retryDelay: FiniteDuration = 2.seconds
       , onAttemptFailed: (Int, Throwable, FiniteDuration) => Unit = (_, _, _) => ()
-      )(implicit ec: scala.concurrent.ExecutionContext): Future[Session] = {
+      )(using ec: scala.concurrent.ExecutionContext): Future[Session] = {
         val promise = scala.concurrent.Promise[Session]()
         val deadline = System.nanoTime() + timeoutBudget.toNanos
 
@@ -1227,7 +1229,7 @@ object Tablo4thGen {
                     val _ = promise.tryFailure(Tablo4thGen.Error.WatchCancelled)
                   }
                 }
-            }(ec)
+            }(using ec)
           }
 
         attempt(1)
@@ -1336,14 +1338,14 @@ object Tablo4thGen {
       def releaseThenTune[A](
         release: () => Future[Unit]
       , tune: () => Future[A]
-      )(implicit ec: scala.concurrent.ExecutionContext): Future[A] =
+      )(using ec: scala.concurrent.ExecutionContext): Future[A] =
         Try(release()).fold(Future.failed, identity).recover { case _ => () }.flatMap(_ => tune())
 
       def coldRetune[A](
         sessionClosedByTablo: Boolean
       , release: () => Future[Unit]
       , tune: () => Future[A]
-      )(implicit ec: scala.concurrent.ExecutionContext): Future[A] =
+      )(using ec: scala.concurrent.ExecutionContext): Future[A] =
         if (sessionClosedByTablo) tune()
         else releaseThenTune(release, tune)
     }
@@ -1567,7 +1569,7 @@ object Tablo4thGen {
           val drainSwitch = {
             import pekko.stream.scaladsl.{Keep, Sink}
             import pekko.stream.KillSwitches
-            implicit val classicSystem: org.apache.pekko.actor.ActorSystem = context.system.classicSystem
+            given org.apache.pekko.actor.ActorSystem = context.system.classicSystem
             val drainGraph = live.hubSource.viaMat(KillSwitches.single)(Keep.right).to(Sink.ignore)
             Try(drainGraph.run()) match {
               case Success(switch) => Some(switch)
@@ -1864,7 +1866,7 @@ object Tablo4thGen {
       , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit, AtomicReference[MpegTsSync.CachedHeaders]) => Unit
       , onFailed: Throwable => Unit
       , onUpstreamEnded: String => Unit
-      )(implicit system: ActorSystem[?]): Unit = {
+      ): WithSystem[Unit] = {
         val _ = startCancellable(channelId, authContext, onCheckIn, onFailed, onUpstreamEnded)
       }
 
@@ -1874,8 +1876,9 @@ object Tablo4thGen {
       , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit, AtomicReference[MpegTsSync.CachedHeaders]) => Unit
       , onFailed: Throwable => Unit
       , onUpstreamEnded: String => Unit
-      )(implicit system: ActorSystem[?]): () => Unit = {
-        implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      ): WithSystem[() => Unit] = {
+        val system = summon[ActorSystem[?]]
+        given ec: scala.concurrent.ExecutionContext = system.executionContext
         val HttpCtx = Http()
         import org.apache.pekko.actor.typed.scaladsl.adapter._
         val scheduler = system.toClassic.scheduler
@@ -1973,7 +1976,7 @@ object Tablo4thGen {
           token.filter(t => !except.contains(t)).foreach { t =>
             endSession(t).recover {
               case ex => log.warn("[channel] session end failed leaseId={} token={}", leaseId, t, ex)
-            }(ec)
+            }(using ec)
           }
 
         def parseSessionResponse(body: String, fallbackToken: Option[String]): WatchSession.Session | FourthGenError =
@@ -2088,7 +2091,7 @@ object Tablo4thGen {
             if (!leaseStopped.get()) {
               keepaliveTask.foreach(_.cancel())
               keepaliveTask = Some(
-                scheduler.scheduleOnce(WatchSession.keepaliveRetrySec.seconds) { runKeepalive() }(ec)
+                scheduler.scheduleOnce(WatchSession.keepaliveRetrySec.seconds) { runKeepalive() }(using ec)
               )
             }
 
@@ -2098,7 +2101,7 @@ object Tablo4thGen {
               WatchSession.keepaliveDelaySec(currentSession.get()) match {
                 case Some(delaySec) =>
                   keepaliveTask = Some(
-                    scheduler.scheduleOnce(delaySec.seconds) { runKeepalive() }(ec)
+                    scheduler.scheduleOnce(delaySec.seconds) { runKeepalive() }(using ec)
                   )
                 case None =>
                   if (!keepaliveMissingLogged) {
@@ -2166,7 +2169,7 @@ object Tablo4thGen {
                       Future.successful(false)
                   }
                 }
-              }(ec)
+              }(using ec)
             }
 
           def runKeepalive(): Unit = {
@@ -2206,7 +2209,7 @@ object Tablo4thGen {
                   lastSeqRef.set(0)
                   scheduleKeepalive()
                   streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true, () => probeSessionAlive())
-                }(ec)
+                }(using ec)
               )
             }
           }
@@ -2289,7 +2292,7 @@ object Tablo4thGen {
 
           val _ = scheduler.scheduleOnce(1500.millis) {
             val _ = headersReadyPromise.trySuccess(())
-          }(ec)
+          }(using ec)
 
           // Serializes check-in vs upstream-ended so SessionManager always sees them in order.
           val lifecycleLock = new Object
@@ -2302,7 +2305,7 @@ object Tablo4thGen {
                 onCheckIn(meta, hubSource, teardown, cachedHeadersRef)
               }
             }
-          }(ec)
+          }(using ec)
 
           // Upstream ended on its own (recovery timeout or failure): release the Tablo session and
           // remove the SessionManager entry so the channel is immediately re-tunable.
@@ -2323,7 +2326,7 @@ object Tablo4thGen {
                 }
               }
             }
-          }(ec)
+          }(using ec)
         }
 
         val configuredRecoverySec = Option(AppContext.config).map(_.stream.resilient.recoveryTimeoutSec).getOrElse(0)
@@ -2340,17 +2343,17 @@ object Tablo4thGen {
             retuneWatchSession().flatMap { session =>
               if (session.token.isDefined) Future.successful(session)
               else Future.failed(Tablo4thGen.Error.SessionTokenMissing)
-            }(ec)
+            }(using ec)
           }
         , onCancelRelease = session => endSessionIfNeeded(session.token, None)
         , isCancelled = () => cancelled.get()
-        , scheduleRetry = (delay, task) => scheduler.scheduleOnce(delay)(task())(ec)
+        , scheduleRetry = (delay, task) => scheduler.scheduleOnce(delay)(task())(using ec)
         , onRetryTimer = timer => retryTimer = Some(timer)
         , timeoutBudget = initialTuneBudget
         , retryDelay = retryDelay
         , onAttemptFailed = (attempt, ex, delay) =>
             log.info("[4thgen-channel] initial tune channel={} leaseId={} attempt={} failed ({}), retrying in {}s...", channelDisplay, leaseId, attempt, ex.getMessage, delay.toSeconds)
-        )(ec)
+        )(using ec)
 
         tuneFuture.onComplete {
           case Success(firstSession) =>
@@ -2362,7 +2365,7 @@ object Tablo4thGen {
               log.warn("[4thgen-channel] initial tune failed after {}s opening timeout channel={} channelId={} leaseId={}", initialTuneBudget.toSeconds, channelDisplay, channelId, leaseId, ex)
               onFailed(ex)
             }
-        }(ec)
+        }(using ec)
 
         () => {
           if (cancelled.compareAndSet(false, true)) {
@@ -2393,34 +2396,35 @@ object Tablo4thGen {
 
     def route(
       sessionManager: ActorRef[SessionManager.Request]
-    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
+    ): WithSystem[pekko.http.scaladsl.server.Route] =
       route(sessionManager, None, None)
 
     def route(
       sessionManager: ActorRef[SessionManager.Request]
     , lineupActor: ActorRef[Lineup.LineupActor.Request]
-    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
+    ): WithSystem[pekko.http.scaladsl.server.Route] =
       route(sessionManager, Some(lineupActor), None)
 
     def route(
       sessionManager: ActorRef[SessionManager.Request]
     , lineupActor: ActorRef[Lineup.LineupActor.Request]
     , authContext: Auth.AuthContext
-    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route =
+    ): WithSystem[pekko.http.scaladsl.server.Route] =
       route(sessionManager, Some(lineupActor), Some(authContext))
 
     def route(
       sessionManager: ActorRef[SessionManager.Request]
     , lineupActorOpt: Option[ActorRef[Lineup.LineupActor.Request]]
     , authContextOpt: Option[Auth.AuthContext] = None
-    )(implicit system: ActorSystem[?]): pekko.http.scaladsl.server.Route = {
+    ): WithSystem[pekko.http.scaladsl.server.Route] = {
       import pekko.http.scaladsl.unmarshalling.Unmarshal
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val system = summon[ActorSystem[?]]
+      given ec: scala.concurrent.ExecutionContext = system.executionContext
       val askTimeout = Option(AppContext.config).map { c =>
         if (c.stream.resilient.recoveryTimeoutSec <= 0) 7.days
         else c.stream.resilient.recoveryTimeoutSec.seconds + 10.seconds
       }.getOrElse(70.seconds)
-      implicit val timeout: Timeout = Timeout(askTimeout)
+      given pekko.util.Timeout = Timeout(askTimeout)
       val HttpCtx = Http()
       @volatile var cachedTuners: Option[Int] = None
 
@@ -2624,7 +2628,7 @@ object Tablo4thGen {
                 , outcome
                 )
                 sessionManager ! SessionManager.Request.Release(channelId, clientId)
-              }(ec)
+              }(using ec)
               pekko.NotUsed
             }
         }
@@ -2680,9 +2684,9 @@ object Tablo4thGen {
         } else {
           import org.apache.pekko.actor.typed.scaladsl.adapter._
           val fastWindow = 50.millis
-          val fastTimer = after(fastWindow, system.toClassic.scheduler)(Future.successful(None))(ec)
-          val acquireAttempt = acquireFut.map(resp => Some(resp))(ec)
-          val initialDecision = Future.firstCompletedOf(Seq(acquireAttempt, fastTimer))(ec)
+          val fastTimer = after(fastWindow, system.toClassic.scheduler)(Future.successful(None))(using ec)
+          val acquireAttempt = acquireFut.map(resp => Some(resp))(using ec)
+          val initialDecision = Future.firstCompletedOf(Seq(acquireAttempt, fastTimer))(using ec)
 
           onComplete(initialDecision) {
             case Success(Some(resp)) =>
@@ -2699,7 +2703,7 @@ object Tablo4thGen {
                 case SessionManager.Response.Rejected(SessionManager.RejectReason.Failed(ex)) =>
                   log.warn("[channel] acquire failed channel={} channelId={} clientId={}", Lineup.channelLabel(channelId), channelId, clientId, ex)
                   Future.failed(ex)
-              }(ec)
+              }(using ec)
 
               val interval = Option(AppContext.config).map(_.proxy.preRollIntervalMs.millis).getOrElse(100.millis)
               val packets = Option(AppContext.config).map(_.proxy.preRollPackets).getOrElse(7)
@@ -2722,12 +2726,12 @@ object Tablo4thGen {
           }
         } ~
         get {
-          implicit val statusTimeout: Timeout = Timeout(3.seconds)
+          val statusTimeout = Timeout(3.seconds)
           val statusFut = getOrFetchTotalTuners().flatMap { tuners =>
             sessionManager ! SessionManager.Request.SetTotalTuners(tuners)
             sessionManager.ask[Seq[HDHomeRunStatus.TunerStatus]](replyTo =>
               SessionManager.Request.GetTunerStatuses(replyTo)
-            )(statusTimeout, system.scheduler)
+            )(using statusTimeout, system.scheduler)
           }
           onComplete(statusFut) {
             case Success(statuses) =>
@@ -2823,7 +2827,7 @@ object Tablo4thGen {
         get {
           lineupActorOpt match {
             case Some(lineupActor) =>
-              implicit val timeout: Timeout = Timeout(3.seconds)
+              given pekko.util.Timeout = Timeout(3.seconds)
               val fetchF: Future[Lineup.LineupActor.Response.Fetch] =
                 lineupActor.ask(replyTo => Lineup.LineupActor.Request.Fetch(replyTo))
               onComplete(fetchF) {
@@ -2897,7 +2901,7 @@ object Tablo4thGen {
     )
 
     object JsonProtocol extends DefaultJsonProtocol {
-      implicit val tunerSlotFormat: JsonFormat[TunerSlot] =
+      given tunerSlotFormat: JsonFormat[TunerSlot] =
         jsonFormat(TunerSlot.apply, "in_use", "channel", "recording", "channel_identifier")
     }
 
@@ -2947,10 +2951,11 @@ object Tablo4thGen {
     def isValidChannelPath(path: String): Boolean =
       path != null && ValidChannelPathPattern.matches(path.trim)
 
-    def fetchTunerSlots(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]): Future[Seq[TunerSlot]] = {
-      import JsonProtocol._
+    def fetchTunerSlots(authContext: Auth.AuthContext): WithSystem[Future[Seq[TunerSlot]]] = {
+      import JsonProtocol.given
       import pekko.http.scaladsl.unmarshalling.Unmarshal
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val system = summon[ActorSystem[?]]
+      given scala.concurrent.ExecutionContext = system.executionContext
       val activeAuth = Auth.authContext.getOrElse(authContext)
       val tunersUri = activeAuth.deviceUrl.withPath(Uri.Path("/server/tuners")).withQuery(Uri.Query("lh" -> "1"))
       val headers = Hmac.signedHeaders("GET", "/server/tuners", None, activeAuth)
@@ -2976,10 +2981,11 @@ object Tablo4thGen {
     def fetchDeviceChannel(
       channelPath: String
     , authContext: Auth.AuthContext
-    )(implicit system: ActorSystem[?]): Future[Option[Lineup.DeviceChannelObject]] = {
-      import Lineup.JsonProtocol._
+    ): WithSystem[Future[Option[Lineup.DeviceChannelObject]]] = {
+      import Lineup.JsonProtocol.given
       import pekko.http.scaladsl.unmarshalling.Unmarshal
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      val system = summon[ActorSystem[?]]
+      given scala.concurrent.ExecutionContext = system.executionContext
       val trimmedPath = if (channelPath == null) "" else channelPath.trim
       if (!isValidChannelPath(trimmedPath)) {
         log.debug("[tuner-state] skipping invalid channel path={}", trimmedPath)
@@ -3024,7 +3030,7 @@ object Tablo4thGen {
       slots: Seq[TunerSlot]
     , activeChannelStates: Map[String, String]
     , fetchChannel: String => Future[Option[Lineup.DeviceChannelObject]]
-    )(implicit ec: scala.concurrent.ExecutionContext): Future[Snapshot] = {
+    )(using ec: scala.concurrent.ExecutionContext): Future[Snapshot] = {
       val activeSlots = slots.zipWithIndex.filter { case (slot, _) =>
         slot.in_use && (slot.channel_identifier.exists(_.nonEmpty) || slot.channel.exists(_.nonEmpty))
       }
@@ -3087,9 +3093,10 @@ object Tablo4thGen {
     def pollOnce(
       sessionManager: ActorRef[Channel.SessionManager.Request]
     , authContext: Auth.AuthContext
-    )(implicit system: ActorSystem[?]): Future[Snapshot] = {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-      implicit val timeout: Timeout = Timeout(3.seconds)
+    ): WithSystem[Future[Snapshot]] = {
+      val system = summon[ActorSystem[?]]
+      given scala.concurrent.ExecutionContext = system.executionContext
+      given Timeout = Timeout(3.seconds)
       val slotsFut = fetchTunerSlots(authContext)
       val activeStatesFut = sessionManager.ask[Map[String, String]](replyTo =>
         Channel.SessionManager.Request.GetActiveChannelStates(replyTo)
@@ -3162,7 +3169,7 @@ object Tablo4thGen {
     , authContext: Auth.AuthContext
     , pollInterval: FiniteDuration = 30.seconds
     , initialDelay: FiniteDuration = 5.seconds
-    )(implicit system: ActorSystem[?]): UniqueKillSwitch = {
+    ): WithSystem[UniqueKillSwitch] = {
       startStreamWithPoller(
         tunerStateActor = tunerStateActor
       , pollFn = () => pollOnce(sessionManager, authContext)
@@ -3176,8 +3183,8 @@ object Tablo4thGen {
     , pollFn: () => Future[Snapshot]
     , pollInterval: FiniteDuration = 30.seconds
     , initialDelay: FiniteDuration = 5.seconds
-    )(implicit system: ActorSystem[?]): UniqueKillSwitch = {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+    ): WithSystem[UniqueKillSwitch] = {
+      given scala.concurrent.ExecutionContext = summon[ActorSystem[?]].executionContext
       log.info("[tuner-state] starting poll stream interval={}s", pollInterval.toSeconds)
       val (killSwitch, done) = Source
         .tick(initialDelay, pollInterval, ())
@@ -3203,10 +3210,11 @@ object Tablo4thGen {
   def detectTunerCount(
     authContext: Auth.AuthContext
   , timeout: FiniteDuration = 5.seconds
-  )(implicit system: ActorSystem[?]): Int = {
-    import Channel.Response.JsonProtocol._
+  ): WithSystem[Int] = {
+    import Channel.Response.JsonProtocol.given
     import pekko.http.scaladsl.unmarshalling.Unmarshal
-    implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+    val system = summon[ActorSystem[?]]
+    given scala.concurrent.ExecutionContext = system.executionContext
     val HttpCtx = Http()
 
     val serverInfoUri = authContext.deviceUrl.withPath(Uri.Path("/server/info")).withQuery(Uri.Query("lh" -> "1"))
@@ -3245,7 +3253,7 @@ object Tablo4thGen {
     lineupActor: ActorRef[Lineup.LineupActor.Request]
   , sessionManager: ActorRef[Channel.SessionManager.Request]
   , authContext: Auth.AuthContext
-  )(implicit system: ActorSystem[?]) =
+  ): WithSystem[pekko.http.scaladsl.server.Route] =
     Tablo2HDHomeRun.Response.Discover.route ~
       Lineup.route(lineupActor) ~
       Guide.route(authContext) ~

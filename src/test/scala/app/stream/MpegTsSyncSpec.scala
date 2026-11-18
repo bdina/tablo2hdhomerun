@@ -559,7 +559,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
     }
 
     "withPreRollKeepAlive should switch from pre-roll null chunks directly to the real source" in {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      given scala.concurrent.ExecutionContext = system.executionContext
       val media = buildMediaPacket(0x0101)
       val promise = Promise[Source[ByteString, NotUsed]]()
 
@@ -646,7 +646,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
     }
 
     "withPreRollKeepAlive should fail stream when realSourceFuture fails" in {
-      implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+      given scala.concurrent.ExecutionContext = system.executionContext
       val expectedError = new RuntimeException("Tuner failed to lock")
       val promise = Promise[Source[ByteString, NotUsed]]()
 

@@ -24,7 +24,7 @@ import app.tuner.TabloLegacy.Response.Discover
 
 trait LegacyRouteSpecBase extends AnyFlatSpecLike with Matchers with ScalatestRouteTest {
 
-  implicit def defaultTimeout: RouteTestTimeout =
+  given defaultTimeout: RouteTestTimeout =
     RouteTestTimeout(5.seconds)
 
   def typedSystem: pekko.actor.typed.ActorSystem[pekko.NotUsed] =

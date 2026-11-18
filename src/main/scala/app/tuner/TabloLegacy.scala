@@ -30,13 +30,13 @@ import app.sys.{LogConfig, SafeJson}
 
 object TabloLegacy {
   val log = Tablo2HDHomeRun.log
-  implicit def system: ActorSystem[?] = Tablo2HDHomeRun.system
-  implicit def ec: scala.concurrent.ExecutionContext = Tablo2HDHomeRun.ec
+  inline given system: ActorSystem[?] = Tablo2HDHomeRun.system
+  inline given ec: scala.concurrent.ExecutionContext = Tablo2HDHomeRun.ec
   lazy val HttpCtx = Http()
 
   object Response {
       object JsonProtocol {
-        implicit object inetAddressFormat extends JsonFormat[InetAddress] {
+        given inetAddressFormat: JsonFormat[InetAddress] with {
           override def read(js : JsValue) : InetAddress = js match {
             case JsString(value) =>
               Try(InetAddress.getByName(value)) match {
@@ -50,7 +50,7 @@ object TabloLegacy {
           }
           override def write(inetAddress : InetAddress) : JsValue = JsString(inetAddress.getHostAddress)
         }
-        implicit object uriFormat extends JsonFormat[Uri] {
+        given uriFormat: JsonFormat[Uri] with {
           override def read(js: JsValue): Uri = js match {
             case JsString(value) =>
               Try(Uri(value)) match {
@@ -106,7 +106,7 @@ object TabloLegacy {
         }
         object JsonProtocol {
           import Response.JsonProtocol.{inetAddressFormat,uriFormat}
-          implicit val discoverFormat: JsonFormat[Discover] = jsonFormat12(Discover.apply)
+          given discoverFormat: JsonFormat[Discover] = jsonFormat12(Discover.apply)
         }
 
         val route =
@@ -141,8 +141,8 @@ object TabloLegacy {
       )
 
       object JsonProtocol extends DefaultJsonProtocol {
-        implicit val channelInfoFormat: JsonFormat[ChannelInfo] = jsonFormat10(ChannelInfo.apply)
-        implicit val channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
+        given channelInfoFormat: JsonFormat[ChannelInfo] = jsonFormat10(ChannelInfo.apply)
+        given channelObjectFormat: JsonFormat[ChannelObject] = jsonFormat3(ChannelObject.apply)
       }
 
       object Proxy {
@@ -201,7 +201,7 @@ object TabloLegacy {
         val log = LoggerFactory.getLogger(this.getClass)
 
         def apply(): Behavior[Request] = Behaviors.setup { context =>
-          implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
+          given scala.concurrent.ExecutionContext = context.executionContext
           var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
           var scanInProgress: Boolean = false
 
@@ -223,7 +223,7 @@ object TabloLegacy {
                 }
               }
               .flatMap { paths =>
-                import JsonProtocol._
+                import JsonProtocol.given
                 import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
                 Marshal(paths.toJson)
                   .to[RequestEntity]
@@ -340,7 +340,7 @@ object TabloLegacy {
         )
         object LineupStatus {
           object JsonProtocol {
-            implicit val lineupStatusFormat: JsonFormat[LineupStatus] = jsonFormat4(LineupStatus.apply)
+            given lineupStatusFormat: JsonFormat[LineupStatus] = jsonFormat4(LineupStatus.apply)
           }
         }
       }
@@ -349,7 +349,7 @@ object TabloLegacy {
         path("lineup.json") {
           get {
             import pekko.actor.typed.scaladsl.AskPattern._
-            implicit val timeout: pekko.util.Timeout = 3.seconds
+            given pekko.util.Timeout = 3.seconds
             val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
 
             onComplete(lineupF) {
@@ -364,7 +364,7 @@ object TabloLegacy {
         path("lineup_status.json") {
           get {
             import pekko.actor.typed.scaladsl.AskPattern._
-            implicit val timeout: pekko.util.Timeout = 3.seconds
+            given pekko.util.Timeout = 3.seconds
             val statusF: Future[LineupActor.Response.Status] = lineupActor.ask(replyTo => LineupActor.Request.Status(replyTo))
 
             onComplete(statusF) {
@@ -401,7 +401,7 @@ object TabloLegacy {
             } else {
               import pekko.actor.typed.scaladsl.AskPattern._
               import pekko.util.ByteString
-              implicit val timeout: pekko.util.Timeout = 3.seconds
+              given pekko.util.Timeout = 3.seconds
               val lineupF: Future[LineupActor.Response.Fetch] = lineupActor.ask(replyTo => LineupActor.Request.Fetch(replyTo))
               onComplete(lineupF) {
                 case Success(LineupActor.Response.Fetch(channels, _)) =>
@@ -453,8 +453,8 @@ object TabloLegacy {
       )
 
       object JsonProtocol extends DefaultJsonProtocol {
-        implicit val programFormat: JsonFormat[Program] = jsonFormat15(Program.apply)
-        implicit val channelGuideFormat: JsonFormat[ChannelGuide] = jsonFormat5(ChannelGuide.apply)
+        given programFormat: JsonFormat[Program] = jsonFormat15(Program.apply)
+        given channelGuideFormat: JsonFormat[ChannelGuide] = jsonFormat5(ChannelGuide.apply)
       }
 
       object Proxy {
@@ -508,7 +508,7 @@ object TabloLegacy {
 
           object TabloProgram {
             object JsonProtocol {
-              implicit val tabloProgramFormat: JsonFormat[TabloProgram] = jsonFormat14(TabloProgram.apply)
+              given tabloProgramFormat: JsonFormat[TabloProgram] = jsonFormat14(TabloProgram.apply)
             }
           }
 
@@ -567,7 +567,7 @@ object TabloLegacy {
       }
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
-        implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
+        given scala.concurrent.ExecutionContext = context.executionContext
         var cache: (scala.concurrent.duration.Deadline, Seq[ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
         var scanInProgress: Boolean = false
 
@@ -688,7 +688,7 @@ object TabloLegacy {
               Unmarshal(response.entity).to[String].flatMap { body =>
                 Future.fromTry(SafeJson.parseAs[Seq[String]](body))
               }.flatMap { paths =>
-                import Lineup.JsonProtocol._
+                import Lineup.JsonProtocol.given
                 import pekko.http.scaladsl.marshallers.sprayjson.SprayJsonSupport._
                 Marshal(paths.toJson)
                   .to[RequestEntity]
@@ -866,7 +866,7 @@ object TabloLegacy {
         path("guide.xml") {
           get {
             import pekko.actor.typed.scaladsl.AskPattern._
-            implicit val timeout: pekko.util.Timeout = 10.seconds
+            given pekko.util.Timeout = 10.seconds
 
             val guideF: Future[GuideActor.Response.FetchGuide] =
               GuideActor.instance.ask(replyTo => GuideActor.Request.FetchGuide(replyTo))
@@ -925,7 +925,7 @@ object TabloLegacy {
         )
         object WatchRequest {
           object JsonProtocol {
-            implicit val watchRequestFormat: JsonFormat[WatchRequest] = jsonFormat2(WatchRequest.apply)
+            given watchRequestFormat: JsonFormat[WatchRequest] = jsonFormat2(WatchRequest.apply)
           }
           import JsonProtocol.watchRequestFormat
           val watchRequestJson = Request.WatchRequest().toJson
@@ -962,15 +962,15 @@ object TabloLegacy {
         val SystemBusyError = LegacyError.SystemBusyError
         object JsonProtocol {
           import TabloLegacy.Response.JsonProtocol.uriFormat
-          implicit val videoDetailsFormat: JsonFormat[VideoDetails] = jsonFormat2(VideoDetails.apply)
-          implicit val watchResponseFormat: JsonFormat[WatchResponse] = jsonFormat7(WatchResponse.apply)
+          given videoDetailsFormat: JsonFormat[VideoDetails] = jsonFormat2(VideoDetails.apply)
+          given watchResponseFormat: JsonFormat[WatchResponse] = jsonFormat7(WatchResponse.apply)
         }
 
         case class Tuners(in_use: Boolean, channel: Option[Uri], recording: Option[Uri])
         object Tuners {
           object JsonProtocol {
             import TabloLegacy.Response.JsonProtocol.uriFormat
-            implicit val tunersFormat: JsonFormat[Tuners] = jsonFormat3(Tuners.apply)
+            given tunersFormat: JsonFormat[Tuners] = jsonFormat3(Tuners.apply)
           }
         }
       }
@@ -1224,7 +1224,7 @@ object TabloLegacy {
             lineupActorOpt match {
               case Some(lineupActor) =>
                 import pekko.actor.typed.scaladsl.AskPattern._
-                implicit val timeout: pekko.util.Timeout = 3.seconds
+                given pekko.util.Timeout = 3.seconds
                 val fetchF: Future[Lineup.LineupActor.Response.Fetch] =
                   lineupActor.ask(replyTo => Lineup.LineupActor.Request.Fetch(replyTo))
                 onComplete(fetchF) {
@@ -1290,9 +1290,9 @@ object TabloLegacy {
   def detectTunerCount(
     config: app.config.AppConfig
   , timeout: FiniteDuration = 5.seconds
-  )(implicit system: ActorSystem[?]): Int = {
+  )(using system: ActorSystem[?]): Int = {
     import Channel.Response.Tuners.JsonProtocol.tunersFormat
-    implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
+    given scala.concurrent.ExecutionContext = system.executionContext
     val HttpCtx = Http()
 
     val uri = Uri(s"http://${config.tablo.ipHost}:${config.tablo.port.value}/server/tuners")

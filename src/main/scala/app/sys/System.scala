@@ -67,7 +67,7 @@ object FsScan {
 
   def apply(ext: Seq[String]): Behavior[Command] = Behaviors.receive {
     case (context, message) =>
-      implicit val ec: ExecutionContext = context.executionContext
+      given ec: ExecutionContext = context.executionContext
       message match {
         case Scan(root,replyTo) =>
           context.log.debug("[scan] start root={}", root)
@@ -85,7 +85,7 @@ object FsScan {
       }
   }
 
-  private def scan(root: Path, ext: Seq[String])(implicit log: Logger, ec: ExecutionContext): Future[Seq[Path]] = Future {
+  private def scan(root: Path, ext: Seq[String])(using log: Logger, ec: ExecutionContext): Future[Seq[Path]] = Future {
     import java.nio.file.Files
     import java.nio.file.attribute.{UserDefinedFileAttributeView => Xattr}
     import scala.jdk.CollectionConverters._
@@ -280,7 +280,7 @@ object FsNotify {
   private final case class FsQueueResponse(response: FsQueue.Response) extends Command
 
   object FsQueue {
-    implicit def system: ActorSystem[Nothing] = AppContext.system
+    inline given system: ActorSystem[Nothing] = AppContext.system
 
     val bufferSize = 100
 
@@ -390,8 +390,8 @@ object FsNotify {
             val proxy = system.systemActorOf(QueueProxy(p.toFile), s"ffmpeg-proxy-${uuid}")
             log.debug("[transcode] queue proxy file={}", p)
 
-            implicit val ec: scala.concurrent.ExecutionContext = system.executionContext
-            implicit val timeout: Timeout = 10.minutes
+            given scala.concurrent.ExecutionContext = system.executionContext
+            given Timeout = 10.minutes
             val status: Future[QueueProxy.Response] =
               proxy.ask(ref => QueueProxy.Request.Notify(replyTo=ref))
 
@@ -424,7 +424,7 @@ object FsNotify {
         message match {
           case Poll =>
             context.log.debug("[scan] poll scheduled root={}", path)
-            implicit val system = AppContext.system
+            given system: ActorSystem[Nothing] = AppContext.system
             val _ =
               Source
                 .tick(10.second, 10.second, ())
