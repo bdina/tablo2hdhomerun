@@ -5,7 +5,7 @@ import org.scalatest.flatspec.AnyFlatSpec
 import org.scalatest.matchers.should.Matchers
 import org.scalatestplus.junit.JUnitRunner
 
-import ConfigTypes.{HttpProtocol, Port}
+import ConfigTypes.{DeviceId, HttpProtocol, Port}
 
 @RunWith(classOf[JUnitRunner])
 class AppConfigSpec extends AnyFlatSpec with Matchers {
@@ -155,5 +155,21 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.enableUdpDiscovery shouldBe false
     val _ = config.proxy.enableHlsEndpoint shouldBe false
     config.proxy.tunerStatePollIntervalSec shouldBe 45
+  }
+
+  "ConfigTypes.DeviceId" should "validate SiliconDust nibble-permutation checksums" in {
+    val validIds = Seq("1030001C", "10300026", "1040001D", "10500016", "12345674")
+    validIds.foreach { hex =>
+      val id = DeviceId(hex)
+      val _ = id.asString shouldBe hex
+      id.hasValidSiliconDustChecksum shouldBe true
+    }
+
+    val invalidIds = Seq("12345678", "00000000", "FFFFFFFF", "GGGGGGGG", "1234")
+    invalidIds.foreach { hex =>
+      DeviceId(hex).hasValidSiliconDustChecksum shouldBe false
+    }
+    val _ = DeviceId("12345678").expectedCheckDigit shouldBe Some(4)
+    DeviceId("   ").asString shouldBe DeviceId.Default
   }
 }

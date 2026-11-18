@@ -505,4 +505,46 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       (arr(es) == 0xFF.toByte && (arr(es + 1) & 0xF6) == 0xF0) shouldBe true
     }
   }
+
+  "MpegTsTypes" should {
+    "provide zero-allocation Pid, ContinuityCounter, PtsTicks, and OptPts operations" in {
+      import MpegTsTypes.{ContinuityCounter, OptPts, Pid, PtsTicks}
+      val pkt = new Array[Byte](188)
+      pkt(0) = 0x47.toByte
+      pkt(1) = 0x41.toByte
+      pkt(2) = 0x00.toByte
+      pkt(3) = 0x1F.toByte
+
+      val pid = Pid.fromPacket(pkt, 0)
+      val _ = pid.value shouldBe 0x0100
+      val _ = pid.isNull shouldBe false
+      val _ = pid.isPat shouldBe false
+      val _ = pid.isElementary(0x0030) shouldBe true
+      val _ = Pid(Pid.Null).isNull shouldBe true
+      val _ = Pid(Pid.Pat).isPat shouldBe true
+
+      val cc = ContinuityCounter.fromPacket(pkt, 0)
+      val _ = cc.value shouldBe 15
+      val _ = cc.next.value shouldBe 0
+      val _ = cc.isDiscontinuousAfter(14) shouldBe false
+      val _ = cc.isDiscontinuousAfter(15) shouldBe false
+      val _ = cc.isDiscontinuousAfter(12) shouldBe true
+
+      val wrapped = PtsTicks(0x1FFFFFFFFL).advance(10L)
+      val _ = wrapped.value shouldBe 9L
+      val _ = wrapped.signedDiff(0x1FFFFFFFFL) shouldBe 10L
+      val _ = PtsTicks(0x1FFFFFFFFL).signedDiff(9L) shouldBe -10L
+
+      val empty = OptPts.Empty
+      val _ = empty.isEmpty shouldBe true
+      val _ = empty.isDefined shouldBe false
+      val _ = empty.getOrElse(42L) shouldBe 42L
+      val _ = empty.toOption shouldBe None
+
+      val present = OptPts(12345L)
+      val _ = present.isDefined shouldBe true
+      val _ = present.get.value shouldBe 12345L
+      present.toOption shouldBe Some(12345L)
+    }
+  }
 }

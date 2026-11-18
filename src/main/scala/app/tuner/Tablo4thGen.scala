@@ -1348,7 +1348,35 @@ object Tablo4thGen {
         else releaseThenTune(release, tune)
     }
 
+    object SessionIds {
+      opaque type ChannelId <: String = String
+      object ChannelId {
+        inline def apply(value: String): ChannelId = value
+        extension (id: ChannelId) {
+          inline def asString: String = id
+        }
+      }
+
+      opaque type ClientId <: String = String
+      object ClientId {
+        inline def apply(value: String): ClientId = value
+        extension (id: ClientId) {
+          inline def asString: String = id
+        }
+      }
+
+      opaque type LeaseId <: String = String
+      object LeaseId {
+        inline def apply(value: String): LeaseId = value
+        extension (id: LeaseId) {
+          inline def asString: String = id
+        }
+      }
+    }
+
     object SessionManager {
+      export SessionIds.{ChannelId, ClientId, LeaseId}
+
       val channelHeaderCache: ConcurrentMap[String, MpegTsSync.CachedHeaders] =
         new ConcurrentHashMap[String, MpegTsSync.CachedHeaders]()
 
@@ -1423,14 +1451,14 @@ object Tablo4thGen {
       private sealed trait SessionState
 
       private object SessionState {
-        case class Waiter(clientId: String, replyTo: ActorRef[Response.Acquire])
+        case class Waiter(clientId: ClientId, replyTo: ActorRef[Response.Acquire])
         case class Opening(waiters: Vector[Waiter], cancel: () => Unit = () => ()) extends SessionState
 
         case class Live(
           meta: TabloSessionMeta
         , hubSource: Source[ByteString, NotUsed]
         , teardown: () => Unit
-        , clientIds: Set[String]
+        , clientIds: Set[ClientId]
         , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders] =
             new AtomicReference(MpegTsSync.CachedHeaders())
         ) extends SessionState
@@ -1466,23 +1494,23 @@ object Tablo4thGen {
       , totalTuners: Int = 4
       , idleGrace: FiniteDuration = defaultIdleGrace
       ): Behavior[Request] = Behaviors.setup { context =>
-        var sessions = Map.empty[String, SessionState]
+        var sessions = Map.empty[ChannelId, SessionState]
         var tuners = totalTuners
 
         def occupied: Int = sessions.size
 
-        def openChannel(channelId: String, clientId: String, replyTo: ActorRef[Response.Acquire]): Unit = {
+        def openChannel(channelId: ChannelId, clientId: ClientId, replyTo: ActorRef[Response.Acquire]): Unit = {
           val waiter = SessionState.Waiter(clientId, replyTo)
           sessions += channelId -> SessionState.Opening(Vector(waiter))
           context.log.info(
             "[session] opening channel={} channelId={} clientId={} occupied={}/{}"
-          , Lineup.channelLabel(channelId)
-          , channelId
-          , clientId
+          , Lineup.channelLabel(channelId.asString)
+          , channelId.asString
+          , clientId.asString
           , occupied
           , tuners
           )
-          val cancel = startRunner(channelId, context.self)
+          val cancel = startRunner(channelId.asString, context.self)
           sessions.get(channelId) match {
             case Some(opening: SessionState.Opening) =>
               sessions += channelId -> opening.copy(cancel = cancel)
@@ -1492,25 +1520,25 @@ object Tablo4thGen {
         }
 
         def attachClient(
-          channelId: String
-        , clientId: String
+          channelId: ChannelId
+        , clientId: ClientId
         , hubSource: Source[ByteString, NotUsed]
         , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders]
         , replyTo: ActorRef[Response.Acquire]
         ): Unit = {
           val current = cachedHeadersRef.get()
           if (current.isEmpty) {
-            val fallback = getCachedHeaders(channelId)
+            val fallback = getCachedHeaders(channelId.asString)
             if (!fallback.isEmpty) {
               val _ = cachedHeadersRef.compareAndSet(current, fallback)
             }
           }
-          val chLabel = Lineup.channelLabel(channelId)
+          val chLabel = Lineup.channelLabel(channelId.asString)
           context.log.info(
             "[session] attach channel={} channelId={} clientId={} occupied={}/{}"
           , chLabel
-          , channelId
-          , clientId
+          , channelId.asString
+          , clientId.asString
           , occupied
           , tuners
           )
@@ -1521,16 +1549,16 @@ object Tablo4thGen {
         def rejectWaiters(waiters: Vector[SessionState.Waiter], reason: RejectReason): Unit =
           waiters.foreach(w => w.replyTo ! Response.Rejected(reason))
 
-        def enterIdleGrace(channelId: String, live: SessionState.Live): SessionState.IdleGrace = {
+        def enterIdleGrace(channelId: ChannelId, live: SessionState.Live): SessionState.IdleGrace = {
           val headers = live.cachedHeadersRef.get()
           if (!headers.isEmpty) {
-            setCachedHeaders(channelId, headers)
+            setCachedHeaders(channelId.asString, headers)
           }
-          val timer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId))
+          val timer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId.asString))
           context.log.info(
             "[session] idle-grace channel={} channelId={} duration={}s token={} occupied={}/{}"
-          , Lineup.channelLabel(channelId)
-          , channelId
+          , Lineup.channelLabel(channelId.asString)
+          , channelId.asString
           , idleGrace.toSeconds
           , LogConfig.truncate(live.meta.token)
           , occupied
@@ -1544,26 +1572,26 @@ object Tablo4thGen {
             Try(drainGraph.run()) match {
               case Success(switch) => Some(switch)
               case Failure(ex) =>
-                context.log.debug("[session] idle-grace drain switch error channelId={}", channelId, ex)
+                context.log.debug("[session] idle-grace drain switch error channelId={}", channelId.asString, ex)
                 None
             }
           }
           SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef, drainSwitch, System.nanoTime())
         }
 
-        def teardownAndRemove(channelId: String, teardown: () => Unit): Unit = {
+        def teardownAndRemove(channelId: ChannelId, teardown: () => Unit): Unit = {
           sessions.get(channelId).foreach {
             case idle: SessionState.IdleGrace => idle.drainSwitch.foreach(_.shutdown())
             case _ => ()
           }
           sessions -= channelId
           Try(teardown()).failed.foreach { ex =>
-            context.log.warn("[session] teardown failed channelId={}", channelId, ex)
+            context.log.warn("[session] teardown failed channelId={}", channelId.asString, ex)
           }
           context.log.info(
             "[session] removed channel={} channelId={} occupied={}/{}"
-          , Lineup.channelLabel(channelId)
-          , channelId
+          , Lineup.channelLabel(channelId.asString)
+          , channelId.asString
           , occupied
           , tuners
           )
@@ -1571,16 +1599,16 @@ object Tablo4thGen {
 
         Behaviors.receiveMessage {
           case Request.GetTunerStatuses(replyTo) =>
-            val activeInfos = sessions.toSeq.sortBy(_._1).map {
+            val activeInfos = sessions.toSeq.sortBy(_._1.asString).map {
               case (chId, state) =>
-                val vct = Lineup.vctInfo(chId)
+                val vct = Lineup.vctInfo(chId.asString)
                 val snap = state match {
                   case live: SessionState.Live => live.meta.metricsRef.get()
                   case idle: SessionState.IdleGrace => idle.meta.metricsRef.get()
                   case _: SessionState.Opening => app.stream.StreamMetrics.WindowSnapshot.initial
                 }
                 HDHomeRunStatus.ActiveTunerInfo(
-                  channelId = chId
+                  channelId = chId.asString
                 , vctNumber = vct.vctNumber
                 , vctName = vct.vctName
                 , snapshot = snap
@@ -1591,20 +1619,21 @@ object Tablo4thGen {
 
           case Request.GetActiveChannelStates(replyTo) =>
             val states = sessions.map {
-              case (chId, _: SessionState.Opening) => chId -> "opening"
-              case (chId, _: SessionState.Live) => chId -> "live"
-              case (chId, _: SessionState.IdleGrace) => chId -> "idle-grace"
+              case (chId, _: SessionState.Opening) => chId.asString -> "opening"
+              case (chId, _: SessionState.Live) => chId.asString -> "live"
+              case (chId, _: SessionState.IdleGrace) => chId.asString -> "idle-grace"
             }
             replyTo ! states
             Behaviors.same
 
-          case Request.GetSessionMeta(channelId, replyTo) =>
+          case Request.GetSessionMeta(rawChannelId, replyTo) =>
+            val channelId = ChannelId(rawChannelId)
             val metaOpt = sessions.get(channelId).flatMap {
               case live: SessionState.Live =>
                 Some(live.meta)
               case idle: SessionState.IdleGrace =>
                 val _ = idle.graceTimer.cancel()
-                val refreshedTimer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId))
+                val refreshedTimer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId.asString))
                 sessions += channelId -> idle.copy(graceTimer = refreshedTimer, enteredAtNanos = System.nanoTime())
                 Some(idle.meta)
               case _ =>
@@ -1617,7 +1646,9 @@ object Tablo4thGen {
             tuners = math.max(1, total)
             Behaviors.same
 
-          case Request.Acquire(channelId, clientId, replyTo) =>
+          case Request.Acquire(rawChannelId, rawClientId, replyTo) =>
+            val channelId = ChannelId(rawChannelId)
+            val clientId = ClientId(rawClientId)
             sessions.get(channelId) match {
               case None =>
                 if (occupied >= tuners) {
@@ -1629,22 +1660,22 @@ object Tablo4thGen {
                     case Some((idleChannelId, idle)) =>
                       context.log.info(
                         "[session] evicting oldest idle-grace channel={} channelId={} to accommodate new channel={} channelId={} clientId={}"
-                      , Lineup.channelLabel(idleChannelId)
-                      , idleChannelId
-                      , Lineup.channelLabel(channelId)
-                      , channelId
-                      , clientId
+                      , Lineup.channelLabel(idleChannelId.asString)
+                      , idleChannelId.asString
+                      , Lineup.channelLabel(channelId.asString)
+                      , channelId.asString
+                      , clientId.asString
                       )
                       val _ = idle.graceTimer.cancel()
                       teardownAndRemove(idleChannelId, idle.teardown)
                       openChannel(channelId, clientId, replyTo)
                     case None =>
-                      val activeChannels = sessions.keys.map(id => s"${Lineup.channelLabel(id)} [$id]").mkString(", ")
+                      val activeChannels = sessions.keys.map(id => s"${Lineup.channelLabel(id.asString)} [${id.asString}]").mkString(", ")
                       context.log.warn(
                         "[session] no-tuners rejecting channel={} channelId={} clientId={} occupied={}/{} active=[{}]"
-                      , Lineup.channelLabel(channelId)
-                      , channelId
-                      , clientId
+                      , Lineup.channelLabel(channelId.asString)
+                      , channelId.asString
+                      , clientId.asString
                       , occupied
                       , tuners
                       , activeChannels
@@ -1660,9 +1691,9 @@ object Tablo4thGen {
                 sessions += channelId -> opening.copy(waiters = waiters :+ SessionState.Waiter(clientId, replyTo))
                 context.log.info(
                   "[session] enqueue channel={} channelId={} clientId={} waiters={}"
-                , Lineup.channelLabel(channelId)
-                , channelId
-                , clientId
+                , Lineup.channelLabel(channelId.asString)
+                , channelId.asString
+                , clientId.asString
                 , waiters.size + 1
                 )
                 Behaviors.same
@@ -1682,15 +1713,17 @@ object Tablo4thGen {
                 sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
                 context.log.info(
                   "[session] grace-cancel channel={} channelId={} clientId={}"
-                , Lineup.channelLabel(channelId)
-                , channelId
-                , clientId
+                , Lineup.channelLabel(channelId.asString)
+                , channelId.asString
+                , clientId.asString
                 )
                 attachClient(channelId, clientId, idle.hubSource, idle.cachedHeadersRef, replyTo)
                 Behaviors.same
             }
 
-          case Request.Release(channelId, clientId) =>
+          case Request.Release(rawChannelId, rawClientId) =>
+            val channelId = ChannelId(rawChannelId)
+            val clientId = ClientId(rawClientId)
             sessions.get(channelId) match {
               case Some(live: SessionState.Live) if live.clientIds.contains(clientId) =>
                 val remaining = live.clientIds - clientId
@@ -1698,9 +1731,9 @@ object Tablo4thGen {
                   sessions += channelId -> live.copy(clientIds = remaining)
                   context.log.info(
                     "[session] release channel={} channelId={} clientId={} clients={}"
-                  , Lineup.channelLabel(channelId)
-                  , channelId
-                  , clientId
+                  , Lineup.channelLabel(channelId.asString)
+                  , channelId.asString
+                  , clientId.asString
                   , remaining.size
                   )
                 } else {
@@ -1712,35 +1745,36 @@ object Tablo4thGen {
                   sessions += channelId -> opening.copy(waiters = remaining)
                   context.log.info(
                     "[session] opening release channel={} channelId={} clientId={} remainingWaiters={}"
-                  , Lineup.channelLabel(channelId)
-                  , channelId
-                  , clientId
+                  , Lineup.channelLabel(channelId.asString)
+                  , channelId.asString
+                  , clientId.asString
                   , remaining.size
                   )
                 } else {
                   sessions -= channelId
                   Try(cancel()).failed.foreach { ex =>
-                    context.log.warn("[session] opening cancel failed channelId={}", channelId, ex)
+                    context.log.warn("[session] opening cancel failed channelId={}", channelId.asString, ex)
                   }
                   context.log.info(
                     "[session] opening cancelled channel={} channelId={} all waiters released"
-                  , Lineup.channelLabel(channelId)
-                  , channelId
+                  , Lineup.channelLabel(channelId.asString)
+                  , channelId.asString
                   )
                 }
               case Some(_: SessionState.IdleGrace) =>
-                context.log.debug("[session] release ignored idle-grace channelId={} clientId={}", channelId, clientId)
+                context.log.debug("[session] release ignored idle-grace channelId={} clientId={}", channelId.asString, clientId.asString)
               case None =>
-                context.log.debug("[session] release ignored absent channelId={} clientId={}", channelId, clientId)
+                context.log.debug("[session] release ignored absent channelId={} clientId={}", channelId.asString, clientId.asString)
               case Some(_: SessionState.Live) =>
-                context.log.debug("[session] release unknown client channelId={} clientId={}", channelId, clientId)
+                context.log.debug("[session] release unknown client channelId={} clientId={}", channelId.asString, clientId.asString)
             }
             Behaviors.same
 
-          case Command.CheckIn(channelId, meta, hubSource, teardown, cachedHeadersRef) =>
+          case Command.CheckIn(rawChannelId, meta, hubSource, teardown, cachedHeadersRef) =>
+            val channelId = ChannelId(rawChannelId)
             val headers = cachedHeadersRef.get()
             if (!headers.isEmpty) {
-              setCachedHeaders(channelId, headers)
+              setCachedHeaders(channelId.asString, headers)
             }
             sessions.get(channelId) match {
               case Some(SessionState.Opening(waiters, _)) =>
@@ -1748,8 +1782,8 @@ object Tablo4thGen {
                 sessions += channelId -> SessionState.Live(meta, hubSource, teardown, clientIds, cachedHeadersRef)
                 context.log.info(
                   "[session] check-in channel={} channelId={} token={} clients={} occupied={}/{}"
-                , Lineup.channelLabel(channelId)
-                , channelId
+                , Lineup.channelLabel(channelId.asString)
+                , channelId.asString
                 , LogConfig.truncate(meta.token)
                 , clientIds.size
                 , occupied
@@ -1757,62 +1791,66 @@ object Tablo4thGen {
                 )
                 waiters.foreach(w => attachClient(channelId, w.clientId, hubSource, cachedHeadersRef, w.replyTo))
               case other =>
-                context.log.warn("[session] check-in unexpected state channelId={} state={}", channelId, other)
+                context.log.warn("[session] check-in unexpected state channelId={} state={}", channelId.asString, other)
                 val _ = Try(teardown())
             }
             Behaviors.same
 
-          case Command.AcquireFailed(channelId, cause) =>
+          case Command.AcquireFailed(rawChannelId, cause) =>
+            val channelId = ChannelId(rawChannelId)
             sessions.get(channelId) match {
               case Some(SessionState.Opening(waiters, _)) =>
                 sessions -= channelId
                 context.log.warn(
                   "[session] acquire-failed channel={} channelId={} waiters={}"
-                , Lineup.channelLabel(channelId)
-                , channelId
+                , Lineup.channelLabel(channelId.asString)
+                , channelId.asString
                 , waiters.size
                 , cause
                 )
                 rejectWaiters(waiters, RejectReason.Failed(cause))
               case _ =>
-                context.log.warn("[session] acquire-failed ignored channelId={}", channelId, cause)
+                context.log.warn("[session] acquire-failed ignored channelId={}", channelId.asString, cause)
             }
             Behaviors.same
 
-          case Command.GraceExpired(channelId) =>
+          case Command.GraceExpired(rawChannelId) =>
+            val channelId = ChannelId(rawChannelId)
             sessions.get(channelId) match {
               case Some(idle: SessionState.IdleGrace) =>
                 val headers = idle.cachedHeadersRef.get()
                 if (!headers.isEmpty) {
-                  setCachedHeaders(channelId, headers)
+                  setCachedHeaders(channelId.asString, headers)
                 }
-                context.log.info("[session] grace-expired channel={} channelId={}", Lineup.channelLabel(channelId), channelId)
+                context.log.info("[session] grace-expired channel={} channelId={}", Lineup.channelLabel(channelId.asString), channelId.asString)
                 teardownAndRemove(channelId, idle.teardown)
               case _ =>
-                context.log.debug("[session] grace-expired ignored channelId={}", channelId)
+                context.log.debug("[session] grace-expired ignored channelId={}", channelId.asString)
             }
             Behaviors.same
 
-          case Command.UpstreamEnded(channelId, leaseId) =>
+          case Command.UpstreamEnded(rawChannelId, rawLeaseId) =>
+            val channelId = ChannelId(rawChannelId)
+            val leaseId = LeaseId(rawLeaseId)
             sessions.get(channelId) match {
-              case Some(live: SessionState.Live) if live.meta.leaseId == leaseId =>
+              case Some(live: SessionState.Live) if LeaseId(live.meta.leaseId) == leaseId =>
                 context.log.warn(
                   "[session] upstream-ended channel={} channelId={} clients={}"
-                , Lineup.channelLabel(channelId)
-                , channelId
+                , Lineup.channelLabel(channelId.asString)
+                , channelId.asString
                 , live.clientIds.size
                 )
                 teardownAndRemove(channelId, live.teardown)
-              case Some(idle: SessionState.IdleGrace) if idle.meta.leaseId == leaseId =>
+              case Some(idle: SessionState.IdleGrace) if LeaseId(idle.meta.leaseId) == leaseId =>
                 val _ = idle.graceTimer.cancel()
                 context.log.warn(
                   "[session] upstream-ended channel={} channelId={} during idle-grace"
-                , Lineup.channelLabel(channelId)
-                , channelId
+                , Lineup.channelLabel(channelId.asString)
+                , channelId.asString
                 )
                 teardownAndRemove(channelId, idle.teardown)
               case _ =>
-                context.log.debug("[session] upstream-ended ignored channelId={} leaseId={}", channelId, leaseId)
+                context.log.debug("[session] upstream-ended ignored channelId={} leaseId={}", channelId.asString, leaseId.asString)
             }
             Behaviors.same
         }

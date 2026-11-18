@@ -1,6 +1,6 @@
 package app.config
 
-import ConfigTypes.{HostAddress, HttpProtocol, Port}
+import ConfigTypes.{DeviceId, HostAddress, HttpProtocol, Port}
 
 import EnvReaders._
 
@@ -37,7 +37,7 @@ final case class TabloConfig(
 final case class ProxyConfig(
   ip: HostAddress
 , port: Port = Port.DefaultProxy
-, deviceId: String = "12345678"
+, deviceId: DeviceId = DeviceId.Default
 , tunerCount: Option[Int] = None
 , enableUdpDiscovery: Boolean = true
 , enableHlsEndpoint: Boolean = true
@@ -115,7 +115,7 @@ object AppConfig {
     val proxy = ProxyConfig(
       ip = getHostAddress(get, "PROXY_IP", "127.0.0.1")
     , port = Port(getInt(get, "PROXY_PORT", Port.DefaultProxy.value))
-    , deviceId = getOrElse(get, "DEVICE_ID", "12345678")
+    , deviceId = DeviceId(getOrElse(get, "DEVICE_ID", DeviceId.Default))
     , tunerCount = get("TUNER_COUNT").flatMap(s => scala.util.Try(s.trim.toInt).toOption)
     , enableUdpDiscovery = getBoolTrue(get, "ENABLE_UDP_DISCOVERY", true)
     , enableHlsEndpoint = getBoolTrue(get, "ENABLE_HLS_ENDPOINT", true)

@@ -14,6 +14,7 @@ import scala.util.control.NonFatal
 
 import app.AppContext
 import app.config.AppConfig
+import app.config.ConfigTypes.DeviceId
 
 object HDHomeRunDiscovery {
   val log = LoggerFactory.getLogger(this.getClass)
@@ -101,7 +102,7 @@ object HDHomeRunDiscovery {
   , lineupUrl: String
   , deviceAuth: String = "tabloauth123"
   ): Array[Byte] = {
-    val devIdLong = Try(java.lang.Long.parseLong(deviceIdHex, 16)).getOrElse(0x12345678L)
+    val devIdLong = DeviceId(deviceIdHex).toUnsignedInt.getOrElse(0x12345678L)
     val baseBytes = (baseUrl + "\u0000").getBytes(StandardCharsets.UTF_8)
     val lineupBytes = (lineupUrl + "\u0000").getBytes(StandardCharsets.UTF_8)
     val authBytes = (deviceAuth + "\u0000").getBytes(StandardCharsets.UTF_8)
@@ -179,7 +180,7 @@ object HDHomeRunDiscovery {
                       req.deviceType.contains(DeviceTypeTuner) ||
                       req.deviceType.isEmpty
                     val reqId = req.deviceId.getOrElse(DeviceIdWildcard)
-                    val ourIdLong = Try(java.lang.Long.parseLong(config.proxy.deviceId, 16)).getOrElse(0x12345678L)
+                    val ourIdLong = config.proxy.deviceId.toUnsignedInt.getOrElse(0x12345678L)
                     val matchesId = reqId == DeviceIdWildcard || reqId == ourIdLong
                     if (matchesType && matchesId) {
                       log.debug("[discovery] discover request from={}, sending reply", sender)

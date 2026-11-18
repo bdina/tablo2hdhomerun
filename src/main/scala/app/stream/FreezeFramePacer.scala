@@ -7,9 +7,11 @@ import java.util.Arrays
 import scala.util.boundary
 import scala.util.boundary.break
 
+import MpegTsTypes.{OptPts, PtsTicks}
+
 object FreezeFramePacer {
   val PacketSize: Int = 188
-  val PtsMask: Long = 0x1FFFFFFFFL
+  val PtsMask: Long = PtsTicks.Mask
   val DefaultVideoStepTicks: Long = 3003L
   val Ac3StepTicks: Long = 2880L
   val AdtsStepTicks: Long = 1920L
@@ -96,11 +98,11 @@ object FreezeFramePacer {
     }
 
   def readPtsDts(arr: Array[Byte], pesOffset: Int, pktEnd: Int): Option[(Long, Option[Long])] = {
-    val pts = readPesPts(arr, pesOffset, pktEnd)
-    if (pts < 0L) None
+    val pts = OptPts.fromRaw(readPesPts(arr, pesOffset, pktEnd))
+    if (pts.isEmpty) None
     else {
-      val dts = readPesDts(arr, pesOffset, pktEnd)
-      Some((pts, if (dts >= 0L) Some(dts) else None))
+      val dts = OptPts.fromRaw(readPesDts(arr, pesOffset, pktEnd))
+      Some((pts.rawValue, dts.toOption))
     }
   }
 
@@ -168,13 +170,11 @@ object FreezeFramePacer {
       }
     }
 
-  def readPcrBase(arr: Array[Byte], pktOffset: Int): Option[Long] = {
-    val pcr = readPcrBaseRaw(arr, pktOffset)
-    if (pcr >= 0L) Some(pcr) else None
-  }
+  def readPcrBase(arr: Array[Byte], pktOffset: Int): Option[Long] =
+    OptPts.fromRaw(readPcrBaseRaw(arr, pktOffset)).toOption
 
   def writePcrBase(arr: Array[Byte], pktOffset: Int, pcrBase: Long): Unit = {
-    val masked = pcrBase & PtsMask
+    val masked = PtsTicks(pcrBase).value
     arr(pktOffset + 6) = ((masked >> 25) & 0xFF).toByte
     arr(pktOffset + 7) = ((masked >> 17) & 0xFF).toByte
     arr(pktOffset + 8) = ((masked >> 9) & 0xFF).toByte
