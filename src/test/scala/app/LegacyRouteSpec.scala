@@ -335,6 +335,12 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
     withStubHttp("HTTP/1.1 200 OK") { port =>
       val _ = Tablo2HDHomeRun.checkHealth("127.0.0.1", port, timeoutMs = 1000) shouldBe true
     }
+    withStubHttp("HTTP/1.1 200 OK") { port =>
+      val _ = Tablo2HDHomeRun.checkHealth("[::]", port, timeoutMs = 1000) shouldBe true
+    }
+    withStubHttp("HTTP/1.1 200 OK") { port =>
+      val _ = Tablo2HDHomeRun.checkHealth("0:0:0:0:0:0:0:0", port, timeoutMs = 1000) shouldBe true
+    }
     withStubHttp("HTTP/1.1 500 Internal Server Error") { port =>
       val _ = Tablo2HDHomeRun.checkHealth("127.0.0.1", port, timeoutMs = 1000) shouldBe false
     }
@@ -342,5 +348,11 @@ class LegacyRouteSpec extends LegacyRouteSpecBase {
     val closedPort = closedSocket.getLocalPort
     closedSocket.close()
     Tablo2HDHomeRun.checkHealth("127.0.0.1", closedPort, timeoutMs = 500) shouldBe false
+  }
+
+  "Tablo2HDHomeRun.healthcheckTarget" should "resolve host and port from lookup function with safe fallbacks" in {
+    val _ = Tablo2HDHomeRun.healthcheckTarget(_ => None) shouldBe ("127.0.0.1", 8080)
+    val _ = Tablo2HDHomeRun.healthcheckTarget(Map("PROXY_IP" -> " 0.0.0.0 ", "PROXY_PORT" -> " 9090 ").get) shouldBe ("0.0.0.0", 9090)
+    Tablo2HDHomeRun.healthcheckTarget(Map("PROXY_IP" -> "  ", "PROXY_PORT" -> "invalid").get) shouldBe ("127.0.0.1", 8080)
   }
 }

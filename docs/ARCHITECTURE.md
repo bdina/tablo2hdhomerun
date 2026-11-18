@@ -53,7 +53,7 @@ Over-the-air broadcast streams during antenna flutter, wind gusts, or fringe rec
 | Component | Technology |
 |-----------|------------|
 | Language | Scala 3.10.1 |
-| Runtime | JVM (Java 24+) or GraalVM Native Image |
+| Runtime | JVM (Java 25+) or GraalVM Native Image |
 | HTTP Framework | Apache Pekko HTTP 2.0.0 |
 | Actor System | Apache Pekko Actor Typed 2.0.0 |
 | JSON | Spray JSON |
@@ -325,9 +325,16 @@ The project includes custom Gradle plugins in `buildSrc/`:
 
 #### Heap Configuration
 
-- Min Heap: 128MB
+- Min Heap: 32MB
 - Max Heap: 128MB
 - Max New Gen: 64MB
+
+#### JVM & Dispatcher Runtime Configuration
+
+- **JVM Runtime Alignment (`Dockerfile.jvm`, Java 25)**: Runs with `-XX:+UseCompactObjectHeaders -XX:+UseSerialGC -Xms32m -Xmx128m -XX:MaxNewSize=64m -Xss256k -XX:+ExitOnOutOfMemoryError` (matching Native Image Serial GC and heap ceilings while keeping Tiered/C2 JIT active for representative throughput).
+- **Artifact Packaging**: `shadowJar` excludes Scala 3 compile-time `**/*.tasty` reflection metadata not needed at runtime.
+- **Pekko Dispatcher Bounds (`application.conf`)**: `default-dispatcher.fork-join-executor.parallelism-min = 2`, `internal-dispatcher.fork-join-executor.parallelism-min = 1`, and `default-blocking-io-dispatcher.thread-pool-executor.fixed-pool-size = 4` reduce idle thread stacks without capping `parallelism-max` or shrinking `SessionManager.BroadcastHubBufferSize` (`1024`).
+- **Healthcheck Fast-Path**: `--healthcheck` resolves `PROXY_IP`/`PROXY_PORT` before full `AppConfig.load()` initialization and runs cleanly with `-XX:MinHeapSize=4m -XX:MaxHeapSize=16m -XX:MaxNewSize=8m`.
 
 ## Project Structure
 

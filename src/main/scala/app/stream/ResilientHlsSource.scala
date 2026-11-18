@@ -142,6 +142,7 @@ object ResilientHlsSource {
         private var lastVideoCc = -1
         private var inCandidateKeyframe = false
         private var candidateKeyframeCleanPackets = 0
+        private lazy val pktScratch = new Array[Byte](MpegTsSync.PacketSize)
         private val checkInterval = {
           val minTimeout =
             if (stallTimeout.toNanos > 0 && stallTimeout < tuneTimeout) stallTimeout
@@ -162,22 +163,23 @@ object ResilientHlsSource {
             videoPidSupplier() match {
               case Some(vpid) if chunk.length >= MpegTsSync.PacketSize && chunk(0) == 0x47.toByte =>
                 monitoringKeyframes = true
-                val arr = chunk.toArray
+                val chunkLen = chunk.length
                 val streamType = videoStreamTypeSupplier()
                 var pos = 0
                 var foundCleanKey = false
-                while (pos + MpegTsSync.PacketSize <= arr.length) {
-                  if (arr(pos) == 0x47.toByte) {
-                    val pid = ((arr(pos + 1) & 0x1F) << 8) | (arr(pos + 2) & 0xFF)
+                while (pos + MpegTsSync.PacketSize <= chunkLen) {
+                  if (chunk(pos) == 0x47.toByte) {
+                    val pid = ((chunk(pos + 1) & 0x1F) << 8) | (chunk(pos + 2) & 0xFF)
                     if (pid == vpid) {
-                      val isTei = (arr(pos + 1) & 0x80) != 0
-                      val pusi = (arr(pos + 1) & 0x40) != 0
-                      val afc = (arr(pos + 3) & 0x30) >> 4
+                      val _ = chunk.copyToArray(pos, pktScratch, 0, MpegTsSync.PacketSize)
+                      val isTei = (pktScratch(1) & 0x80) != 0
+                      val pusi = (pktScratch(1) & 0x40) != 0
+                      val afc = (pktScratch(3) & 0x30) >> 4
                       val hasPayload = (afc & 0x01) != 0
                       val hasAdaptation = (afc & 0x02) != 0
                       val isDiscontinuity =
-                        hasAdaptation && (arr(pos + 4) & 0xFF) > 0 && (arr(pos + 5) & 0x80) != 0
-                      val cc = arr(pos + 3) & 0x0F
+                        hasAdaptation && (pktScratch(4) & 0xFF) > 0 && (pktScratch(5) & 0x80) != 0
+                      val cc = pktScratch(3) & 0x0F
 
                       val isCcError =
                         if (isTei) false
@@ -198,12 +200,12 @@ object ResilientHlsSource {
                         candidateKeyframeCleanPackets = 0
                       } else if (hasPayload) {
                         val payloadOffset =
-                          if (afc == 1) pos + 4
-                          else if (afc == 3) pos + 5 + (arr(pos + 4) & 0xFF)
-                          else pos + MpegTsSync.PacketSize
-                        val payloadLen = (pos + MpegTsSync.PacketSize) - payloadOffset
+                          if (afc == 1) 4
+                          else if (afc == 3) 5 + (pktScratch(4) & 0xFF)
+                          else MpegTsSync.PacketSize
+                        val payloadLen = MpegTsSync.PacketSize - payloadOffset
                         val isKeyStart =
-                          payloadLen > 0 && MpegTsSync.hasKeyframeHeader(arr, payloadOffset, payloadLen, streamType)
+                          payloadLen > 0 && MpegTsSync.hasKeyframeHeader(pktScratch, payloadOffset, payloadLen, streamType)
 
                         if (isKeyStart) {
                           if (inCandidateKeyframe) {
@@ -294,7 +296,7 @@ object ResilientHlsSource {
         private var lastRealNanos = System.nanoTime()
         private var hadGap = false
         private var slateActive = false
-        private val slateLoop = new SlateVideoSource.Loop(chunkPackets = 24)
+        private lazy val slateLoop = new SlateVideoSource.Loop(chunkPackets = 24)
         private val gapLogThresholdNanos = slateThreshold.toNanos
         private val checkInterval =
           if (timeout.toNanos <= 0) 5.seconds

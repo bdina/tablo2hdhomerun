@@ -200,9 +200,8 @@ object TabloLegacy {
 
         val log = LoggerFactory.getLogger(this.getClass)
 
-        implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
-
         def apply(): Behavior[Request] = Behaviors.setup { context =>
+          implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
           var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
           var scanInProgress: Boolean = false
 
@@ -556,8 +555,6 @@ object TabloLegacy {
 
       val log = LoggerFactory.getLogger(this.getClass)
 
-      implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
-
       // Singleton actor instance to avoid creating new actors per request
       private var _instance: Option[ActorRef[Request]] = None
 
@@ -570,6 +567,7 @@ object TabloLegacy {
       }
 
       def apply(): Behavior[Request] = Behaviors.setup { context =>
+        implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
         var cache: (scala.concurrent.duration.Deadline, Seq[ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
         var scanInProgress: Boolean = false
 
@@ -717,24 +715,24 @@ object TabloLegacy {
               }.flatMap { channelData =>
                 log.info("[guide] scan channels count={}", channelData.size)
 
-                // fetch programs for each channel
-                val channelFutures = channelData.map { case (_, channelObj) =>
-                  fetchProgramsForChannel(channelObj.object_id).map { programs =>
-                    ChannelGuide(
-                      channel_id = channelObj.object_id,
-                      call_sign = channelObj.channel.call_sign,
-                      major = channelObj.channel.major,
-                      minor = channelObj.channel.minor,
-                      programs = programs
-                    )
+                // fetch programs for each channel with bounded concurrency
+                Source(channelData.values.toVector)
+                  .mapAsync(4) { channelObj =>
+                    fetchProgramsForChannel(channelObj.object_id).map { programs =>
+                      ChannelGuide(
+                        channel_id = channelObj.object_id,
+                        call_sign = channelObj.channel.call_sign,
+                        major = channelObj.channel.major,
+                        minor = channelObj.channel.minor,
+                        programs = programs
+                      )
+                    }
                   }
-                }
-
-                Future.sequence(channelFutures.toSeq)
+                  .runWith(pekko.stream.scaladsl.Sink.seq)
               }
             } else {
               val _ = response.entity.discardBytes()
-              log.warn("[guide] channels fetch failed status={}", response.status.intValue())
+              log.warn("[guide] channels fetch failed status={}", response.status.intValue)
               Future.successful(Seq.empty)
             }
           }
@@ -806,6 +804,8 @@ object TabloLegacy {
       }
 
       object XMLTVFormatter {
+        private val FallbackTimestampFormatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
+
         def formatTimestamp(timeStr: String): String = {
           Try { // try to parse various timestamp formats and convert to XMLTV format
             val instant = java.time.Instant.parse(timeStr)
@@ -813,8 +813,7 @@ object TabloLegacy {
           }
           .getOrElse {
             Try {
-              val formatter = java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss")
-              val localDateTime = java.time.LocalDateTime.parse(timeStr, formatter)
+              val localDateTime = java.time.LocalDateTime.parse(timeStr, FallbackTimestampFormatter)
               localDateTime.atZone(java.time.ZoneId.systemDefault()).toInstant.toString
             }
             .getOrElse {

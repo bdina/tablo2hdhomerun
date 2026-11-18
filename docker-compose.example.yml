@@ -18,7 +18,7 @@ services:
       - ENABLE_UDP_DISCOVERY=true
       - ENABLE_HLS_ENDPOINT=true
     healthcheck:
-      test: ["CMD", "./tablo2hdhomerun", "--healthcheck"]
+      test: ["CMD", "./tablo2hdhomerun", "-XX:MinHeapSize=4m", "-XX:MaxHeapSize=16m", "-XX:MaxNewSize=8m", "--healthcheck"]
       interval: 10s
       timeout: 3s
       retries: 3

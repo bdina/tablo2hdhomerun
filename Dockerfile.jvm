@@ -45,4 +45,4 @@ EXPOSE 8080/tcp 65001/udp
 # And we finally create the application layer
 FROM tablo2hdhomerun-base AS tablo2hdhomerun
 ENTRYPOINT [ "java" ]
-CMD [ "--sun-misc-unsafe-memory-access=allow" , "-Djava.net.preferIPv4Stack=true" , "-jar" , "tablo2hdhomerun.jar" , "-d" ]
+CMD [ "--sun-misc-unsafe-memory-access=allow" , "-XX:+UseCompactObjectHeaders" , "-XX:+UseSerialGC" , "-Xms32m" , "-Xmx128m" , "-XX:MaxNewSize=64m" , "-Xss256k" , "-XX:+ExitOnOutOfMemoryError" , "-Djava.net.preferIPv4Stack=true" , "-jar" , "tablo2hdhomerun.jar" , "-d" ]

@@ -12,7 +12,7 @@ object SlateVideoSource {
   private val PacketSize = 188
   private val ResourcePath = "/slate.ts"
 
-  val slateBytes: ByteString = {
+  lazy val slateBytes: ByteString = {
     val stream = getClass.getResourceAsStream(ResourcePath)
     if (stream != null) {
       try {
@@ -28,7 +28,7 @@ object SlateVideoSource {
     }
   }
 
-  val packetCount: Int = slateBytes.length / PacketSize
+  lazy val packetCount: Int = slateBytes.length / PacketSize
 
   def source(chunkPackets: Int = 24, interval: FiniteDuration = 40.millis): Source[ByteString, NotUsed] =
     if (slateBytes.isEmpty) {

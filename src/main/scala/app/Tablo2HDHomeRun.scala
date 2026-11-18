@@ -23,11 +23,12 @@ import app.sys.LogConfig
 import app.tuner.TabloLegacy.Response.Discover
 
 @main def tablo2hdhomerunApp(args: String*): Unit = {
-  val loaded = AppConfig.load()
   if (args.contains("--healthcheck")) {
-    val ok = Tablo2HDHomeRun.checkHealth(loaded.config.proxy.bindHost, loaded.config.proxy.bindPort)
+    val (host, port) = Tablo2HDHomeRun.healthcheckTarget(scala.sys.env.get)
+    val ok = Tablo2HDHomeRun.checkHealth(host, port)
     System.exit(if (ok) 0 else 1)
   }
+  val loaded = AppConfig.load()
   LogConfig.configure(loaded.logging)
   val daemon = args.contains("-d")
   Dependencies.verify(loaded.config)
@@ -93,9 +94,17 @@ object Tablo2HDHomeRun {
     , deviceId = config.proxy.deviceId
     )
 
+  private[app] def healthcheckTarget(get: String => Option[String]): (String, Int) = {
+    val host = get("PROXY_IP").map(_.trim).filter(_.nonEmpty).getOrElse("127.0.0.1")
+    val port = get("PROXY_PORT").flatMap(_.trim.toIntOption).getOrElse(app.config.ConfigTypes.Port.DefaultProxy.value)
+    (host, port)
+  }
+
   private[app] def checkHealth(host: String, port: Int, timeoutMs: Int = 2000): Boolean =
     Try {
-      val targetHost = if (host == "0.0.0.0" || host == "::") "127.0.0.1" else host
+      val targetHost =
+        if (host == "0.0.0.0" || host == "::" || host == "[::]" || host == "0:0:0:0:0:0:0:0") "127.0.0.1"
+        else host
       val socket = new java.net.Socket()
       try {
         socket.connect(new java.net.InetSocketAddress(targetHost, port), timeoutMs)

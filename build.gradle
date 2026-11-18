@@ -75,7 +75,7 @@ dependencies {
 
 test {
   useJUnit()
-  jvmArgs '--sun-misc-unsafe-memory-access=allow'
+  jvmArgs '--sun-misc-unsafe-memory-access=allow', '-XX:+UseCompactObjectHeaders'
   testLogging {
     events "passed", "skipped", "failed"
     showStandardStreams = false
@@ -94,7 +94,14 @@ version = gitVersion()
 
 application {
     mainClass.set('app.tablo2hdhomerunApp')
-    applicationDefaultJvmArgs = ['--sun-misc-unsafe-memory-access=allow']
+    applicationDefaultJvmArgs = [
+      '--sun-misc-unsafe-memory-access=allow',
+      '-XX:+UseCompactObjectHeaders',
+      '-XX:+UseSerialGC',
+      '-Xms32m',
+      '-Xmx128m',
+      '-XX:MaxNewSize=64m'
+    ]
 }
 
 processResources {
@@ -165,6 +172,7 @@ jar {
 
 shadowJar {
     archiveClassifier = ''
+    exclude '**/*.tasty'
     manifest {
         attributes(
           'App-Version': gitVersion(),

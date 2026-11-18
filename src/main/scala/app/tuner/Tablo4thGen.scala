@@ -353,9 +353,8 @@ object Tablo4thGen {
         jsonFormat(DeviceChannelObject.apply, "object_id", "path", "channel")
     }
 
-    final case class VctInfo(vctNumber: String, vctName: String)
+    final case class VctInfo(vctNumber: String, vctName: String, label: String = "")
 
-    private val channelLabels = new java.util.concurrent.ConcurrentHashMap[String, String]()
     private val channelVctInfo = new java.util.concurrent.ConcurrentHashMap[String, VctInfo]()
 
     def formatChannelLabel(channel: ChannelLineup): String = {
@@ -379,7 +378,6 @@ object Tablo4thGen {
     def registerChannel(channel: ChannelLineup): String = {
       val label = formatChannelLabel(channel)
       if (channel.identifier != null && channel.identifier.nonEmpty && label.nonEmpty) {
-        val _ = channelLabels.put(channel.identifier, label)
         val (major, minor, callSignOpt) = channel.kind match {
           case "ota" =>
             val ota = channel.ota.getOrElse(OtaChannelInfo(0, 0, None, None, None, None, None))
@@ -394,7 +392,7 @@ object Tablo4thGen {
         val vctName = callSignOpt.map(_.trim).filter(_.nonEmpty)
           .orElse(Option(channel.name).map(_.trim).filter(_.nonEmpty))
           .getOrElse(channel.identifier)
-        val _ = channelVctInfo.put(channel.identifier, VctInfo(vctNumber, vctName))
+        val _ = channelVctInfo.put(channel.identifier, VctInfo(vctNumber, vctName, label))
       }
       label
     }
@@ -437,42 +435,26 @@ object Tablo4thGen {
             name <- guideName
           } {
             val label = guideNumber.map(num => s"$name $num").getOrElse(name)
-            val _ = channelLabels.putIfAbsent(channelId, label)
             val vctNum = guideNumber.getOrElse("0.0")
-            val _ = channelVctInfo.putIfAbsent(channelId, VctInfo(vctNum, name))
+            val _ = channelVctInfo.putIfAbsent(channelId, VctInfo(vctNum, name, label))
           }
         }
       }
 
     def hasChannelLabel(channelId: String): Boolean =
-      channelId != null && channelId.nonEmpty && Option(channelLabels.get(channelId)).exists(_.nonEmpty)
+      channelId != null && channelId.nonEmpty && Option(channelVctInfo.get(channelId)).exists(_.label.nonEmpty)
 
     def channelLabel(channelId: String): String =
-      Option(channelLabels.get(channelId)).filter(_.nonEmpty).getOrElse(channelId)
+      Option(channelVctInfo.get(channelId)).map(_.label).filter(_.nonEmpty).getOrElse(channelId)
 
     def vctInfo(channelId: String): VctInfo =
-      Option(channelVctInfo.get(channelId)).getOrElse {
-        val lbl = channelLabel(channelId)
-        val lastSpace = lbl.lastIndexOf(' ')
-        if (lastSpace > 0) {
-          val candidateNum = lbl.substring(lastSpace + 1)
-          if (candidateNum.nonEmpty && candidateNum.forall(c => c.isDigit || c == '.')) {
-            VctInfo(candidateNum, lbl.substring(0, lastSpace))
-          } else {
-            VctInfo(channelId, lbl)
-          }
-        } else {
-          VctInfo(channelId, lbl)
-        }
-      }
+      Option(channelVctInfo.get(channelId)).getOrElse(VctInfo(channelId, channelId))
 
     def streamLabel(channelId: String, leaseId: String): String =
       s"${channelLabel(channelId)} ($leaseId)"
 
-    def clearChannelLabels(): Unit = {
-      channelLabels.clear()
+    def clearChannelLabels(): Unit =
       channelVctInfo.clear()
-    }
 
     def isHd(kind: String, minor: Int, name: String, callSign: Option[String]): Boolean = {
       val nameUpper = name.toUpperCase
@@ -537,10 +519,9 @@ object Tablo4thGen {
         case object ScanFailed extends Command
       }
 
-      implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
-
       def apply(authContext: Auth.AuthContext): Behavior[Request] = Behaviors.setup { context =>
         implicit val system: ActorSystem[Nothing] = context.system
+        implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
         var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
         var scanInProgress: Boolean = false
 
@@ -832,8 +813,6 @@ object Tablo4thGen {
       case object Scan extends Command
     }
 
-    implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
-
     private var _instance: Option[ActorRef[Request]] = None
 
     def instance(authContext: Auth.AuthContext)(implicit system: ActorSystem[?]): ActorRef[Request] = synchronized {
@@ -846,6 +825,7 @@ object Tablo4thGen {
 
     def apply(authContext: Auth.AuthContext): Behavior[Request] = Behaviors.setup { context =>
       implicit val system: ActorSystem[Nothing] = context.system
+      implicit val ec: scala.concurrent.ExecutionContext = context.executionContext
       var cache: (scala.concurrent.duration.Deadline, Seq[Tablo2HDHomeRun.Guide.ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
       var scanInProgress: Boolean = false
 
@@ -977,21 +957,21 @@ object Tablo4thGen {
                   channels.foreach(Lineup.registerChannel)
                   log.info("[guide] scan channels count={}", channels.size)
 
-                  val guideFutures = channels.map { channel =>
-                    val (major, minor, callSign) = channel.kind match {
-                      case "ota" =>
-                        val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
-                        (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
-                      case "ott" =>
-                        val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
-                        (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
-                      case _ =>
-                        (0, 0, channel.name)
+                  Source(channels.toVector)
+                    .mapAsync(4) { channel =>
+                      val (major, minor, callSign) = channel.kind match {
+                        case "ota" =>
+                          val ota = channel.ota.getOrElse(Lineup.OtaChannelInfo(0, 0, None, None, None, None, None))
+                          (ota.major, ota.minor, ota.callSign.getOrElse(channel.name))
+                        case "ott" =>
+                          val ott = channel.ott.getOrElse(Lineup.OttChannelInfo(None, None, None, None, None, None, None))
+                          (ott.major.getOrElse(0), ott.minor.getOrElse(0), ott.callSign.getOrElse(channel.name))
+                        case _ =>
+                          (0, 0, channel.name)
+                      }
+                      fetchAiringsForChannel(channel.identifier, callSign, major, minor, currentAuth)
                     }
-                    fetchAiringsForChannel(channel.identifier, callSign, major, minor, currentAuth)
-                  }
-
-                  Future.sequence(guideFutures)
+                    .runWith(pekko.stream.scaladsl.Sink.seq)
               }
             }
           }

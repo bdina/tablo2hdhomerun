@@ -47,29 +47,51 @@ object FreezeFramePacer {
     }
   }
 
-  def readPtsDts(arr: Array[Byte], pesOffset: Int, pktEnd: Int): Option[(Long, Option[Long])] = {
-    if (pesOffset < 0 || pesOffset + 9 > pktEnd) return None
+  def readPesPts(arr: Array[Byte], pesOffset: Int, pktEnd: Int): Long = {
+    if (pesOffset < 0 || pesOffset + 9 > pktEnd) return -1L
     if (arr(pesOffset) != 0x00.toByte ||
         arr(pesOffset + 1) != 0x00.toByte ||
-        arr(pesOffset + 2) != 0x01.toByte) return None
+        arr(pesOffset + 2) != 0x01.toByte) return -1L
 
     val flags2 = arr(pesOffset + 7) & 0xFF
     val headerDataLen = arr(pesOffset + 8) & 0xFF
     val ptsDtsFlags = (flags2 >> 6) & 0x03
 
-    if (ptsDtsFlags == 2 && headerDataLen >= 5 && pesOffset + 14 <= pktEnd) {
-      val pts = decodePtsBytes(arr, pesOffset + 9)
-      Some((pts, None))
-    } else if (ptsDtsFlags == 3 && headerDataLen >= 10 && pesOffset + 19 <= pktEnd) {
-      val pts = decodePtsBytes(arr, pesOffset + 9)
-      val dts = decodePtsBytes(arr, pesOffset + 14)
-      Some((pts, Some(dts)))
+    if ((ptsDtsFlags == 2 && headerDataLen >= 5 && pesOffset + 14 <= pktEnd) ||
+        (ptsDtsFlags == 3 && headerDataLen >= 10 && pesOffset + 19 <= pktEnd)) {
+      decodePtsBytes(arr, pesOffset + 9)
     } else {
-      None
+      -1L
     }
   }
 
-  def writePtsDts(arr: Array[Byte], pesOffset: Int, pktEnd: Int, pts: Long, dtsOpt: Option[Long]): Unit = {
+  def readPesDts(arr: Array[Byte], pesOffset: Int, pktEnd: Int): Long = {
+    if (pesOffset < 0 || pesOffset + 9 > pktEnd) return -1L
+    if (arr(pesOffset) != 0x00.toByte ||
+        arr(pesOffset + 1) != 0x00.toByte ||
+        arr(pesOffset + 2) != 0x01.toByte) return -1L
+
+    val flags2 = arr(pesOffset + 7) & 0xFF
+    val headerDataLen = arr(pesOffset + 8) & 0xFF
+    val ptsDtsFlags = (flags2 >> 6) & 0x03
+
+    if (ptsDtsFlags == 3 && headerDataLen >= 10 && pesOffset + 19 <= pktEnd) {
+      decodePtsBytes(arr, pesOffset + 14)
+    } else {
+      -1L
+    }
+  }
+
+  def readPtsDts(arr: Array[Byte], pesOffset: Int, pktEnd: Int): Option[(Long, Option[Long])] = {
+    val pts = readPesPts(arr, pesOffset, pktEnd)
+    if (pts < 0L) None
+    else {
+      val dts = readPesDts(arr, pesOffset, pktEnd)
+      Some((pts, if (dts >= 0L) Some(dts) else None))
+    }
+  }
+
+  def writePtsDtsRaw(arr: Array[Byte], pesOffset: Int, pktEnd: Int, pts: Long, dts: Long): Unit = {
     if (pesOffset < 0 || pesOffset + 9 > pktEnd) return
     val flags2 = arr(pesOffset + 7) & 0xFF
     val headerDataLen = arr(pesOffset + 8) & 0xFF
@@ -79,9 +101,13 @@ object FreezeFramePacer {
       encodePtsBytes(arr, pesOffset + 9, 2, pts & PtsMask)
     } else if (ptsDtsFlags == 3 && headerDataLen >= 10 && pesOffset + 19 <= pktEnd) {
       encodePtsBytes(arr, pesOffset + 9, 3, pts & PtsMask)
-      encodePtsBytes(arr, pesOffset + 14, 1, dtsOpt.getOrElse(pts) & PtsMask)
+      val dtsVal = if (dts >= 0L) dts else pts
+      encodePtsBytes(arr, pesOffset + 14, 1, dtsVal & PtsMask)
     }
   }
+
+  def writePtsDts(arr: Array[Byte], pesOffset: Int, pktEnd: Int, pts: Long, dtsOpt: Option[Long]): Unit =
+    writePtsDtsRaw(arr, pesOffset, pktEnd, pts, dtsOpt.getOrElse(-1L))
 
   def encodePtsBytes(arr: Array[Byte], offset: Int, prefixNibble: Int, ts: Long): Unit = {
     val b0 = ((prefixNibble & 0x0F) << 4) | (((ts >> 29) & 0x0E).toInt) | 0x01
@@ -106,8 +132,8 @@ object FreezeFramePacer {
     pts & PtsMask
   }
 
-  def readPcrBase(arr: Array[Byte], pktOffset: Int): Option[Long] = {
-    if (pktOffset < 0 || pktOffset + 12 > arr.length) return None
+  def readPcrBaseRaw(arr: Array[Byte], pktOffset: Int): Long = {
+    if (pktOffset < 0 || pktOffset + 12 > arr.length) return -1L
     val afc = (arr(pktOffset + 3) & 0x30) >> 4
     if (afc == 2 || afc == 3) {
       val afLen = arr(pktOffset + 4) & 0xFF
@@ -118,13 +144,18 @@ object FreezeFramePacer {
         val b9 = arr(pktOffset + 9) & 0xFFL
         val b10 = arr(pktOffset + 10) & 0x80L
         val pcrBase = (b6 << 25) | (b7 << 17) | (b8 << 9) | (b9 << 1) | (b10 >>> 7)
-        Some(pcrBase & PtsMask)
+        pcrBase & PtsMask
       } else {
-        None
+        -1L
       }
     } else {
-      None
+      -1L
     }
+  }
+
+  def readPcrBase(arr: Array[Byte], pktOffset: Int): Option[Long] = {
+    val pcr = readPcrBaseRaw(arr, pktOffset)
+    if (pcr >= 0L) Some(pcr) else None
   }
 
   def writePcrBase(arr: Array[Byte], pktOffset: Int, pcrBase: Long): Unit = {
@@ -137,15 +168,20 @@ object FreezeFramePacer {
     arr(pktOffset + 11) = 0.toByte
   }
 
+  def fillPcrOnlyPacket(dst: Array[Byte], pid: Int, cc: Int, pcrBase: Long): Unit = {
+    Arrays.fill(dst, 0xFF.toByte)
+    dst(0) = 0x47.toByte
+    dst(1) = ((pid >> 8) & 0x1F).toByte
+    dst(2) = (pid & 0xFF).toByte
+    dst(3) = (0x20 | (cc & 0x0F)).toByte
+    dst(4) = 183.toByte
+    dst(5) = 0x10.toByte
+    writePcrBase(dst, 0, pcrBase)
+  }
+
   def pcrOnlyPacket(pid: Int, cc: Int, pcrBase: Long): Array[Byte] = {
-    val arr = Array.fill[Byte](PacketSize)(0xFF.toByte)
-    arr(0) = 0x47.toByte
-    arr(1) = ((pid >> 8) & 0x1F).toByte
-    arr(2) = (pid & 0xFF).toByte
-    arr(3) = (0x20 | (cc & 0x0F)).toByte
-    arr(4) = 183.toByte
-    arr(5) = 0x10.toByte
-    writePcrBase(arr, 0, pcrBase)
+    val arr = new Array[Byte](PacketSize)
+    fillPcrOnlyPacket(arr, pid, cc, pcrBase)
     arr
   }
 
@@ -627,6 +663,41 @@ object FreezeFramePacer {
     b.result()
   }
 
+  private val H264FreezePayload: Array[Byte] = Array[Byte](
+    0x00.toByte, 0x00.toByte, 0x01.toByte, 0x09.toByte, 0x30.toByte, 0x00.toByte,
+    0x00.toByte, 0x00.toByte, 0x01.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte
+  )
+
+  private def buildMpeg2FreezePayload(sliceRows: Int): Array[Byte] = {
+    val picHdr = Array[Byte](
+      0x00.toByte, 0x00.toByte, 0x01.toByte, 0x00.toByte,
+      0x00.toByte, 0x17.toByte, 0xFF.toByte, 0xF8.toByte
+    )
+    val picExt = Array[Byte](
+      0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+      0x11.toByte, 0x1F.toByte, 0xF3.toByte, 0x41.toByte, 0x80.toByte
+    )
+    val out = new Array[Byte](picHdr.length + picExt.length + (sliceRows * 6))
+    System.arraycopy(picHdr, 0, out, 0, picHdr.length)
+    var writePos = picHdr.length
+    System.arraycopy(picExt, 0, out, writePos, picExt.length)
+    writePos += picExt.length
+    var row = 1
+    while (row <= sliceRows) {
+      out(writePos) = 0x00.toByte
+      out(writePos + 1) = 0x00.toByte
+      out(writePos + 2) = 0x01.toByte
+      out(writePos + 3) = row.toByte
+      out(writePos + 4) = 0x38.toByte
+      out(writePos + 5) = 0x00.toByte
+      writePos += 6
+      row += 1
+    }
+    out
+  }
+
+  private val Mpeg2FreezePayload68: Array[Byte] = buildMpeg2FreezePayload(DefaultMaxSliceRow)
+
   def synthesizeVideoFreezeFrame(
       videoPid: Int,
       videoStreamType: Option[Int],
@@ -638,39 +709,10 @@ object FreezeFramePacer {
     val isH264 = videoStreamType.contains(0x1B)
 
     val videoPayload: Array[Byte] = if (isH264) {
-      val aud = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0x09.toByte, 0x30.toByte, 0x00.toByte)
-      val slice = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte)
-      val out = new Array[Byte](aud.length + slice.length)
-      System.arraycopy(aud, 0, out, 0, aud.length)
-      System.arraycopy(slice, 0, out, aud.length, slice.length)
-      out
+      H264FreezePayload
     } else {
-      val picHdr = Array[Byte](
-        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x00.toByte,
-        0x00.toByte, 0x17.toByte, 0xFF.toByte, 0xF8.toByte
-      )
-      val picExt = Array[Byte](
-        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
-        0x11.toByte, 0x1F.toByte, 0xF3.toByte, 0x41.toByte, 0x80.toByte
-      )
-      val sliceRows = math.max(1, math.min(maxSliceRow, 68))
-      val out = new Array[Byte](picHdr.length + picExt.length + (sliceRows * 6))
-      System.arraycopy(picHdr, 0, out, 0, picHdr.length)
-      var writePos = picHdr.length
-      System.arraycopy(picExt, 0, out, writePos, picExt.length)
-      writePos += picExt.length
-      var row = 1
-      while (row <= sliceRows) {
-        out(writePos) = 0x00.toByte
-        out(writePos + 1) = 0x00.toByte
-        out(writePos + 2) = 0x01.toByte
-        out(writePos + 3) = row.toByte
-        out(writePos + 4) = 0x38.toByte
-        out(writePos + 5) = 0x00.toByte
-        writePos += 6
-        row += 1
-      }
-      out
+      val sliceRows = math.max(1, math.min(maxSliceRow, DefaultMaxSliceRow))
+      if (sliceRows == DefaultMaxSliceRow) Mpeg2FreezePayload68 else buildMpeg2FreezePayload(sliceRows)
     }
 
     val pesHeaderLen = 19

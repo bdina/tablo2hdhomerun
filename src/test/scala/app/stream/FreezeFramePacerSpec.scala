@@ -99,6 +99,48 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = FreezeFramePacer.readPcrBase(pkt, 0) shouldBe Some(pcr)
       pkt.slice(12, 188).forall(_ == 0xFF.toByte) shouldBe true
     }
+
+    "provide zero-allocation raw PTS/DTS and PCR helpers matching Option-based APIs" in {
+      val ptsOnly = new Array[Byte](188)
+      ptsOnly(0) = 0x00.toByte
+      ptsOnly(1) = 0x00.toByte
+      ptsOnly(2) = 0x01.toByte
+      ptsOnly(3) = 0xE0.toByte
+      ptsOnly(7) = 0x80.toByte
+      ptsOnly(8) = 5.toByte
+      val pts = 0x123456789L
+      FreezeFramePacer.writePtsDtsRaw(ptsOnly, 0, 188, pts, -1L)
+      val _ = FreezeFramePacer.readPesPts(ptsOnly, 0, 188) shouldBe pts
+      val _ = FreezeFramePacer.readPesDts(ptsOnly, 0, 188) shouldBe -1L
+      val _ = FreezeFramePacer.readPtsDts(ptsOnly, 0, 188) shouldBe Some((pts, None))
+
+      val ptsDts = new Array[Byte](188)
+      ptsDts(0) = 0x00.toByte
+      ptsDts(1) = 0x00.toByte
+      ptsDts(2) = 0x01.toByte
+      ptsDts(3) = 0xE0.toByte
+      ptsDts(7) = 0xC0.toByte
+      ptsDts(8) = 10.toByte
+      val dts = 0x123450000L
+      FreezeFramePacer.writePtsDtsRaw(ptsDts, 0, 188, pts, dts)
+      val _ = FreezeFramePacer.readPesPts(ptsDts, 0, 188) shouldBe pts
+      val _ = FreezeFramePacer.readPesDts(ptsDts, 0, 188) shouldBe dts
+      val _ = FreezeFramePacer.readPtsDts(ptsDts, 0, 188) shouldBe Some((pts, Some(dts)))
+
+      val noFlags = new Array[Byte](188)
+      noFlags(2) = 0x01.toByte
+      noFlags(3) = 0xE0.toByte
+      val _ = FreezeFramePacer.readPesPts(noFlags, 0, 188) shouldBe -1L
+      val _ = FreezeFramePacer.readPesDts(noFlags, 0, 188) shouldBe -1L
+
+      val pcrVal = 0x1A2B3C4D5L
+      val expectedPcrPkt = FreezeFramePacer.pcrOnlyPacket(0x100, 7, pcrVal)
+      val scratchPkt = new Array[Byte](188)
+      FreezeFramePacer.fillPcrOnlyPacket(scratchPkt, 0x100, 7, pcrVal)
+      val _ = java.util.Arrays.equals(scratchPkt, expectedPcrPkt) shouldBe true
+      val _ = FreezeFramePacer.readPcrBaseRaw(scratchPkt, 0) shouldBe pcrVal
+      FreezeFramePacer.readPcrBaseRaw(new Array[Byte](188), 0) shouldBe -1L
+    }
   }
 
   "FreezeFramePacer MPEG-2 sequence header & payload sanitization" should {

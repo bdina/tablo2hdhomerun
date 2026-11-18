@@ -48,4 +48,23 @@ class FsScanSpec extends ScalaTestWithActorTestKit with AnyFlatSpecLike {
       Files.walk(root).sorted(java.util.Comparator.reverseOrder()).forEach(Files.delete(_))
     }
   }
+
+  "FsNotify.FsQueue.QueueProxy" should "complete and stop cleanly when transcode start skips a file" in {
+    import scala.concurrent.duration.*
+    val root = Files.createTempDirectory("fsproxy-")
+    try {
+      app.AppContext.initialize(testKit.system.asInstanceOf[org.apache.pekko.actor.typed.ActorSystem[org.apache.pekko.NotUsed]])
+      val tsFile = root.resolve("fresh.ts")
+      val mp4File = root.resolve("fresh.mp4")
+      val _ = Files.createFile(tsFile)
+      val _ = Files.createFile(mp4File)
+      val proxy = testKit.spawn(FsNotify.FsQueue.QueueProxy(tsFile.toFile))
+      val probe = testKit.createTestProbe[FsNotify.FsQueue.QueueProxy.Response]()
+      proxy ! FsNotify.FsQueue.QueueProxy.Request.Notify(probe.ref)
+      val _ = probe.expectMessage(3.seconds, FsNotify.FsQueue.QueueProxy.Response.Complete)
+      probe.expectTerminated(proxy, 3.seconds)
+    } finally {
+      Files.walk(root).sorted(java.util.Comparator.reverseOrder()).forEach(Files.delete(_))
+    }
+  }
 }

@@ -133,9 +133,10 @@ gradle nativeImage
 ```bash
 docker build -f Dockerfile.jvm --tag tablo2hdhomerun:jvm .
 docker run -e TABLO_IP=192.168.1.100 -e PROXY_IP=0.0.0.0 \
-           -p 8080:8080 tablo2hdhomerun:jvm \
-           java -jar tablo2hdhomerun.jar -d
+           -p 8080:8080 tablo2hdhomerun:jvm
 ```
+
+`Dockerfile.jvm` runs Java 25 with `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, `-Xss256k`, and `-d` enabled by default.
 
 ### Option 4: Docker Native (Recommended)
 
@@ -493,7 +494,9 @@ The native image is configured with:
 - Max Heap: 128MB
 - Max New Gen: 64MB
 
-For systems with limited memory, these can be adjusted at build time in `build.gradle`.
+`Dockerfile.jvm` aligns the Java 25 development/JVM runtime to the same heap ceiling using `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, and `-Xss256k` (while keeping Tiered/C2 JIT compilation enabled). In `docker-compose.example.yml`, `--healthcheck` invocations override the native heap flags with `-XX:MinHeapSize=4m -XX:MaxHeapSize=16m -XX:MaxNewSize=8m` to minimize transient probe memory.
+
+For systems with limited memory, native image heap bounds can be adjusted at build time in `build.gradle`.
 
 ### Concurrent Streams
 

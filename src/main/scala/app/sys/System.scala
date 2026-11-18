@@ -55,7 +55,6 @@ object FsUtil {
 
 object FsScan {
   import scala.concurrent.{ExecutionContext, Future}
-  import ExecutionContext.Implicits.global
 
   val log = LoggerFactory.getLogger(this.getClass)
 
@@ -68,11 +67,12 @@ object FsScan {
 
   def apply(ext: Seq[String]): Behavior[Command] = Behaviors.receive {
     case (context, message) =>
+      implicit val ec: ExecutionContext = context.executionContext
       message match {
         case Scan(root,replyTo) =>
           context.log.debug("[scan] start root={}", root)
           val self = context.self
-          scan(root=root,ext=ext)(using log).foreach {
+          scan(root=root,ext=ext)(using log, ec).foreach {
             case result =>
               log.info("[scan] complete root={} queued={}", root, result.size)
               replyTo ! Ack(paths=result,from=self)
@@ -85,20 +85,21 @@ object FsScan {
       }
   }
 
-  private def scan(root: Path, ext: Seq[String])(implicit log: Logger): Future[Seq[Path]] = Future {
+  private def scan(root: Path, ext: Seq[String])(implicit log: Logger, ec: ExecutionContext): Future[Seq[Path]] = Future {
     import java.nio.file.Files
     import java.nio.file.attribute.{UserDefinedFileAttributeView => Xattr}
     import scala.jdk.CollectionConverters._
-    import scala.jdk.StreamConverters._
+    import scala.util.Using
 
     var examined = 0
-    val result = Files
-      .find(root, Integer.MAX_VALUE, (_, a) => a.isRegularFile)
-      .toScala(LazyList)
-      .filter { case path =>
+    val result = Using.resource(Files.find(root, Integer.MAX_VALUE, (_, a) => a.isRegularFile)) { stream =>
+      val builder = Vector.newBuilder[Path]
+      val it = stream.iterator()
+      while (it.hasNext) {
+        val path = it.next()
         examined += 1
-        val fileName = path.getFileName.toFile.getName.toLowerCase
-        val kind = ext.find(e => fileName.endsWith(s".${e.toLowerCase.stripPrefix(".")}"))
+        val fileName = path.getFileName.toString.toLowerCase
+        val kind = ext.exists(e => fileName.endsWith(s".${e.toLowerCase.stripPrefix(".")}"))
         val scanned =
           Try {
             Files
@@ -108,11 +109,14 @@ object FsScan {
               .exists(_ == FsUtil.Attr.Key.FS_STATE)
           }
           .getOrElse(false)
-        val hit = kind.isDefined && !scanned
+        val hit = kind && !scanned
         log.debug("[scan] file path={} hit={}", path, hit)
-        hit
+        if (hit) {
+          builder += path
+        }
       }
-      .toSeq
+      builder.result()
+    }
     log.debug("[scan] examined root={} count={}", root, examined)
     result
   }
@@ -217,8 +221,6 @@ case class FFMpegDelegate(
 
   var proc: Option[Process] = None
 
-  implicit val ec: scala.concurrent.ExecutionContextExecutor = scala.concurrent.ExecutionContext.global
-
   override def onMessage(message: Request): Behavior[Request] = message match {
     case Request.Status(sender) =>
       log.debug("[transcode] status request")
@@ -248,6 +250,9 @@ case class FFMpegDelegate(
           log.error("[transcode] release failed file={}", file, t)
           sender ! Response.Status(code=1,replyTo=context.self)
       }
+      Behaviors.same
+    case Request.Stop(sender) =>
+      sender ! Response.Status(code=0,replyTo=context.self)
       Behaviors.same
     case other =>
       log.debug("[transcode] unhandled message={}", other)
@@ -309,21 +314,38 @@ object FsNotify {
           .runWith(Sink.ignore)
 
       var parent: Option[ActorRef[QueueProxy.Response]] = None
+      var stopping = false
+      var completed = false
 
       override def onMessage(msg: QueueProxy.Request) = msg match {
         case QueueProxy.Request.Notify(replyTo) =>
-          parent = Some(replyTo)
-          Behaviors.same
+          if (completed) {
+            replyTo ! QueueProxy.Response.Complete
+            Behaviors.stopped
+          } else {
+            parent = Some(replyTo)
+            Behaviors.same
+          }
         case QueueProxy.FFMpegResponse(resp) =>
           log.debug("[transcode] proxy response resp={}", resp)
           resp match {
+            case FFMpegDelegate.Response.Status(code, _) if stopping =>
+              log.debug("[transcode] proxy stopped exitCode={}", code)
+              completed = true
+              parent match {
+                case Some(ref) =>
+                  ref ! QueueProxy.Response.Complete
+                  Behaviors.stopped
+                case None =>
+                  Behaviors.same
+              }
             case FFMpegDelegate.Response.Status(code,_) if code != 0 =>
               Behaviors.same
             case FFMpegDelegate.Response.Status(code,replyTo) =>
               log.debug("[transcode] proxy stopping exitCode={}", code)
-              replyTo ! FFMpegDelegate.Request.Stop(replyTo=ffmpegResponseMapper)
-              parent.foreach (ref => ref ! QueueProxy.Response.Complete)
+              stopping = true
               killSwitch.shutdown()
+              replyTo ! FFMpegDelegate.Request.Stop(replyTo=ffmpegResponseMapper)
               Behaviors.same
           }
       }
