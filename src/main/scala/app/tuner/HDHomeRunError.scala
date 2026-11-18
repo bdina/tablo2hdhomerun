@@ -23,7 +23,7 @@ enum HDHomeRunError(
 , val reason: String
 , val httpStatus: StatusCode
 , val defaultBody: String
-) {
+) derives CanEqual {
   case UnknownChannel extends HDHomeRunError(801, "Unknown Channel", StatusCodes.NotFound, "Unknown channel")
   case UnknownTranscodeProfile extends HDHomeRunError(802, "Unknown Transcode Profile", StatusCodes.ServiceUnavailable, "Unknown transcode profile")
   case SystemBusy extends HDHomeRunError(803, "System Busy", StatusCodes.ServiceUnavailable, "System busy")
@@ -116,7 +116,7 @@ object HDHomeRunError {
     text.contains("scan")
   }
 
-  enum FailureCategory {
+  enum FailureCategory derives CanEqual {
     case ChannelNotFound
     case NoAvailableTuners
     case WeakSignal

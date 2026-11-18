@@ -1,6 +1,6 @@
 package app.config
 
-enum TabloGen {
+enum TabloGen derives CanEqual {
   case FourthGen
   case Legacy
 

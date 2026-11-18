@@ -21,10 +21,12 @@ object HlsSegmentFetch {
       }
   }
 
-  sealed trait SegmentFetchDecision
-  case object Accept extends SegmentFetchDecision
-  final case class Fail(error: HlsError) extends SegmentFetchDecision
-  final case class Retry(reason: String) extends SegmentFetchDecision
+  enum SegmentFetchDecision derives CanEqual {
+    case Accept
+    case Fail(error: HlsError)
+    case Retry(reason: String)
+  }
+  export SegmentFetchDecision.{Accept, Fail, Retry}
 
   def isSafeByteRange(offset: Long, length: Long): Boolean =
     offset >= 0 && length > 0

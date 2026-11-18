@@ -1292,12 +1292,11 @@ object Tablo4thGen {
       def playlistChanged(before: Session, after: Session): Boolean =
         before.playlistUrl != after.playlistUrl
 
-      sealed trait ProbeOutcome
-      object ProbeOutcome {
-        final case class Alive(session: Session, playlistChanged: Boolean) extends ProbeOutcome
-        case object TransientFailure extends ProbeOutcome
-        case object ClosedByTablo extends ProbeOutcome
-        case object ProbeExhausted extends ProbeOutcome
+      enum ProbeOutcome derives CanEqual {
+        case Alive(session: Session, playlistChanged: Boolean)
+        case TransientFailure
+        case ClosedByTablo
+        case ProbeExhausted
       }
 
       def isSessionClosedStatus(status: StatusCode): Boolean =
@@ -2864,18 +2863,17 @@ object Tablo4thGen {
         jsonFormat(TunerSlot.apply, "in_use", "channel", "recording", "channel_identifier")
     }
 
-    sealed trait TuneOrigin {
-      def tag: String
-      def isSelf: Boolean
-    }
-    object TuneOrigin {
-      final case class Self(sessionState: String) extends TuneOrigin {
-        def tag: String = s"self:$sessionState"
-        def isSelf: Boolean = true
+    enum TuneOrigin derives CanEqual {
+      case Self(sessionState: String)
+      case External
+
+      def tag: String = this match {
+        case Self(sessionState) => s"self:$sessionState"
+        case External           => "external"
       }
-      case object External extends TuneOrigin {
-        def tag: String = "external"
-        def isSelf: Boolean = false
+      def isSelf: Boolean = this match {
+        case _: Self  => true
+        case External => false
       }
     }
 

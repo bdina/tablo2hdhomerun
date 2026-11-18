@@ -35,9 +35,11 @@ object ResilientHlsSource {
     extends java.util.concurrent.TimeoutException(message)
       with scala.util.control.NoStackTrace
 
-  private sealed trait Elem
-  private final case class Real(data: ByteString) extends Elem
-  private case object GapFill extends Elem
+  private enum Elem derives CanEqual {
+    case Real(data: ByteString)
+    case GapFill
+  }
+  import Elem.{GapFill, Real}
 
   def apply(
     streamFactory: () => Source[ByteString, ?]

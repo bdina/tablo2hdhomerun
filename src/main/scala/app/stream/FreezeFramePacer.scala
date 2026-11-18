@@ -16,9 +16,11 @@ object FreezeFramePacer {
 
   private val Crc16Poly: Int = 0x18005
 
-  sealed trait AudioFormat
-  final case class Ac3Format(fscod: Int, frmsizecod: Int, bsid: Int, bsmod: Int, acmod: Int) extends AudioFormat
-  final case class AdtsFormat(headerBytes: ByteString) extends AudioFormat
+  enum AudioFormat derives CanEqual {
+    case Ac3Format(fscod: Int, frmsizecod: Int, bsid: Int, bsmod: Int, acmod: Int)
+    case AdtsFormat(headerBytes: ByteString)
+  }
+  export AudioFormat.{Ac3Format, AdtsFormat}
 
   def findPesHeaderOffset(arr: Array[Byte], pktOffset: Int): Int = {
     if (pktOffset < 0 || pktOffset + PacketSize > arr.length) return -1

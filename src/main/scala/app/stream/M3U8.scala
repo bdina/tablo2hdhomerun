@@ -107,17 +107,16 @@ object M3U8 {
 }
 
 private object M3U8LineParser {
-  sealed trait LineEvent
-  object LineEvent {
-    case object Extm3u extends LineEvent
-    case object EndList extends LineEvent
-    case class Version(value: String) extends LineEvent
-    case class TargetDuration(value: String) extends LineEvent
-    case class MediaSequence(value: String) extends LineEvent
-    case class ByteRange(value: String) extends LineEvent
-    case class Extinf(rest: String) extends LineEvent
-    case class Uri(value: String) extends LineEvent
-    case object Unknown extends LineEvent
+  enum LineEvent derives CanEqual {
+    case Extm3u
+    case EndList
+    case Version(value: String)
+    case TargetDuration(value: String)
+    case MediaSequence(value: String)
+    case ByteRange(value: String)
+    case Extinf(rest: String)
+    case Uri(value: String)
+    case Unknown
   }
 
   def parseLine(line: String): LineEvent =

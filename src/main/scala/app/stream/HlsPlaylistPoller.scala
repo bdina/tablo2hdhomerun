@@ -32,9 +32,11 @@ object HlsPlaylistPoller {
   , lastSegmentDuration: Double = 0.0
   )
 
-  sealed trait Outcome
-  final case class Emit(next: PollState, segments: Seq[SegmentInfo]) extends Outcome
-  final case class Fail(error: Throwable) extends Outcome
+  enum Outcome derives CanEqual {
+    case Emit(next: PollState, segments: Seq[SegmentInfo])
+    case Fail(error: Throwable)
+  }
+  export Outcome.{Emit, Fail}
 
   def initial(
     baseUrl: String

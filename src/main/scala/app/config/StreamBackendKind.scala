@@ -1,6 +1,6 @@
 package app.config
 
-enum StreamBackendKind {
+enum StreamBackendKind derives CanEqual {
   case Hls
   case Ffmpeg
 

@@ -19,7 +19,7 @@ object HlsError {
 }
 
 /** Validation errors returned by HlsSegmentFetch.RangeRequest.create without throwing. */
-enum RangeError(val message: String) extends Exception(message) with NoStackTrace {
+enum RangeError(val message: String) extends Exception(message) with NoStackTrace derives CanEqual {
   case InvalidOffset(offset: Long) extends RangeError(s"offset must be >= 0, got $offset")
   case InvalidLength(length: Long) extends RangeError(s"length must be > 0, got $length")
 }
