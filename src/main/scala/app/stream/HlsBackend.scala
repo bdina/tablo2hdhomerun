@@ -54,10 +54,9 @@ object HlsBackend extends StreamBackend {
   , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   , metricsCollector: Option[StreamMetrics.HlsCollector] = None
   )(using system: ActorSystem[?]): Source[ByteString, ?] = {
-    import org.apache.pekko.actor.typed.scaladsl.adapter._
     given ec: scala.concurrent.ExecutionContext = system.executionContext
     given pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
-    val http = Http(system.toClassic)
+    val http = Http(system.classicSystem)
     val bytesOut = new java.util.concurrent.atomic.AtomicLong(0L)
     val lastSeqOut = new java.util.concurrent.atomic.AtomicInteger(initialSeq)
     val hlsConfig = AppContext.config.stream.hls
@@ -111,7 +110,7 @@ object HlsBackend extends StreamBackend {
     def fetchSegmentSource(url: String, byteRange: Option[(Long, Long)]): Source[ByteString, ?] = {
       val maxSegmentRetries = 3
       val segmentRetryDelay = 500.millis
-      val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
+      val scheduler: pekko.actor.Scheduler = system.classicSystem.scheduler
       def retryAfter(retriesLeft: Int, message: String, nextSource: => Source[ByteString, ?]): Source[ByteString, ?] = {
         metricsCollector.foreach(_.onSegmentRetry())
         log.warn("[stream:hls] segment retry label={} reason={} retriesLeft={}", label, message, retriesLeft)
@@ -312,7 +311,7 @@ object HlsBackend extends StreamBackend {
             }
           }
       }
-      val scheduler: pekko.actor.Scheduler = system.toClassic.scheduler
+      val scheduler: pekko.actor.Scheduler = system.classicSystem.scheduler
       val delayMs = pollIntervalMsFromState(state)
       if (delayMs <= 0L) {
         doFetch()
@@ -325,7 +324,7 @@ object HlsBackend extends StreamBackend {
       log.info("[stream:hls] materialized label={} playlistUrl={}", label, playlistUrl)
       val lastArrivalNanos = new java.util.concurrent.atomic.AtomicLong(System.nanoTime())
       heartbeatTask = Some(
-        system.toClassic.scheduler.scheduleWithFixedDelay(heartbeatSec.seconds, heartbeatSec.seconds) { () =>
+        system.classicSystem.scheduler.scheduleWithFixedDelay(heartbeatSec.seconds, heartbeatSec.seconds) { () =>
           log.debug("[stream:hls] heartbeat label={} lastSeq={} bytes={}", label, lastSeqOut.get(), bytesOut.get())
         }(using ec)
       )

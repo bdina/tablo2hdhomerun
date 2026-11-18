@@ -396,4 +396,45 @@ class Tablo4thGenRouteSpec extends Tablo4thGenRouteSpecBase {
       thread.join(2000)
     }
   }
+
+  "Tablo4thGen.Lineup.LineupActor" should "coalesce concurrent cold-cache Fetch requests into a single scan" in {
+    import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+    import scala.concurrent.{Await, Future, Promise}
+
+    val scanCount = new java.util.concurrent.atomic.AtomicInteger(0)
+    val promise = Promise[Seq[JsValue]]()
+    val actor = system.spawn(
+      Tablo4thGen.Lineup.LineupActor.withScan(
+        scanFn = () => {
+          val _ = scanCount.incrementAndGet()
+          promise.future
+        }
+      , autoScanOnStart = false
+      )
+    , s"coalesce-lineup-${java.util.UUID.randomUUID()}"
+    )
+
+    given pekko.util.Timeout = 3.seconds
+    given pekko.actor.typed.Scheduler = typedSystem.scheduler
+
+    val f1 = actor.ask[Tablo4thGen.Lineup.LineupActor.Response.Fetch](replyTo =>
+      Tablo4thGen.Lineup.LineupActor.Request.Fetch(replyTo)
+    )
+    val f2 = actor.ask[Tablo4thGen.Lineup.LineupActor.Response.Fetch](replyTo =>
+      Tablo4thGen.Lineup.LineupActor.Request.Fetch(replyTo)
+    )
+
+    Thread.sleep(100)
+    val _ = scanCount.get() shouldBe 1
+    val _ = f1.isCompleted shouldBe false
+    val _ = f2.isCompleted shouldBe false
+
+    val sample = JsObject("GuideNumber" -> JsString("7.1"), "GuideName" -> JsString("WJLA-HD"))
+    promise.success(Seq(sample))
+
+    given scala.concurrent.ExecutionContext = typedSystem.executionContext
+    val res = Await.result(Future.sequence(Seq(f1, f2)), 3.seconds)
+    val _ = res.map(_.channels) shouldBe Seq(Seq(sample), Seq(sample))
+    scanCount.get() shouldBe 1
+  }
 }

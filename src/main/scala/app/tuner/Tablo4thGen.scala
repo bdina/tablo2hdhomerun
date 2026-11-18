@@ -525,9 +525,6 @@ object Tablo4thGen {
       def apply(authContext: Auth.AuthContext): Behavior[Request] = Behaviors.setup { context =>
         given ActorSystem[Nothing] = context.system
         given scala.concurrent.ExecutionContext = context.executionContext
-        var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
-        var scanInProgress: Boolean = false
-
         val HttpCtx = Http()
 
         def channelToJsValue(channel: ChannelLineup): JsValue =
@@ -570,18 +567,43 @@ object Tablo4thGen {
           val activeAuth = Auth.authContext.getOrElse(authContext)
           fetchGuideChannels(activeAuth, allowRefresh = true).map { channels =>
             log.info("[lineup] scan complete count={}", channels.size)
-            val jsChannels = channels.map(channelToJsValue)
-            context.self ! Command.Store(jsChannels)
-            jsChannels
-          }.recover {
-            case ex =>
-              log.error("[lineup] scan failed", ex)
-              context.self ! Command.ScanFailed
-              cache._2
+            channels.map(channelToJsValue)
           }
         }
 
-        context.self ! Command.Scan
+        withScanBehavior(context, () => scan(), autoScanOnStart = true)
+      }
+
+      private[tuner] def withScan(
+        scanFn: () => Future[Seq[JsValue]]
+      , autoScanOnStart: Boolean = true
+      ): Behavior[Request] = Behaviors.setup { context =>
+        withScanBehavior(context, scanFn, autoScanOnStart)
+      }
+
+      private def withScanBehavior(
+        context: org.apache.pekko.actor.typed.scaladsl.ActorContext[Request]
+      , scanFn: () => Future[Seq[JsValue]]
+      , autoScanOnStart: Boolean
+      ): Behavior[Request] = {
+        var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
+        var scanInProgress: Boolean = false
+        var pendingWaiters: List[ActorRef[Response.Fetch]] = Nil
+
+        def triggerScan(): Unit =
+          if (!scanInProgress) {
+            scanInProgress = true
+            context.pipeToSelf(scanFn()) {
+              case Success(channels) => Command.Store(channels)
+              case Failure(ex) =>
+                log.error("[lineup] scan failed", ex)
+                Command.ScanFailed
+            }
+          }
+
+        if (autoScanOnStart) {
+          context.self ! Command.Scan
+        }
 
         Behaviors.receiveMessage {
           case Command.Store(channels) =>
@@ -594,6 +616,9 @@ object Tablo4thGen {
               cache = (5.minutes.fromNow, cache._2)
             }
             scanInProgress = false
+            val waiters = pendingWaiters
+            pendingWaiters = Nil
+            waiters.reverse.foreach(_ ! Response.Fetch(cache._2, context.self))
             Behaviors.same
 
           case Command.ScanFailed =>
@@ -601,6 +626,9 @@ object Tablo4thGen {
             if (cache._2.nonEmpty) {
               cache = (1.minute.fromNow, cache._2)
             }
+            val waiters = pendingWaiters
+            pendingWaiters = Nil
+            waiters.reverse.foreach(_ ! Response.Fetch(cache._2, context.self))
             Behaviors.same
 
           case Command.Scan if scanInProgress =>
@@ -609,8 +637,7 @@ object Tablo4thGen {
 
           case Command.Scan =>
             log.info("[lineup] scan requested")
-            scanInProgress = true
-            scan() : Unit
+            triggerScan()
             Behaviors.same
 
           case Request.Status(sender) =>
@@ -623,16 +650,10 @@ object Tablo4thGen {
             log.debug("[lineup] fetch cache expired")
             if (cache._2.nonEmpty) {
               replyTo ! Response.Fetch(cache._2, context.self)
-              if (!scanInProgress) {
-                scanInProgress = true
-                scan() : Unit
-              }
+              triggerScan()
             } else {
-              val sender = replyTo
-              scanInProgress = true
-              scan().foreach { channels =>
-                sender ! Response.Fetch(channels, context.self)
-              }
+              pendingWaiters = replyTo :: pendingWaiters
+              triggerScan()
             }
             Behaviors.same
 
@@ -831,6 +852,7 @@ object Tablo4thGen {
       given scala.concurrent.ExecutionContext = context.executionContext
       var cache: (scala.concurrent.duration.Deadline, Seq[Tablo2HDHomeRun.Guide.ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
       var scanInProgress: Boolean = false
+      var pendingWaiters: List[ActorRef[Response.FetchGuide]] = Nil
 
       val HttpCtx = Http()
 
@@ -978,12 +1000,19 @@ object Tablo4thGen {
               }
             }
           }
-        }.recover {
-          case ex =>
-            log.error("[guide] scan failed", ex)
-            Seq.empty
         }
       }
+
+      def triggerScan(): Unit =
+        if (!scanInProgress) {
+          scanInProgress = true
+          context.pipeToSelf(scan()) {
+            case Success(guide) => Command.StoreGuide(guide)
+            case Failure(ex) =>
+              log.error("[guide] scan failed", ex)
+              Command.StoreGuide(Seq.empty)
+          }
+        }
 
       context.self ! Command.Scan
 
@@ -997,6 +1026,9 @@ object Tablo4thGen {
             cache = (5.minutes.fromNow, cache._2)
           }
           scanInProgress = false
+          val waiters = pendingWaiters
+          pendingWaiters = Nil
+          waiters.reverse.foreach(_ ! Response.FetchGuide(cache._2, context.self))
           Behaviors.same
 
         case Command.Scan if scanInProgress =>
@@ -1005,26 +1037,18 @@ object Tablo4thGen {
 
         case Command.Scan =>
           log.info("[guide] scan requested")
-          scanInProgress = true
-          scan().foreach { guide =>
-            context.self ! Command.StoreGuide(guide)
-          }
+          triggerScan()
           Behaviors.same
 
         case Request.FetchGuide(replyTo) if cache._1.isOverdue() =>
           if (cache._2.nonEmpty) {
             log.debug("[guide] fetch cache expired; serving stale cache count={} and refreshing in background", cache._2.size)
-            if (!scanInProgress) {
-              context.self ! Command.Scan
-            }
+            triggerScan()
             replyTo ! Response.FetchGuide(cache._2, context.self)
           } else {
             log.debug("[guide] fetch cache expired and empty; scanning")
-            scanInProgress = true
-            scan().foreach { guide =>
-              context.self ! Command.StoreGuide(guide)
-              replyTo ! Response.FetchGuide(guide, context.self)
-            }
+            pendingWaiters = replyTo :: pendingWaiters
+            triggerScan()
           }
           Behaviors.same
 
@@ -1407,6 +1431,7 @@ object Tablo4thGen {
         case class GetSessionMeta(channelId: String, replyTo: ActorRef[Option[TabloSessionMeta]]) extends Request
         case class GetTunerStatuses(replyTo: ActorRef[Seq[HDHomeRunStatus.TunerStatus]]) extends Request
         case class GetActiveChannelStates(replyTo: ActorRef[Map[String, String]]) extends Request
+        case class ShutdownAll(replyTo: ActorRef[pekko.Done]) extends Request
       }
 
       sealed trait Response
@@ -1469,13 +1494,14 @@ object Tablo4thGen {
           meta: TabloSessionMeta
         , hubSource: Source[ByteString, NotUsed]
         , teardown: () => Unit
-        , graceTimer: pekko.actor.Cancellable
         , cachedHeadersRef: AtomicReference[MpegTsSync.CachedHeaders] =
             new AtomicReference(MpegTsSync.CachedHeaders())
         , drainSwitch: Option[pekko.stream.UniqueKillSwitch] = None
         , enteredAtNanos: Long = System.nanoTime()
         ) extends SessionState
       }
+
+      private case class GraceTimerKey(channelId: ChannelId)
 
       def apply(
         startRunner: (String, ActorRef[Request]) => Unit
@@ -1496,6 +1522,7 @@ object Tablo4thGen {
       , totalTuners: Int = 4
       , idleGrace: FiniteDuration = defaultIdleGrace
       ): Behavior[Request] = Behaviors.setup { context =>
+        Behaviors.withTimers { timers =>
         var sessions = Map.empty[ChannelId, SessionState]
         var tuners = totalTuners
 
@@ -1556,7 +1583,7 @@ object Tablo4thGen {
           if (!headers.isEmpty) {
             setCachedHeaders(channelId.asString, headers)
           }
-          val timer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId.asString))
+          timers.startSingleTimer(GraceTimerKey(channelId), Command.GraceExpired(channelId.asString), idleGrace)
           context.log.info(
             "[session] idle-grace channel={} channelId={} duration={}s token={} occupied={}/{}"
           , Lineup.channelLabel(channelId.asString)
@@ -1578,7 +1605,7 @@ object Tablo4thGen {
                 None
             }
           }
-          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, timer, live.cachedHeadersRef, drainSwitch, System.nanoTime())
+          SessionState.IdleGrace(live.meta, live.hubSource, live.teardown, live.cachedHeadersRef, drainSwitch, System.nanoTime())
         }
 
         def teardownAndRemove(channelId: ChannelId, teardown: () => Unit): Unit = {
@@ -1634,9 +1661,8 @@ object Tablo4thGen {
               case live: SessionState.Live =>
                 Some(live.meta)
               case idle: SessionState.IdleGrace =>
-                val _ = idle.graceTimer.cancel()
-                val refreshedTimer = context.scheduleOnce(idleGrace, context.self, Command.GraceExpired(channelId.asString))
-                sessions += channelId -> idle.copy(graceTimer = refreshedTimer, enteredAtNanos = System.nanoTime())
+                timers.startSingleTimer(GraceTimerKey(channelId), Command.GraceExpired(channelId.asString), idleGrace)
+                sessions += channelId -> idle.copy(enteredAtNanos = System.nanoTime())
                 Some(idle.meta)
               case _ =>
                 None
@@ -1668,7 +1694,7 @@ object Tablo4thGen {
                       , channelId.asString
                       , clientId.asString
                       )
-                      val _ = idle.graceTimer.cancel()
+                      timers.cancel(GraceTimerKey(idleChannelId))
                       teardownAndRemove(idleChannelId, idle.teardown)
                       openChannel(channelId, clientId, replyTo)
                     case None =>
@@ -1710,7 +1736,7 @@ object Tablo4thGen {
                 Behaviors.same
 
               case Some(idle: SessionState.IdleGrace) =>
-                val _ = idle.graceTimer.cancel()
+                timers.cancel(GraceTimerKey(channelId))
                 idle.drainSwitch.foreach(_.shutdown())
                 sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
                 context.log.info(
@@ -1844,7 +1870,7 @@ object Tablo4thGen {
                 )
                 teardownAndRemove(channelId, live.teardown)
               case Some(idle: SessionState.IdleGrace) if LeaseId(idle.meta.leaseId) == leaseId =>
-                val _ = idle.graceTimer.cancel()
+                timers.cancel(GraceTimerKey(channelId))
                 context.log.warn(
                   "[session] upstream-ended channel={} channelId={} during idle-grace"
                 , Lineup.channelLabel(channelId.asString)
@@ -1855,6 +1881,31 @@ object Tablo4thGen {
                 context.log.debug("[session] upstream-ended ignored channelId={} leaseId={}", channelId.asString, leaseId.asString)
             }
             Behaviors.same
+
+          case Request.ShutdownAll(replyTo) =>
+            timers.cancelAll()
+            val count = sessions.size
+            sessions.foreach {
+              case (channelId, SessionState.Opening(waiters, cancel)) =>
+                Try(cancel()).failed.foreach { ex =>
+                  context.log.warn("[session] shutdown cancel failed channelId={}", channelId.asString, ex)
+                }
+                rejectWaiters(waiters, RejectReason.NoTuners)
+              case (channelId, live: SessionState.Live) =>
+                Try(live.teardown()).failed.foreach { ex =>
+                  context.log.warn("[session] shutdown teardown failed channelId={}", channelId.asString, ex)
+                }
+              case (channelId, idle: SessionState.IdleGrace) =>
+                idle.drainSwitch.foreach(_.shutdown())
+                Try(idle.teardown()).failed.foreach { ex =>
+                  context.log.warn("[session] shutdown teardown failed channelId={}", channelId.asString, ex)
+                }
+            }
+            sessions = Map.empty
+            context.log.info("[session] shutdown-all closedSessions={}", count)
+            replyTo ! pekko.Done
+            Behaviors.same
+        }
         }
       }
     }
@@ -1880,8 +1931,7 @@ object Tablo4thGen {
         val system = summon[ActorSystem[?]]
         given ec: scala.concurrent.ExecutionContext = system.executionContext
         val HttpCtx = Http()
-        import org.apache.pekko.actor.typed.scaladsl.adapter._
-        val scheduler = system.toClassic.scheduler
+        val scheduler = system.classicSystem.scheduler
         val leaseId = java.util.UUID.randomUUID.toString.take(8)
         val channelDisplay = Lineup.channelLabel(channelId)
         val streamLabel = Lineup.streamLabel(channelId, leaseId)
@@ -2682,9 +2732,8 @@ object Tablo4thGen {
         if (!preRollEnabled) {
           onComplete(acquireFut)(completeAcquireResult(_, "attached"))
         } else {
-          import org.apache.pekko.actor.typed.scaladsl.adapter._
           val fastWindow = 50.millis
-          val fastTimer = after(fastWindow, system.toClassic.scheduler)(Future.successful(None))(using ec)
+          val fastTimer = after(fastWindow, system.classicSystem.scheduler)(Future.successful(None))(using ec)
           val acquireAttempt = acquireFut.map(resp => Some(resp))(using ec)
           val initialDecision = Future.firstCompletedOf(Seq(acquireAttempt, fastTimer))(using ec)
 

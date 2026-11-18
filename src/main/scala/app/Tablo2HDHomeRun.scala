@@ -2,6 +2,7 @@ package app
 
 import org.apache.pekko
 
+import pekko.actor.CoordinatedShutdown
 import pekko.actor.typed.scaladsl.Behaviors
 import pekko.actor.typed.{ActorSystem, Behavior}
 import pekko.http.scaladsl.Http
@@ -79,9 +80,23 @@ object Tablo2HDHomeRun {
     val discoveryCloser = app.tuner.HDHomeRunDiscovery.start(config)
     val system = ActorSystem(apply(config, tabloAuth, daemon), "tablo2hdhomerun-system")
     AppContext.initialize(system)
+    CoordinatedShutdown(system).addTask(
+      CoordinatedShutdown.PhaseActorSystemTerminate
+    , "close-udp-discovery"
+    ) { () =>
+      scala.concurrent.Future.successful {
+        discoveryCloser.close()
+        pekko.Done
+      }
+    }
     system.whenTerminated.onComplete { _ =>
       discoveryCloser.close()
     }(using system.executionContext)
+    if (!daemon) {
+      val _ = StdIn.readLine()
+      val _ = CoordinatedShutdown(system).run(CoordinatedShutdown.UnknownReason)
+    }
+    val _ = scala.concurrent.Await.result(system.whenTerminated, scala.concurrent.duration.Duration.Inf)
   }
 
   private def buildDiscover(config: AppConfig): Discover =
@@ -229,13 +244,26 @@ object Tablo2HDHomeRun {
               app.tuner.Tablo4thGen.TunerState.TunerStateActor()
             , "tuner-state-actor-4thgen"
             )
-            if (config.proxy.tunerStatePollIntervalSec > 0) {
-              val _ = app.tuner.Tablo4thGen.TunerState.startStream(
-                tunerStateActor = tunerStateActor
-              , sessionManager = sessionManager
-              , authContext = authContext
-              , pollInterval = config.proxy.tunerStatePollIntervalSec.seconds
-              )
+            val tunerStateKillSwitch =
+              if (config.proxy.tunerStatePollIntervalSec > 0) {
+                Some(
+                  app.tuner.Tablo4thGen.TunerState.startStream(
+                    tunerStateActor = tunerStateActor
+                  , sessionManager = sessionManager
+                  , authContext = authContext
+                  , pollInterval = config.proxy.tunerStatePollIntervalSec.seconds
+                  )
+                )
+              } else None
+            CoordinatedShutdown(context.system).addTask(
+              CoordinatedShutdown.PhaseServiceRequestsDone
+            , "release-tablo-sessions"
+            ) { () =>
+              import org.apache.pekko.actor.typed.scaladsl.AskPattern._
+              tunerStateKillSwitch.foreach(_.shutdown())
+              given pekko.util.Timeout = pekko.util.Timeout(8.seconds)
+              given pekko.actor.typed.Scheduler = context.system.scheduler
+              sessionManager.ask(ref => app.tuner.Tablo4thGen.Channel.SessionManager.Request.ShutdownAll(ref))
             }
             Some(app.tuner.Tablo4thGen.routes(lineup, sessionManager, authContext))
         }
@@ -296,25 +324,18 @@ object Tablo2HDHomeRun {
           handleRejections(loggedRejectionHandler) { routes }
         }
 
+    CoordinatedShutdown(system).addTask(
+      CoordinatedShutdown.PhaseServiceUnbind
+    , "unbind-http"
+    ) { () =>
+      bindingFuture.flatMap(_.unbind())(using ec)
+    }
+
     val break = if (daemon) "CTRL-C" else "RETURN"
     val url = s"http://${config.proxy.bindHost}:${config.proxy.bindPort}"
     val modeText = config.tablo.gen.startupModeText
     val message = s"Server now online$modeText. Please navigate to ${url}\nPress ${break} to stop..."
 
     println(message)
-    if (!daemon) {
-      StdIn.readLine() : Unit // let it run until user presses return
-    } else {
-      Monitor.ref.synchronized { Monitor.ref.wait() }
-    }
-
-    bindingFuture
-      .flatMap(_.unbind()) // trigger unbinding from the port
-      .onComplete(_ => system.terminate()) // and shutdown when done
   }
-}
-
-case class Monitor()
-object Monitor {
-  val ref = Monitor()
 }

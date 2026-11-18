@@ -202,9 +202,6 @@ object TabloLegacy {
 
         def apply(): Behavior[Request] = Behaviors.setup { context =>
           given scala.concurrent.ExecutionContext = context.executionContext
-          var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
-          var scanInProgress: Boolean = false
-
           val HttpCtx = Http()
 
           def scan(): Future[Seq[JsValue]] =
@@ -244,25 +241,47 @@ object TabloLegacy {
               }
               .map { data =>
                 log.info("[lineup] scan complete count={}", data.size)
-                val channels =
-                  data
-                    .map { case (path,obj) =>
-                      log.debug("[lineup] channel path={} callSign={}", path, obj.channel.call_sign)
-                      Proxy.Response.ChannelObject.jsValue(obj)
-                    }
-                    .toSeq
-
-                context.self ! Command.Store(channels)
-
-                channels
-              }
-              .recover { case ex =>
-                log.error("[lineup] scan failed", ex)
-                context.self ! Command.ScanFailed
-                cache._2
+                data
+                  .map { case (path, obj) =>
+                    log.debug("[lineup] channel path={} callSign={}", path, obj.channel.call_sign)
+                    Proxy.Response.ChannelObject.jsValue(obj)
+                  }
+                  .toSeq
               }
 
-          context.self ! Command.Scan
+          withScanBehavior(context, () => scan(), autoScanOnStart = true)
+        }
+
+        private[tuner] def withScan(
+          scanFn: () => Future[Seq[JsValue]]
+        , autoScanOnStart: Boolean = true
+        ): Behavior[Request] = Behaviors.setup { context =>
+          withScanBehavior(context, scanFn, autoScanOnStart)
+        }
+
+        private def withScanBehavior(
+          context: org.apache.pekko.actor.typed.scaladsl.ActorContext[Request]
+        , scanFn: () => Future[Seq[JsValue]]
+        , autoScanOnStart: Boolean
+        ): Behavior[Request] = {
+          var cache: (scala.concurrent.duration.Deadline, Seq[JsValue]) = (0.seconds.fromNow, Seq.empty)
+          var scanInProgress: Boolean = false
+          var pendingWaiters: List[ActorRef[Response.Fetch]] = Nil
+
+          def triggerScan(): Unit =
+            if (!scanInProgress) {
+              scanInProgress = true
+              context.pipeToSelf(scanFn()) {
+                case Success(channels) => Command.Store(channels)
+                case Failure(ex) =>
+                  log.error("[lineup] scan failed", ex)
+                  Command.ScanFailed
+              }
+            }
+
+          if (autoScanOnStart) {
+            context.self ! Command.Scan
+          }
 
           Behaviors.receiveMessage {
             case Command.Store(channels) =>
@@ -274,6 +293,9 @@ object TabloLegacy {
                 cache = (5.minutes.fromNow, cache._2)
               }
               scanInProgress = false
+              val waiters = pendingWaiters
+              pendingWaiters = Nil
+              waiters.reverse.foreach(_ ! Response.Fetch(cache._2, context.self))
               Behaviors.same
 
             case Command.ScanFailed =>
@@ -281,6 +303,9 @@ object TabloLegacy {
               if (cache._2.nonEmpty) {
                 cache = (1.minute.fromNow, cache._2)
               }
+              val waiters = pendingWaiters
+              pendingWaiters = Nil
+              waiters.reverse.foreach(_ ! Response.Fetch(cache._2, context.self))
               Behaviors.same
 
             case Command.Scan if scanInProgress =>
@@ -290,8 +315,7 @@ object TabloLegacy {
 
             case Command.Scan =>
               log.info("[lineup] scan requested")
-              scanInProgress = true
-              scan() : Unit
+              triggerScan()
 
               Behaviors.same
 
@@ -307,16 +331,10 @@ object TabloLegacy {
               log.debug("[lineup] fetch cache expired")
               if (cache._2.nonEmpty) {
                 replyTo ! LineupActor.Response.Fetch(cache._2, context.self)
-                if (!scanInProgress) {
-                  scanInProgress = true
-                  scan() : Unit
-                }
+                triggerScan()
               } else {
-                val sender = replyTo
-                scanInProgress = true
-                scan().foreach { channels =>
-                  sender ! LineupActor.Response.Fetch(channels, context.self)
-                }
+                pendingWaiters = replyTo :: pendingWaiters
+                triggerScan()
               }
               Behaviors.same
 
@@ -570,6 +588,7 @@ object TabloLegacy {
         given scala.concurrent.ExecutionContext = context.executionContext
         var cache: (scala.concurrent.duration.Deadline, Seq[ChannelGuide]) = (0.seconds.fromNow, Seq.empty)
         var scanInProgress: Boolean = false
+        var pendingWaiters: List[ActorRef[Response.FetchGuide]] = Nil
 
         val HttpCtx = Http()
 
@@ -736,12 +755,18 @@ object TabloLegacy {
               Future.successful(Seq.empty)
             }
           }
-          .recover {
-            case ex =>
-              log.error("[guide] scan failed", ex)
-              Seq.empty
-          }
         }
+
+        def triggerScan(): Unit =
+          if (!scanInProgress) {
+            scanInProgress = true
+            context.pipeToSelf(scan()) {
+              case Success(guide) => Command.StoreGuide(guide)
+              case Failure(ex) =>
+                log.error("[guide] scan failed", ex)
+                Command.StoreGuide(Seq.empty)
+            }
+          }
 
         context.self ! Command.Scan
 
@@ -755,6 +780,9 @@ object TabloLegacy {
               cache = (5.minutes.fromNow, cache._2)
             }
             scanInProgress = false
+            val waiters = pendingWaiters
+            pendingWaiters = Nil
+            waiters.reverse.foreach(_ ! Response.FetchGuide(cache._2, context.self))
             Behaviors.same
 
           case Command.Scan if scanInProgress =>
@@ -763,26 +791,18 @@ object TabloLegacy {
 
           case Command.Scan =>
             log.info("[guide] scan requested")
-            scanInProgress = true
-            scan().foreach { guide =>
-              context.self ! Command.StoreGuide(guide)
-            }
+            triggerScan()
             Behaviors.same
 
           case Request.FetchGuide(replyTo) if cache._1.isOverdue() =>
             if (cache._2.nonEmpty) {
               log.debug("[guide] fetch cache expired; serving stale cache count={} and refreshing in background", cache._2.size)
-              if (!scanInProgress) {
-                context.self ! Command.Scan
-              }
+              triggerScan()
               replyTo ! Response.FetchGuide(cache._2, context.self)
             } else {
               log.debug("[guide] fetch cache expired and empty; scanning")
-              scanInProgress = true
-              scan().foreach { guide =>
-                context.self ! Command.StoreGuide(guide)
-                replyTo ! Response.FetchGuide(guide, context.self)
-              }
+              pendingWaiters = replyTo :: pendingWaiters
+              triggerScan()
             }
             Behaviors.same
 

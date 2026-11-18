@@ -741,5 +741,66 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
         teardownCalls.get() shouldBe 1
       }
     }
+
+    "tear down opening, live, and idle-grace sessions and reject waiters on ShutdownAll" in {
+      val openingCancelled = new AtomicInteger(0)
+      val liveTeardown = new AtomicInteger(0)
+      val idleTeardown = new AtomicInteger(0)
+      val openingRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = testKit.spawn(
+        SessionManager.withCancel(
+          startRunner = { (channelId, self) =>
+            if (channelId == "ch-open") openingRef.set(self)
+            () => {
+              if (channelId == "ch-open") {
+                val _ = openingCancelled.incrementAndGet()
+              }
+            }
+          }
+        , totalTuners = 3
+        , idleGrace = 30.seconds
+        )
+      )
+
+      val liveProbe = testKit.createTestProbe[Response.Acquire]()
+      val idleProbe = testKit.createTestProbe[Response.Acquire]()
+      val openProbe = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-live", "c-live", liveProbe.ref)
+      mgr ! Request.Acquire("ch-idle", "c-idle", idleProbe.ref)
+      mgr ! Request.Acquire("ch-open", "c-open", openProbe.ref)
+
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        openingRef.get() should not be null
+      }
+
+      mgr ! Command.CheckIn("ch-live", meta("tok-live"), hubSource, () => { val _ = liveTeardown.incrementAndGet() })
+      mgr ! Command.CheckIn("ch-idle", meta("tok-idle"), hubSource, () => { val _ = idleTeardown.incrementAndGet() })
+      val _ = liveProbe.expectMessageType[Response.Attached]
+      val _ = idleProbe.expectMessageType[Response.Attached]
+      mgr ! Request.Release("ch-idle", "c-idle")
+
+      val statesProbe = testKit.createTestProbe[Map[String, String]]()
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+        statesProbe.receiveMessage() shouldBe Map(
+          "ch-live" -> "live"
+        , "ch-idle" -> "idle-grace"
+        , "ch-open" -> "opening"
+        )
+      }
+
+      val doneProbe = testKit.createTestProbe[org.apache.pekko.Done]()
+      mgr ! Request.ShutdownAll(doneProbe.ref)
+      val _ = doneProbe.receiveMessage() shouldBe org.apache.pekko.Done
+
+      val _ = openProbe.receiveMessage() shouldBe Response.Rejected(RejectReason.NoTuners)
+      val _ = openingCancelled.get() shouldBe 1
+      val _ = liveTeardown.get() shouldBe 1
+      val _ = idleTeardown.get() shouldBe 1
+
+      mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+      statesProbe.receiveMessage() shouldBe Map.empty
+    }
   }
 }
