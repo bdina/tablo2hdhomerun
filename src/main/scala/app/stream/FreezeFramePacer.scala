@@ -687,16 +687,105 @@ object FreezeFramePacer {
     0x00.toByte, 0x00.toByte, 0x01.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte
   )
 
-  private def buildMpeg2FreezePayload(sliceRows: Int): Array[Byte] = {
+  private val Mpeg2MbaIncrementCodes: Array[Int] = Array(
+    0,
+    0x01, 0x03, 0x02, 0x03, 0x02, 0x03, 0x02, 0x07,
+    0x06, 0x0B, 0x0A, 0x09, 0x08, 0x07, 0x06, 0x17,
+    0x16, 0x15, 0x14, 0x13, 0x12, 0x23, 0x22, 0x21,
+    0x20, 0x1F, 0x1E, 0x1D, 0x1C, 0x1B, 0x1A, 0x19,
+    0x18
+  )
+
+  private val Mpeg2MbaIncrementLengths: Array[Int] = Array(
+    0,
+    1, 3, 3, 4, 4, 5, 5, 7,
+    7, 8, 8, 8, 8, 8, 8, 10,
+    10, 10, 10, 10, 10, 11, 11, 11,
+    11, 11, 11, 11, 11, 11, 11, 11,
+    11
+  )
+
+  private val Mpeg2MbaEscapeCode: Int = 0x08
+  private val Mpeg2MbaEscapeBits: Int = 11
+
+  private final class SliceBitWriter(buf: Array[Byte], startOffset: Int) {
+    private var bytePos = startOffset
+    private var currentByte = 0
+    private var bitsInByte = 0
+
+    def writeBits(value: Int, count: Int): Unit = {
+      var i = count - 1
+      while (i >= 0) {
+        currentByte = (currentByte << 1) | ((value >>> i) & 1)
+        bitsInByte += 1
+        if (bitsInByte == 8) {
+          buf(bytePos) = currentByte.toByte
+          bytePos += 1
+          currentByte = 0
+          bitsInByte = 0
+        }
+        i -= 1
+      }
+    }
+
+    def alignToByte(): Int = {
+      if (bitsInByte > 0) {
+        buf(bytePos) = (currentByte << (8 - bitsInByte)).toByte
+        bytePos += 1
+        currentByte = 0
+        bitsInByte = 0
+      }
+      bytePos
+    }
+  }
+
+  private def defaultMacroblockWidthForRows(sliceRows: Int): Int =
+    sliceRows match {
+      case 68 => 120
+      case 45 => 80
+      case _  => 45
+    }
+
+  def extractMpeg2MacroblockWidth(seqHeader: ByteString): Option[Int] =
+    if (seqHeader.length >= 7 &&
+        seqHeader(0) == 0x00.toByte &&
+        seqHeader(1) == 0x00.toByte &&
+        seqHeader(2) == 0x01.toByte &&
+        (seqHeader(3) & 0xFF) == 0xB3) {
+      val horizontalSize = ((seqHeader(4) & 0xFF) << 4) | ((seqHeader(5) & 0xF0) >> 4)
+      if (horizontalSize >= 160 && horizontalSize <= 1920 && horizontalSize % 16 == 0) {
+        Some(horizontalSize / 16)
+      } else None
+    } else None
+
+  private def encodeZeroMotionMb(writer: SliceBitWriter, addressIncrement: Int): Unit = {
+    var remaining = addressIncrement
+    while (remaining > 33) {
+      writer.writeBits(Mpeg2MbaEscapeCode, Mpeg2MbaEscapeBits)
+      remaining -= 33
+    }
+    writer.writeBits(Mpeg2MbaIncrementCodes(remaining), Mpeg2MbaIncrementLengths(remaining))
+    // macroblock_type = 001 (MC, Not Coded), forward MV = (0, 0) (motion_code VLC 1, 1)
+    writer.writeBits(0x1, 3)
+    writer.writeBits(0x1, 1)
+    writer.writeBits(0x1, 1)
+  }
+
+  private def buildMpeg2FreezePayload(sliceRows: Int, mbWidth: Int): Array[Byte] = {
+    // Picture Header (0x00): temporal_reference=0, picture_coding_type=2 (P-frame), vbv_delay=0xFFFF,
+    // full_pel_forward_vector=0, forward_f_code=7, extra_bit_picture=0.
     val picHdr = Array[Byte](
       0x00.toByte, 0x00.toByte, 0x01.toByte, 0x00.toByte,
-      0x00.toByte, 0x17.toByte, 0xFF.toByte, 0xF8.toByte
+      0x00.toByte, 0x17.toByte, 0xFF.toByte, 0xFB.toByte, 0x80.toByte
     )
+    // Picture Coding Extension (0xB5, id=8): f_code=(1,1,15,15), intra_dc_precision=0,
+    // picture_structure=3 (frame), frame_pred_frame_dct=1, chroma_420_type=1, progressive_frame=1.
     val picExt = Array[Byte](
       0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
-      0x11.toByte, 0x1F.toByte, 0xF3.toByte, 0x41.toByte, 0x80.toByte
+      0x81.toByte, 0x1F.toByte, 0xF3.toByte, 0x41.toByte, 0x80.toByte
     )
-    val out = new Array[Byte](picHdr.length + picExt.length + (sliceRows * 6))
+    val maxBytesPerSlice = 4 + 8 + ((mbWidth + 32) / 33) * 2
+    val out = new Array[Byte](picHdr.length + picExt.length + (sliceRows * maxBytesPerSlice))
     System.arraycopy(picHdr, 0, out, 0, picHdr.length)
     var writePos = picHdr.length
     System.arraycopy(picExt, 0, out, writePos, picExt.length)
@@ -707,15 +796,21 @@ object FreezeFramePacer {
       out(writePos + 1) = 0x00.toByte
       out(writePos + 2) = 0x01.toByte
       out(writePos + 3) = row.toByte
-      out(writePos + 4) = 0x38.toByte
-      out(writePos + 5) = 0x00.toByte
-      writePos += 6
+      val writer = new SliceBitWriter(out, writePos + 4)
+      writer.writeBits(7, 5) // quantiser_scale_code
+      writer.writeBits(0, 1) // extra_bit_slice
+      encodeZeroMotionMb(writer, 1)
+      if (mbWidth > 1) {
+        encodeZeroMotionMb(writer, mbWidth - 1)
+      }
+      writePos = writer.alignToByte()
       row += 1
     }
-    out
+    Arrays.copyOf(out, writePos)
   }
 
-  private val Mpeg2FreezePayload68: Array[Byte] = buildMpeg2FreezePayload(DefaultMaxSliceRow)
+  private val Mpeg2FreezePayload68: Array[Byte] = buildMpeg2FreezePayload(DefaultMaxSliceRow, 120)
+  private val Mpeg2FreezePayload45: Array[Byte] = buildMpeg2FreezePayload(45, 80)
 
   def synthesizeVideoFreezeFrame(
       videoPid: Int,
@@ -723,7 +818,8 @@ object FreezeFramePacer {
       pts: Long,
       includePcr: Boolean,
       maxSliceRow: Int,
-      nextCc: () => Int
+      nextCc: () => Int,
+      lockedSeqHeader: Option[ByteString] = None
   ): ByteString = {
     val isH264 = videoStreamType.contains(0x1B)
 
@@ -731,7 +827,10 @@ object FreezeFramePacer {
       H264FreezePayload
     } else {
       val sliceRows = math.max(1, math.min(maxSliceRow, DefaultMaxSliceRow))
-      if (sliceRows == DefaultMaxSliceRow) Mpeg2FreezePayload68 else buildMpeg2FreezePayload(sliceRows)
+      val mbWidth = lockedSeqHeader.flatMap(extractMpeg2MacroblockWidth).getOrElse(defaultMacroblockWidthForRows(sliceRows))
+      if (sliceRows == DefaultMaxSliceRow && mbWidth == 120) Mpeg2FreezePayload68
+      else if (sliceRows == 45 && mbWidth == 80) Mpeg2FreezePayload45
+      else buildMpeg2FreezePayload(sliceRows, mbWidth)
     }
 
     val pesHeaderLen = 19
