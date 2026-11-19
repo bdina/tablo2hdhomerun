@@ -17,6 +17,8 @@ object FreezeFramePacer {
   val AdtsStepTicks: Long = 1920L
   val MaxSinglePacketPtsJumpTicks: Long = 180000L
   val RebaseThresholdTicks: Long = 90000L
+  val MaxBFrameReorderTicks: Long = 45045L
+  val MaxReplayWindowTicks: Long = 5400000L
   val DefaultMaxSliceRow: Int = 68
 
   private val Crc16Poly: Int = 0x18005

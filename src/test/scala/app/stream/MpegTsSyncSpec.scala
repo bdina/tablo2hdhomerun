@@ -2218,5 +2218,237 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = out.slice(188, 376) shouldBe vPusiFrame
       out.drop(376) shouldBe vContSlice
     }
+
+    "cacheFlow should re-anchor media clock and keep monotonic PTS when resuming from freeze without spuriously latching deficit" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 80.millis
+          , freezeTickInterval = 25.millis
+          , latestMetricsRef = Some(latestMetricsRef)
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      // 1. Start live stream at PTS 90,000
+      val _ = queue.offer(
+        pat ++ pmt ++
+          buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 90000L, cc = 1)
+      )
+
+      // 2. Sleep 200ms (> 80ms threshold) so FreezeFramePacer advances lastOutputPts past raw input PTS 96,006
+      Thread.sleep(200L)
+
+      // 3. Resume with raw input PTS behind emitted freeze PTS, plus a brief 45ms pause (< 80ms, >= 25ms tick)
+      val liveResumeKey = buildVideoPesPacket(videoPid, pts = 96006L, cc = 2, isKeyframe = true)
+      val liveResumeAudio = buildAudioPesPacket(audioPid, pts = 96006L, cc = 2)
+      val _ = queue.offer(liveResumeKey ++ liveResumeAudio)
+      Thread.sleep(45L)
+      val liveNextFrame = buildVideoPesPacket(videoPid, pts = 99009L, cc = 3, isKeyframe = false, sliceRow = Some(1))
+      val _ = queue.offer(liveNextFrame)
+      Thread.sleep(45L)
+      val largeJumpFreezeCheck = buildVideoPesPacket(videoPid, pts = 3240000L, cc = 4, isKeyframe = true)
+
+      // Sleep > 80ms to enter freeze a second time and verify a +35s forward jump on resume is NOT scrubbed
+      Thread.sleep(130L)
+      val _ = queue.offer(largeJumpFreezeCheck)
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val videoPtsSeq = Vector.newBuilder[Long]
+      val audioPtsSeq = Vector.newBuilder[Long]
+      val videoKeyframeIndices = Vector.newBuilder[Int]
+      val count = emitted.length / 188
+      var idx = 0
+      var vFrameIdx = 0
+      while (idx < count) {
+        val pkt = emitted.slice(idx * 188, (idx + 1) * 188).toArray
+        val pid = ((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF)
+        val pesOff = FreezeFramePacer.findPesHeaderOffset(pkt, 0)
+        if (pesOff >= 0) {
+          val pts = FreezeFramePacer.readPesPts(pkt, pesOff, 188)
+          if (pts >= 0L) {
+            if (pid == videoPid) {
+              if (FreezeFramePacer.hasMpeg2SequenceHeader(pkt, 0, 188)) {
+                videoKeyframeIndices += vFrameIdx
+              }
+              videoPtsSeq += pts
+              vFrameIdx += 1
+            } else if (pid == audioPid) {
+              audioPtsSeq += pts
+            }
+          }
+        }
+        idx += 1
+      }
+      val vPts = videoPtsSeq.result()
+      val aPts = audioPtsSeq.result()
+      val kfIndices = videoKeyframeIndices.result()
+      val _ = kfIndices.length shouldBe 3 // initialKeyframe, liveResumeKey, largeJumpFreezeCheck
+      val freeze1Count = kfIndices(1) - kfIndices(0) - 1
+      val betweenResumeAndCheck = kfIndices(2) - kfIndices(1) - 1
+      val _ = freeze1Count should be >= 3 // Stall 1 emitted synthetic freeze frames
+      val _ = betweenResumeAndCheck should be >= 4 // Includes liveNextFrame + Stall 2 freeze frames
+      // liveNextFrame immediately follows liveResumeKey (+3003) with zero spurious deficit freeze frames during 45ms pause
+      val _ = (vPts(kfIndices(1) + 1) - vPts(kfIndices(1))) shouldBe FreezeFramePacer.DefaultVideoStepTicks
+      // Every video and audio PTS must be strictly monotonic across both freeze/resume cycles
+      val _ = vPts.sliding(2).foreach {
+        case Seq(prev, next) => val _ = next should be > prev
+        case _ => ()
+      }
+      val _ = aPts.sliding(2).foreach {
+        case Seq(prev, next) => val _ = next should be > prev
+        case _ => ()
+      }
+      // Second resume (+35s gap) must not trigger a single-packet outlier scrub
+      latestMetricsRef.get().ptsScrubs shouldBe 0L
+    }
+
+    "cacheFlow should scrub backward same-stream segment replay until a new keyframe advances past maxInputVideoPts" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val v1 = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+      val a1 = buildAudioPesPacket(audioPid, pts = 90000L, cc = 1)
+      val v2 = buildVideoPesPacket(videoPid, pts = 180000L, cc = 2, isKeyframe = false, sliceRow = Some(1))
+      val v3 = buildVideoPesPacket(videoPid, pts = 270000L, cc = 3, isKeyframe = false, sliceRow = Some(1))
+      val a3 = buildAudioPesPacket(audioPid, pts = 270000L, cc = 2)
+
+      // Replayed segment: drops back to 150,000..267,000 with keyframe, slices, and audio,
+      // followed by a non-keyframe at 273,003 (which must wait for a clean keyframe after confirmed replay)
+      val rKey = buildVideoPesPacket(videoPid, pts = 150000L, cc = 4, isKeyframe = true)
+      val rAud1 = buildAudioPesPacket(audioPid, pts = 150000L, cc = 3)
+      val rLateP = buildVideoPesPacket(videoPid, pts = 240000L, cc = 5, isKeyframe = false, sliceRow = Some(1))
+      val rCont = buildVideoPesPacket(videoPid, pts = 240000L, pusi = false, cc = 6, sliceRow = Some(2))
+      val rAud2 = buildAudioPesPacket(audioPid, pts = 240000L, cc = 4)
+      val rPostNonKey = buildVideoPesPacket(videoPid, pts = 273003L, cc = 7, isKeyframe = false, sliceRow = Some(1))
+
+      // New live keyframe and audio past maxInputVideoPts (270,000)
+      val liveKey = buildVideoPesPacket(videoPid, pts = 276006L, cc = 8, isKeyframe = true)
+      val liveAudio = buildAudioPesPacket(audioPid, pts = 276006L, cc = 5)
+
+      val out = Source(List(pat, pmt, v1, a1, v2, v3, a3, rKey, rAud1, rLateP, rCont, rAud2, rPostNonKey, liveKey, liveAudio))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, latestMetricsRef = Some(latestMetricsRef)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 15
+      // Initial packets emitted cleanly: indices 2..6
+      val _ = FreezeFramePacer.readPesPts(out(2).toArray, 4, 188) shouldBe 90000L
+      val _ = FreezeFramePacer.readPesPts(out(4).toArray, 4, 188) shouldBe 180000L
+      val _ = FreezeFramePacer.readPesPts(out(5).toArray, 4, 188) shouldBe 270000L
+      // Every replayed video/audio packet and trailing non-keyframe must become null packet: indices 7..12
+      (7 to 12).foreach { i =>
+        val _ = out(i) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      }
+      // Resumes cleanly on liveKey (index 13) and liveAudio (index 14) with continuous outbound CC and monotonic PTS
+      val _ = (out(13)(3) & 0x0F) shouldBe 3
+      val _ = FreezeFramePacer.readPesPts(out(13).toArray, 4, 188) shouldBe 276006L
+      val _ = (out(14)(3) & 0x0F) shouldBe 2
+      val _ = FreezeFramePacer.readPesPts(out(14).toArray, 4, 188) shouldBe 276006L
+      latestMetricsRef.get().ptsScrubs should be >= 3L
+    }
+
+    "cacheFlow should keep FreezeFramePacer active when replayed keyframes arrive during freeze and resume only on new live keyframe" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 80.millis
+          , freezeTickInterval = 25.millis
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      val _ = queue.offer(
+        pat ++ pmt ++
+          buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true) ++
+          buildVideoPesPacket(videoPid, pts = 270000L, cc = 2, isKeyframe = false, sliceRow = Some(1))
+      )
+      Thread.sleep(160L)
+
+      // Offer replayed keyframe (150,000 < max 270,000): must be dropped while frozen, never breaking freeze or emitting 150,000
+      val _ = queue.offer(
+        buildVideoPesPacket(videoPid, pts = 150000L, cc = 3, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 150000L, cc = 1)
+      )
+      Thread.sleep(50L)
+      // Offer genuine new live keyframe past 270,000
+      val _ = queue.offer(buildVideoPesPacket(videoPid, pts = 273003L, cc = 4, isKeyframe = true))
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val videoPtsSeq = Vector.newBuilder[Long]
+      val audioPtsSeq = Vector.newBuilder[Long]
+      var i = 0
+      while (i < emitted.length / 188) {
+        val pkt = emitted.slice(i * 188, (i + 1) * 188).toArray
+        val pid = ((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF)
+        val pesOff = FreezeFramePacer.findPesHeaderOffset(pkt, 0)
+        if (pesOff >= 0) {
+          val pts = FreezeFramePacer.readPesPts(pkt, pesOff, 188)
+          if (pts >= 0L) {
+            if (pid == videoPid) videoPtsSeq += pts
+            else if (pid == audioPid) audioPtsSeq += pts
+          }
+        }
+        i += 1
+      }
+      val vPts = videoPtsSeq.result()
+      val _ = vPts should not contain 150000L
+      val _ = audioPtsSeq.result() should not contain 150000L
+      vPts.sliding(2).foreach {
+        case Seq(prev, next) => val _ = next should be > prev
+        case _ => ()
+      }
+    }
+
+    "cacheFlow should reset replay watermarks and rebase cleanly across MPEGTS_DISCONTINUITY_PACKET" in {
+      val videoPid = 0x0101
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(videoPid = Some(videoPid), videoStreamType = Some(0x02))
+      )
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+
+      val v1 = buildVideoPesPacket(videoPid, pts = 1000000L, cc = 1, isKeyframe = true)
+      val v2 = buildVideoPesPacket(videoPid, pts = 1003003L, cc = 2, isKeyframe = false, sliceRow = Some(1))
+      // Discontinuity followed by new session starting at lower PTS (500,000) within old epoch window
+      val newKey = buildVideoPesPacket(videoPid, pts = 500000L, cc = 0, isKeyframe = true)
+      val newNext = buildVideoPesPacket(videoPid, pts = 503003L, cc = 1, isKeyframe = false, sliceRow = Some(1))
+
+      val out = Source(List(v1, v2, MpegTsSync.MPEGTS_DISCONTINUITY_PACKET, newKey, newNext))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, latestMetricsRef = Some(latestMetricsRef)))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 5
+      val _ = FreezeFramePacer.readPesPts(out(0).toArray, 4, 188) shouldBe 1000000L
+      val _ = FreezeFramePacer.readPesPts(out(1).toArray, 4, 188) shouldBe 1003003L
+      val _ = out(2) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
+      val _ = FreezeFramePacer.readPesPts(out(3).toArray, 4, 188) shouldBe 1006006L
+      val _ = FreezeFramePacer.readPesPts(out(4).toArray, 4, 188) shouldBe 1009009L
+      latestMetricsRef.get().ptsScrubs shouldBe 0L
+    }
   }
 }

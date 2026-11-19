@@ -388,6 +388,11 @@ object MpegTsSync {
       private var lastLiveDataNanos: Long = System.nanoTime()
       private var freezeActive: Boolean = false
       private var freezeTicksCount: Int = 0
+      private var pendingTimelineSync: Boolean = false
+      private var firstInputVideoPts: OptPts = OptPts.Empty
+      private var maxInputVideoPts: OptPts = OptPts.Empty
+      private var droppingReplayedVideo: Boolean = false
+      private var confirmedReplay: Boolean = false
       private var lastInputVideoPts: OptPts = OptPts.Empty
       private var lastOutputPts: OptPts = OptPts.Empty
       private var mediaClockAnchorPts: OptPts = OptPts.Empty
@@ -629,11 +634,56 @@ object MpegTsSync {
         val _ = outputBuilder.putBytes(arr, pktOffset, PacketSize)
       }
 
+      private def resetInputTimelineOnDiscontinuity(): Unit = {
+        firstInputVideoPts = OptPts.Empty
+        maxInputVideoPts = OptPts.Empty
+        lastInputVideoPts = OptPts.Empty
+        droppingReplayedVideo = false
+        confirmedReplay = false
+        pendingOutlierPts = OptPts.Empty
+        pendingTimelineSync = true
+        mediaClockAnchorPts = OptPts.Empty
+        lastContinuousVideoPts = OptPts.Empty
+        latestVideoPts = OptPts.Empty
+        latestAudioPts = OptPts.Empty
+        pendingMetricOutlierPts = OptPts.Empty
+      }
+
+      private def recordAcceptedInputVideoPts(inPts: PtsTicks, inPtsOpt: OptPts): Unit = {
+        lastInputVideoPts = inPtsOpt
+        if (firstInputVideoPts.isEmpty) {
+          firstInputVideoPts = inPtsOpt
+        }
+        if (maxInputVideoPts.isEmpty || inPts.signedDiff(maxInputVideoPts.rawValue) > 0L) {
+          maxInputVideoPts = inPtsOpt
+        }
+      }
+
+      private def isReplayVideoPts(inPts: PtsTicks, isKeyStart: Boolean): Boolean =
+        if (maxInputVideoPts.isEmpty) {
+          false
+        } else {
+          val diffFromMax = inPts.signedDiff(maxInputVideoPts.rawValue)
+          val belowEpochStart =
+            firstInputVideoPts.isDefined &&
+              inPts.signedDiff(firstInputVideoPts.rawValue) < -FreezeFramePacer.MaxBFrameReorderTicks
+          val beyondReplayWindow = diffFromMax < -FreezeFramePacer.MaxReplayWindowTicks
+          if (belowEpochStart || beyondReplayWindow) {
+            false
+          } else if (droppingReplayedVideo) {
+            val canResume = diffFromMax > 0L && (!confirmedReplay || isKeyStart)
+            !canResume
+          } else {
+            diffFromMax < -FreezeFramePacer.MaxBFrameReorderTicks
+          }
+        }
+
       private def checkCorruptPesTimestamp(
         arr: Array[Byte]
       , pktOffset: Int
       , pesOff: Int
       , isVideo: Boolean
+      , isKeyStart: Boolean = false
       ): Boolean = {
         val pktEnd = pktOffset + PacketSize
         if (pesOff < 0 || pesOff + 9 > pktEnd) {
@@ -668,22 +718,43 @@ object MpegTsSync {
                 windowPtsScrubs += 1L
                 true
               } else if (isVideo) {
-                if (lastOutputPts.isDefined && lastInputVideoPts.isDefined) {
-                  val inputJump = math.abs(inPts.signedDiff(lastInputVideoPts.rawValue))
-                  if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
-                    if (pendingOutlierPts.isDefined && math.abs(inPts.signedDiff(pendingOutlierPts.rawValue)) <= FreezeFramePacer.RebaseThresholdTicks) {
-                      false
+                if (isReplayVideoPts(inPts, isKeyStart)) {
+                  if (droppingReplayedVideo || isKeyStart) {
+                    confirmedReplay = true
+                  }
+                  droppingReplayedVideo = true
+                  totalScrubbedPts += 1L
+                  windowPtsScrubs += 1L
+                  true
+                } else {
+                  val wasConfirmedReplay = confirmedReplay
+                  droppingReplayedVideo = false
+                  confirmedReplay = false
+                  if ((freezeActive || pendingTimelineSync || wasConfirmedReplay) && isKeyStart) {
+                    if (wasConfirmedReplay && !freezeActive) {
+                      pendingTimelineSync = true
+                      mediaClockAnchorPts = OptPts.Empty
+                    }
+                    false
+                  } else if (pendingTimelineSync && lastOutputPts.isDefined && lastInputVideoPts.isEmpty) {
+                    false
+                  } else if (!freezeActive && lastOutputPts.isDefined && lastInputVideoPts.isDefined) {
+                    val inputJump = math.abs(inPts.signedDiff(lastInputVideoPts.rawValue))
+                    if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                      if (pendingOutlierPts.isDefined && math.abs(inPts.signedDiff(pendingOutlierPts.rawValue)) <= FreezeFramePacer.RebaseThresholdTicks) {
+                        false
+                      } else {
+                        pendingOutlierPts = inPtsOpt
+                        totalScrubbedPts += 1L
+                        windowPtsScrubs += 1L
+                        true
+                      }
                     } else {
-                      pendingOutlierPts = inPtsOpt
-                      totalScrubbedPts += 1L
-                      windowPtsScrubs += 1L
-                      true
+                      false
                     }
                   } else {
                     false
                   }
-                } else {
-                  false
                 }
               } else {
                 val mappedPts = inPts.advance(ptsDeltaTicks)
@@ -713,11 +784,23 @@ object MpegTsSync {
                 val mappedPts = inPts.advance(ptsDeltaTicks)
                 val diffFromOut = mappedPts.signedDiff(lastOutputPts.rawValue)
                 val inputJump = if (lastInputVideoPts.isDefined) math.abs(inPts.signedDiff(lastInputVideoPts.rawValue)) else 0L
-                if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                if (pendingTimelineSync) {
+                  pendingTimelineSync = false
+                  pendingOutlierPts = OptPts.Empty
+                  recordAcceptedInputVideoPts(inPts, inPtsOpt)
+                  if (diffFromOut <= 0L || diffFromOut > FreezeFramePacer.RebaseThresholdTicks || inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                    ptsDeltaTicks = PtsTicks(lastOutputPts.rawValue + FreezeFramePacer.DefaultVideoStepTicks - inPts.value).value
+                    inPts.advance(ptsDeltaTicks)
+                  } else {
+                    mappedPts
+                  }
+                } else if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
                   if (pendingOutlierPts.isDefined && math.abs(inPts.signedDiff(pendingOutlierPts.rawValue)) <= FreezeFramePacer.RebaseThresholdTicks) {
                     ptsDeltaTicks = PtsTicks(lastOutputPts.rawValue + FreezeFramePacer.DefaultVideoStepTicks - inPts.value).value
                     pendingOutlierPts = OptPts.Empty
                     lastInputVideoPts = inPtsOpt
+                    firstInputVideoPts = inPtsOpt
+                    maxInputVideoPts = inPtsOpt
                     inPts.advance(ptsDeltaTicks)
                   } else {
                     pendingOutlierPts = inPtsOpt
@@ -728,15 +811,16 @@ object MpegTsSync {
                 } else if (diffFromOut < -FreezeFramePacer.RebaseThresholdTicks || diffFromOut > FreezeFramePacer.RebaseThresholdTicks) {
                   ptsDeltaTicks = PtsTicks(lastOutputPts.rawValue + FreezeFramePacer.DefaultVideoStepTicks - inPts.value).value
                   pendingOutlierPts = OptPts.Empty
-                  lastInputVideoPts = inPtsOpt
+                  recordAcceptedInputVideoPts(inPts, inPtsOpt)
                   inPts.advance(ptsDeltaTicks)
                 } else {
                   pendingOutlierPts = OptPts.Empty
-                  lastInputVideoPts = inPtsOpt
+                  recordAcceptedInputVideoPts(inPts, inPtsOpt)
                   mappedPts
                 }
               } else {
-                lastInputVideoPts = inPtsOpt
+                pendingTimelineSync = false
+                recordAcceptedInputVideoPts(inPts, inPtsOpt)
                 inPts.advance(ptsDeltaTicks)
               }
               if (lastOutputPts.isEmpty || chosen.signedDiff(lastOutputPts.rawValue) > 0L) {
@@ -809,6 +893,9 @@ object MpegTsSync {
 
         if (pid.isNull) {
           windowNullPackets += 1L
+          if (isDiscontinuity) {
+            resetInputTimelineOnDiscontinuity()
+          }
           if (!freezeActive) {
             val _ = outputBuilder ++= MPEGTS_NULL_PACKET
           }
@@ -818,10 +905,7 @@ object MpegTsSync {
             windowElementaryPackets += 1L
           }
           if (isDiscontinuity && updated.videoPid.contains(pid)) {
-            lastContinuousVideoPts = OptPts.Empty
-            latestVideoPts = OptPts.Empty
-            latestAudioPts = OptPts.Empty
-            pendingMetricOutlierPts = OptPts.Empty
+            resetInputTimelineOnDiscontinuity()
           }
           val isCcError =
             if (isTei || !isElementaryPid) {
@@ -980,9 +1064,10 @@ object MpegTsSync {
             val esPayloadLen = math.max(0, (pos + PacketSize) - esPayloadOffset)
             val hasOutOfBoundsSlice = !isTei && isMpeg2 && hasPayload && esPayloadLen > 0 &&
               FreezeFramePacer.hasOutOfBoundsMpeg2Slice(arr, esPayloadOffset, esPayloadLen, maxSliceRow)
+            val isKeyStart = hasPayload && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
             val hasCorruptPesTimestamp =
-              !isTei && !isCcError && !hasOutOfBoundsSlice && hasVideoPesStart && !freezeActive &&
-                checkCorruptPesTimestamp(arr, pos, pesOff, isVideo = true)
+              !isTei && !isCcError && !hasOutOfBoundsSlice && hasVideoPesStart &&
+                checkCorruptPesTimestamp(arr, pos, pesOff, isVideo = true, isKeyStart = isKeyStart)
             if (hasVideoPesStart && !freezeActive) {
               if (currentVideoFrameStarted) {
                 windowVideoFramesTotal += 1L
@@ -1014,9 +1099,8 @@ object MpegTsSync {
               droppingVideoSlice = true
               requireVideoPesStart = true
             }
-            val isKeyStart = hasPayload && payloadLen > 0 && hasKeyframeHeader(arr, payloadOffset, payloadLen, updated.videoStreamType)
             if (freezeActive) {
-              if (isKeyStart) {
+              if (isKeyStart && !hasCorruptPesTimestamp && !droppingReplayedVideo) {
                 log.info(
                   "[mpegts] live keyframe resumed after freeze-frame pacing{} silenceMs={} bursts={}"
                 , labelPrefix
@@ -1025,6 +1109,8 @@ object MpegTsSync {
                 )
                 freezeActive = false
                 freezeTicksCount = 0
+                pendingTimelineSync = true
+                mediaClockAnchorPts = OptPts.Empty
                 droppingVideoSlice = false
                 requireVideoPesStart = false
                 seenLiveKeyframe = true
@@ -1039,7 +1125,7 @@ object MpegTsSync {
 
             if (!freezeActive) {
               var sliceStuffTargetOffset = -1
-              if (droppingVideoSlice && !hasOutOfBoundsSlice && !hasCorruptPesTimestamp) {
+              if (droppingVideoSlice && !hasOutOfBoundsSlice && !hasCorruptPesTimestamp && !droppingReplayedVideo) {
                 if (hasVideoPesStart || isKeyStart) {
                   droppingVideoSlice = false
                   requireVideoPesStart = false
@@ -1060,7 +1146,7 @@ object MpegTsSync {
                 if (!hasOutOfBoundsSlice) {
                   windowSliceDrops += 1L
                 }
-                val rawPcr = if (!hasCorruptPesTimestamp) OptPts.fromRaw(FreezeFramePacer.readPcrBaseRaw(arr, pos)) else OptPts.Empty
+                val rawPcr = if (!hasCorruptPesTimestamp && !droppingReplayedVideo) OptPts.fromRaw(FreezeFramePacer.readPcrBaseRaw(arr, pos)) else OptPts.Empty
                 if (rawPcr.isDefined) {
                   val normPcr = rawPcr.get.advance(ptsDeltaTicks)
                   val safePcr =
@@ -1134,7 +1220,8 @@ object MpegTsSync {
               }
             }
           } else if (updated.audioPids.contains(pid)) {
-            if (freezeActive) {
+            if (freezeActive || confirmedReplay) {
+              setDroppingAudioPid(pid)
               val _ = outputBuilder ++= MPEGTS_NULL_PACKET
             } else {
               val streamTypeOpt = updated.audioStreamTypes.get(pid)
@@ -1272,6 +1359,7 @@ object MpegTsSync {
                 , includePcr = true
                 , maxSliceRow
                 , () => nextOutboundCc(vpid, hasPayload = true)
+                , headers.lockedSeqHeader
                 )
                 headers.audioPids.foreach { apid =>
                   val stOpt = headers.audioStreamTypes.get(apid)
