@@ -151,11 +151,12 @@ object HlsPlaylistPoller {
     } else {
       val allSegments = segmentInfos(state.baseUrl, playlist)
       val newLastSeq = playlist.mediaSequence + playlist.segments.size
+      val hasKnownEmittedKey = allSegments.exists(seg => state.emittedKeys.contains(segmentKey(seg)))
       val isReset =
         state.lastSeq > 0 &&
         allSegments.lastOption.exists { lastSeg =>
           lastSeg.sequence < (state.lastSeq - math.max(sequenceResetThreshold, allSegments.size)) ||
-            (playlist.mediaSequence <= 1 && lastSeg.sequence < state.lastSeq)
+            (playlist.mediaSequence <= 1 && newLastSeq < state.lastSeq && !hasKnownEmittedKey)
         }
       val isFirstPoll = state.lastSeq == 0 || isReset
       val effectiveLastSeq = if (isReset) 0 else state.lastSeq

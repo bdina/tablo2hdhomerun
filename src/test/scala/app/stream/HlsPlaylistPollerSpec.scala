@@ -314,6 +314,51 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val _ = segsRecovered.map(_.sequence) shouldBe Seq(105)
   }
 
+  it should "detect stalled unchanged playlists when mediaSequence is 1 (sub-3600 Tablo 4th-Gen window)" in {
+    val segUris = (1 to 366).map(i => s"seg$i.ts")
+    val stalledPlaylist = playlist(1, segUris)
+    var state = HlsPlaylistPoller.initial("http://host/pl.m3u8")
+
+    state = HlsPlaylistPoller.onPlaylist(state, stalledPlaylist, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs.map(_.sequence) shouldBe Seq(364, 365, 366)
+        val _ = next.lastSeq shouldBe 367
+        val _ = next.stallPolls shouldBe 0
+        val _ = next.lastAdvanced shouldBe true
+        next
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+
+    (1 to 4).foreach { expectedStallPolls =>
+      state = HlsPlaylistPoller.onPlaylist(state, stalledPlaylist, defaultPollSec = 2) match {
+        case HlsPlaylistPoller.Emit(next, segs) =>
+          val _ = segs shouldBe empty
+          val _ = next.lastSeq shouldBe 367
+          val _ = next.stallPolls shouldBe expectedStallPolls
+          val _ = next.lastAdvanced shouldBe false
+          val _ = HlsPlaylistPoller.pollDelayMs(next, next.lastAdvanced, targetDurationSec = 6, defaultPollSec = 2) shouldBe HlsPlaylistPoller.pollDelayMinMs
+          next
+        case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail on poll $expectedStallPolls: $err")
+      }
+    }
+
+    HlsPlaylistPoller.shouldProbeSession(state) shouldBe true
+  }
+
+  it should "not falsely reset or re-emit when recovery starts at prior lastSeq with mediaSequence 1" in {
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105, liveEdgeCount = 3)
+    val stalledPlaylist = playlist(1, (1 to 104).map(i => s"seg$i.ts"))
+
+    HlsPlaylistPoller.onPlaylist(state, stalledPlaylist, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs shouldBe empty
+        val _ = next.stallPolls shouldBe 1
+        val _ = next.lastAdvanced shouldBe false
+        next.lastSeq shouldBe 105
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+  }
+
   it should "take 3 live edge segments by default on recovery" in {
     val _ = HlsPlaylistPoller.defaultRecoveryLiveEdgeSegmentCount shouldBe 3
     val _ = HlsPlaylistPoller.recoveryLiveEdgeSegmentCount shouldBe 3
