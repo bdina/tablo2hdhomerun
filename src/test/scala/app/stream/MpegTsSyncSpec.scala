@@ -2329,41 +2329,43 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val a3 = buildAudioPesPacket(audioPid, pts = 270000L, cc = 2)
 
       // Replayed segment: drops back to 150,000..267,000 with keyframe, slices, and audio,
-      // followed by a non-keyframe at 273,003 (which must wait for a clean keyframe after confirmed replay)
+      // an unconfirmed single-packet bit-flip outlier below firstInputVideoPts (9,009L),
+      // and a trailing non-keyframe at 273,003 (which must still wait for a clean keyframe after confirmed replay)
       val rKey = buildVideoPesPacket(videoPid, pts = 150000L, cc = 4, isKeyframe = true)
       val rAud1 = buildAudioPesPacket(audioPid, pts = 150000L, cc = 3)
-      val rLateP = buildVideoPesPacket(videoPid, pts = 240000L, cc = 5, isKeyframe = false, sliceRow = Some(1))
-      val rCont = buildVideoPesPacket(videoPid, pts = 240000L, pusi = false, cc = 6, sliceRow = Some(2))
+      val rBitFlipOutlier = buildVideoPesPacket(videoPid, pts = 9009L, cc = 5, isKeyframe = true)
+      val rLateP = buildVideoPesPacket(videoPid, pts = 240000L, cc = 6, isKeyframe = false, sliceRow = Some(1))
+      val rCont = buildVideoPesPacket(videoPid, pts = 240000L, pusi = false, cc = 7, sliceRow = Some(2))
       val rAud2 = buildAudioPesPacket(audioPid, pts = 240000L, cc = 4)
-      val rPostNonKey = buildVideoPesPacket(videoPid, pts = 273003L, cc = 7, isKeyframe = false, sliceRow = Some(1))
+      val rPostNonKey = buildVideoPesPacket(videoPid, pts = 273003L, cc = 8, isKeyframe = false, sliceRow = Some(1))
 
       // New live keyframe and audio past maxInputVideoPts (270,000)
-      val liveKey = buildVideoPesPacket(videoPid, pts = 276006L, cc = 8, isKeyframe = true)
+      val liveKey = buildVideoPesPacket(videoPid, pts = 276006L, cc = 9, isKeyframe = true)
       val liveAudio = buildAudioPesPacket(audioPid, pts = 276006L, cc = 5)
 
-      val out = Source(List(pat, pmt, v1, a1, v2, v3, a3, rKey, rAud1, rLateP, rCont, rAud2, rPostNonKey, liveKey, liveAudio))
+      val out = Source(List(pat, pmt, v1, a1, v2, v3, a3, rKey, rAud1, rBitFlipOutlier, rLateP, rCont, rAud2, rPostNonKey, liveKey, liveAudio))
         .via(MpegTsSync.cacheFlow(cachedHeadersRef, latestMetricsRef = Some(latestMetricsRef)))
         .runWith(Sink.seq)
         .futureValue
 
-      val _ = out.length shouldBe 15
+      val _ = out.length shouldBe 16
       // Initial packets emitted cleanly: indices 2..6
       val _ = FreezeFramePacer.readPesPts(out(2).toArray, 4, 188) shouldBe 90000L
       val _ = FreezeFramePacer.readPesPts(out(4).toArray, 4, 188) shouldBe 180000L
       val _ = FreezeFramePacer.readPesPts(out(5).toArray, 4, 188) shouldBe 270000L
-      // Every replayed video/audio packet and trailing non-keyframe must become null packet: indices 7..12
-      (7 to 12).foreach { i =>
+      // Every replayed video/audio packet, unconfirmed outlier, and trailing non-keyframe must become null packet: indices 7..13
+      (7 to 13).foreach { i =>
         val _ = out(i) shouldBe MpegTsSync.MPEGTS_NULL_PACKET
       }
-      // Resumes cleanly on liveKey (index 13) and liveAudio (index 14) with continuous outbound CC and monotonic PTS
-      val _ = (out(13)(3) & 0x0F) shouldBe 3
-      val _ = FreezeFramePacer.readPesPts(out(13).toArray, 4, 188) shouldBe 276006L
-      val _ = (out(14)(3) & 0x0F) shouldBe 2
+      // Resumes cleanly on liveKey (index 14) and liveAudio (index 15) with continuous outbound CC and monotonic PTS
+      val _ = (out(14)(3) & 0x0F) shouldBe 3
       val _ = FreezeFramePacer.readPesPts(out(14).toArray, 4, 188) shouldBe 276006L
-      latestMetricsRef.get().ptsScrubs should be >= 3L
+      val _ = (out(15)(3) & 0x0F) shouldBe 2
+      val _ = FreezeFramePacer.readPesPts(out(15).toArray, 4, 188) shouldBe 276006L
+      latestMetricsRef.get().ptsScrubs should be >= 4L
     }
 
-    "cacheFlow should keep FreezeFramePacer active when replayed keyframes arrive during freeze and resume only on new live keyframe" in {
+    "cacheFlow should keep FreezeFramePacer active when replayed or CC-corrupted keyframes arrive during freeze and resume only on clean new live keyframe" in {
       val videoPid = 0x0101
       val audioPid = 0x0102
       val pat = buildPatPacket(0x0100)
@@ -2388,14 +2390,16 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       )
       Thread.sleep(160L)
 
-      // Offer replayed keyframe (150,000 < max 270,000): must be dropped while frozen, never breaking freeze or emitting 150,000
+      // Offer replayed keyframe (150,000 < max 270,000) and CC-corrupted keyframe (cc=9 jump at 271,000):
+      // both must be dropped while frozen, never breaking freeze or emitting 150,000 / 271,000
       val _ = queue.offer(
         buildVideoPesPacket(videoPid, pts = 150000L, cc = 3, isKeyframe = true) ++
-          buildAudioPesPacket(audioPid, pts = 150000L, cc = 1)
+          buildAudioPesPacket(audioPid, pts = 150000L, cc = 1) ++
+          buildVideoPesPacket(videoPid, pts = 271000L, cc = 9, isKeyframe = true)
       )
       Thread.sleep(50L)
-      // Offer genuine new live keyframe past 270,000
-      val _ = queue.offer(buildVideoPesPacket(videoPid, pts = 273003L, cc = 4, isKeyframe = true))
+      // Offer genuine clean new live keyframe past 270,000 with continuous CC = 10
+      val _ = queue.offer(buildVideoPesPacket(videoPid, pts = 273003L, cc = 10, isKeyframe = true))
       queue.complete()
 
       val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
@@ -2417,6 +2421,7 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       }
       val vPts = videoPtsSeq.result()
       val _ = vPts should not contain 150000L
+      val _ = vPts should not contain 271000L
       val _ = audioPtsSeq.result() should not contain 150000L
       vPts.sliding(2).foreach {
         case Seq(prev, next) => val _ = next should be > prev

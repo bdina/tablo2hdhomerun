@@ -813,6 +813,23 @@ object FreezeFramePacer {
 
   private val Mpeg2FreezePayload68: Array[Byte] = buildMpeg2FreezePayload(DefaultMaxSliceRow, 120)
   private val Mpeg2FreezePayload45: Array[Byte] = buildMpeg2FreezePayload(45, 80)
+  private val Mpeg2FreezePayload30: Array[Byte] = buildMpeg2FreezePayload(30, 45)
+  @volatile private var cachedCustomMpeg2Payload: (Int, Int, Array[Byte]) = (0, 0, Array.emptyByteArray)
+
+  private def mpeg2FreezePayloadFor(sliceRows: Int, mbWidth: Int): Array[Byte] =
+    if (sliceRows == DefaultMaxSliceRow && mbWidth == 120) Mpeg2FreezePayload68
+    else if (sliceRows == 45 && mbWidth == 80) Mpeg2FreezePayload45
+    else if (sliceRows == 30 && mbWidth == 45) Mpeg2FreezePayload30
+    else {
+      val (cachedRows, cachedWidth, cachedArr) = cachedCustomMpeg2Payload
+      if (cachedRows == sliceRows && cachedWidth == mbWidth && cachedArr.nonEmpty) {
+        cachedArr
+      } else {
+        val built = buildMpeg2FreezePayload(sliceRows, mbWidth)
+        cachedCustomMpeg2Payload = (sliceRows, mbWidth, built)
+        built
+      }
+    }
 
   def synthesizeVideoFreezeFrame(
       videoPid: Int,
@@ -830,9 +847,7 @@ object FreezeFramePacer {
     } else {
       val sliceRows = math.max(1, math.min(maxSliceRow, DefaultMaxSliceRow))
       val mbWidth = lockedSeqHeader.flatMap(extractMpeg2MacroblockWidth).getOrElse(defaultMacroblockWidthForRows(sliceRows))
-      if (sliceRows == DefaultMaxSliceRow && mbWidth == 120) Mpeg2FreezePayload68
-      else if (sliceRows == 45 && mbWidth == 80) Mpeg2FreezePayload45
-      else buildMpeg2FreezePayload(sliceRows, mbWidth)
+      mpeg2FreezePayloadFor(sliceRows, mbWidth)
     }
 
     val pesHeaderLen = 19

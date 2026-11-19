@@ -719,8 +719,19 @@ object MpegTsSync {
                 true
               } else if (isVideo) {
                 if (isReplayVideoPts(inPts, isKeyStart)) {
-                  if (droppingReplayedVideo || isKeyStart) {
+                  val newlyConfirmed = !confirmedReplay && (droppingReplayedVideo || isKeyStart)
+                  if (newlyConfirmed) {
                     confirmedReplay = true
+                    val regressionMs =
+                      if (maxInputVideoPts.isDefined) (maxInputVideoPts.get.signedDiff(inPts.value) * 1000L) / 90000L
+                      else 0L
+                    log.warn(
+                      "[mpegts] suppressing backward PTS replay{} inPts={} maxInputPts={} regressionMs={}"
+                    , labelPrefix
+                    , inPts.value
+                    , maxInputVideoPts.getOrElse(0L)
+                    , regressionMs
+                    )
                   }
                   droppingReplayedVideo = true
                   totalScrubbedPts += 1L
@@ -728,33 +739,47 @@ object MpegTsSync {
                   true
                 } else {
                   val wasConfirmedReplay = confirmedReplay
-                  droppingReplayedVideo = false
-                  confirmedReplay = false
-                  if ((freezeActive || pendingTimelineSync || wasConfirmedReplay) && isKeyStart) {
-                    if (wasConfirmedReplay && !freezeActive) {
-                      pendingTimelineSync = true
-                      mediaClockAnchorPts = OptPts.Empty
-                    }
-                    false
-                  } else if (pendingTimelineSync && lastOutputPts.isDefined && lastInputVideoPts.isEmpty) {
-                    false
-                  } else if (!freezeActive && lastOutputPts.isDefined && lastInputVideoPts.isDefined) {
-                    val inputJump = math.abs(inPts.signedDiff(lastInputVideoPts.rawValue))
-                    if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
-                      if (pendingOutlierPts.isDefined && math.abs(inPts.signedDiff(pendingOutlierPts.rawValue)) <= FreezeFramePacer.RebaseThresholdTicks) {
-                        false
+                  val isConfirmedReplayForwardResume =
+                    wasConfirmedReplay && isKeyStart && maxInputVideoPts.isDefined && inPts.signedDiff(maxInputVideoPts.rawValue) > 0L
+                  val isOutlier =
+                    if (((freezeActive || pendingTimelineSync) && isKeyStart) || isConfirmedReplayForwardResume) {
+                      false
+                    } else if (pendingTimelineSync && lastOutputPts.isDefined && lastInputVideoPts.isEmpty) {
+                      false
+                    } else if (!freezeActive && lastOutputPts.isDefined && lastInputVideoPts.isDefined) {
+                      val inputJump = math.abs(inPts.signedDiff(lastInputVideoPts.rawValue))
+                      if (inputJump > FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+                        if (pendingOutlierPts.isDefined && math.abs(inPts.signedDiff(pendingOutlierPts.rawValue)) <= FreezeFramePacer.RebaseThresholdTicks) {
+                          false
+                        } else {
+                          pendingOutlierPts = inPtsOpt
+                          totalScrubbedPts += 1L
+                          windowPtsScrubs += 1L
+                          true
+                        }
                       } else {
-                        pendingOutlierPts = inPtsOpt
-                        totalScrubbedPts += 1L
-                        windowPtsScrubs += 1L
-                        true
+                        false
                       }
                     } else {
                       false
                     }
-                  } else {
-                    false
+                  if (!isOutlier) {
+                    droppingReplayedVideo = false
+                    confirmedReplay = false
+                    if (wasConfirmedReplay) {
+                      log.info(
+                        "[mpegts] live keyframe resumed after replay suppression{} inPts={} prevMaxInputPts={}"
+                      , labelPrefix
+                      , inPts.value
+                      , maxInputVideoPts.getOrElse(0L)
+                      )
+                      if (!freezeActive) {
+                        pendingTimelineSync = true
+                        mediaClockAnchorPts = OptPts.Empty
+                      }
+                    }
                   }
+                  isOutlier
                 }
               } else {
                 val mappedPts = inPts.advance(ptsDeltaTicks)
@@ -1100,7 +1125,7 @@ object MpegTsSync {
               requireVideoPesStart = true
             }
             if (freezeActive) {
-              if (isKeyStart && !hasCorruptPesTimestamp && !droppingReplayedVideo) {
+              if (isKeyStart && !isCcError && !hasOutOfBoundsSlice && !hasCorruptPesTimestamp && !droppingReplayedVideo) {
                 log.info(
                   "[mpegts] live keyframe resumed after freeze-frame pacing{} silenceMs={} bursts={}"
                 , labelPrefix

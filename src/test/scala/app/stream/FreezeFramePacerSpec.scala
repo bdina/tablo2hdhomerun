@@ -510,7 +510,7 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       FreezeFramePacer.hasOutOfBoundsMpeg2Slice(es, 0, es.length, 68) shouldBe false
     }
 
-    "synthesize valid MPEG-2 freeze frames for 720p and custom macroblock widths from lockedSeqHeader" in {
+    "synthesize valid MPEG-2 freeze frames for 720p, 480i, and custom macroblock widths from lockedSeqHeader" in {
       var cc = 0
       val nextCc = () => { val c = cc; cc = (cc + 1) & 0x0F; c }
       val bs720p = FreezeFramePacer.synthesizeVideoFreezeFrame(0x0100, Some(0x02), 90000L, includePcr = false, 45, nextCc)
@@ -519,12 +519,21 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = sliceCodes720p.map(_._2) shouldBe (1 to 45)
       val _ = FreezeFramePacer.hasOutOfBoundsMpeg2Slice(es720p, 0, es720p.length, 45) shouldBe false
 
+      val bs480i = FreezeFramePacer.synthesizeVideoFreezeFrame(0x0100, Some(0x02), 90000L, includePcr = false, 30, nextCc)
+      val es480i = extractElementaryPayload(bs480i)
+      val sliceCodes480i = collectStartCodeOffsets(es480i).drop(2)
+      val _ = sliceCodes480i.map(_._2) shouldBe (1 to 30)
+      val _ = FreezeFramePacer.hasOutOfBoundsMpeg2Slice(es480i, 0, es480i.length, 30) shouldBe false
+
       // 1440x1080 subchannel sequence header (0x5A0 = 1440 -> 90 MBs wide)
       val seqHdr1440 = ByteString(0x00, 0x00, 0x01, 0xB3.toByte, 0x5A, 0x04, 0x38, 0x12, 0x34, 0x56, 0x78, 0x9A.toByte)
       val _ = FreezeFramePacer.extractMpeg2MacroblockWidth(seqHdr1440) shouldBe Some(90)
-      val bs1440 = FreezeFramePacer.synthesizeVideoFreezeFrame(0x0100, Some(0x02), 90000L, includePcr = false, 68, nextCc, Some(seqHdr1440))
-      val es1440 = extractElementaryPayload(bs1440)
-      collectStartCodeOffsets(es1440).drop(2).map(_._2) shouldBe (1 to 68)
+      val bs1440First = FreezeFramePacer.synthesizeVideoFreezeFrame(0x0100, Some(0x02), 90000L, includePcr = false, 68, nextCc, Some(seqHdr1440))
+      val bs1440Second = FreezeFramePacer.synthesizeVideoFreezeFrame(0x0100, Some(0x02), 93003L, includePcr = false, 68, nextCc, Some(seqHdr1440))
+      val es1440First = extractElementaryPayload(bs1440First)
+      val es1440Second = extractElementaryPayload(bs1440Second)
+      val _ = java.util.Arrays.equals(es1440First, es1440Second) shouldBe true
+      collectStartCodeOffsets(es1440First).drop(2).map(_._2) shouldBe (1 to 68)
     }
 
     "synthesize valid H.264 video freeze frame packet" in {
