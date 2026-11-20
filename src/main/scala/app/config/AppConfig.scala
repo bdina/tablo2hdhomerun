@@ -73,6 +73,7 @@ final case class StreamConfig(
 , hls: HlsStreamConfig
 , metricsIntervalSec: Int = 30
 , freezeThresholdSec: Int = 10
+, audioLossTimeoutSec: Int = 30
 )
 
 final case class LoggingConfig(
@@ -144,6 +145,7 @@ object AppConfig {
     , hls = hls
     , metricsIntervalSec = getInt(get, "STREAM_METRICS_INTERVAL_SEC", 30)
     , freezeThresholdSec = getInt(get, "STREAM_FREEZE_THRESHOLD_SEC", 10)
+    , audioLossTimeoutSec = getInt(get, "STREAM_AUDIO_LOSS_TIMEOUT_SEC", 30)
     )
     val logging = LoggingConfig(
       logLevel = get("LOG_LEVEL")

@@ -33,6 +33,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
     val _ = config.stream.metricsIntervalSec shouldBe 30
     val _ = config.stream.freezeThresholdSec shouldBe 10
+    val _ = config.stream.audioLossTimeoutSec shouldBe 30
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 45
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 20
     val _ = config.stream.resilient.retryDelaySec shouldBe 1
@@ -63,10 +64,12 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "STREAM_PRE_ROLL_PACKETS" -> "14",
       "STREAM_RECOVERY_LIVE_EDGE_SEGMENTS" -> "5",
       "STREAM_METRICS_INTERVAL_SEC" -> "15",
-      "STREAM_FREEZE_THRESHOLD_SEC" -> "8"
+      "STREAM_FREEZE_THRESHOLD_SEC" -> "8",
+      "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "45"
     )).config
     val _ = config.stream.metricsIntervalSec shouldBe 15
     val _ = config.stream.freezeThresholdSec shouldBe 8
+    val _ = config.stream.audioLossTimeoutSec shouldBe 45
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 12
     val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
     val _ = config.stream.resilient.retryDelaySec shouldBe 2
@@ -79,11 +82,17 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.preRollPackets shouldBe 14
 
     val fallbackConfig = AppConfig.load(Map(
-      "STREAM_STALL_TIMEOUT_SEC" -> "bad"
+      "STREAM_STALL_TIMEOUT_SEC" -> "bad",
+      "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "bad"
     )).config
     val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 45
     val _ = fallbackConfig.stream.hls.recoveryLiveEdgeSegments shouldBe 3
-  }
+    val _ = fallbackConfig.stream.audioLossTimeoutSec shouldBe 30
+
+    val disabledAudioLossConfig = AppConfig.load(Map(
+      "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "0"
+    )).config
+    val _ = disabledAudioLossConfig.stream.audioLossTimeoutSec shouldBe 0  }
 
   it should "parse bool env vars" in {
     val config = AppConfig.load(Map(
