@@ -1122,6 +1122,7 @@ object TabloLegacy {
             val hlsCollector = new StreamMetrics.HlsCollector()
             val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
             val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+            val retuneTrigger = new ResilientHlsSource.RetuneTrigger()
             val metricsInterval =
               Option(AppContext.config).map(_.stream.metricsIntervalSec.seconds).getOrElse(30.seconds)
             val _ = activeStreams.put(streamId, (channelId.toString, latestMetricsRef))
@@ -1162,6 +1163,7 @@ object TabloLegacy {
             , audioStreamTypesSupplier = () => cachedHeadersRef.get().audioStreamTypes
             , lockedSeqHeaderSupplier = () => cachedHeadersRef.get().lockedSeqHeader
             , metricsCollector = Some(hlsCollector)
+            , retuneTrigger = Some(retuneTrigger)
             )
               .via(MpegTsSync.cacheFlow(
                 cachedHeadersRef
@@ -1169,6 +1171,10 @@ object TabloLegacy {
               , metricsInterval = metricsInterval
               , hlsCollector = Some(hlsCollector)
               , latestMetricsRef = Some(latestMetricsRef)
+              , onAudioLossRetune = detail => {
+                  lastSeqRef.set(0)
+                  val _ = retuneTrigger.trigger(app.stream.HlsError.SustainedAudioLoss(detail))
+                }
               ))
               .watchTermination { (_, done) =>
                 done.onComplete {

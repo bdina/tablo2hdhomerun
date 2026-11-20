@@ -2277,6 +2277,7 @@ object Tablo4thGen {
 
           val metricsInterval =
             Option(AppContext.config).map(_.stream.metricsIntervalSec.seconds).getOrElse(30.seconds)
+          val retuneTrigger = new ResilientHlsSource.RetuneTrigger()
 
           val ((outerKillSwitch, upstreamDone), hubSource) =
             ResilientHlsSource(
@@ -2289,6 +2290,7 @@ object Tablo4thGen {
             , audioStreamTypesSupplier = () => cachedHeadersRef.get().audioStreamTypes
             , lockedSeqHeaderSupplier = () => cachedHeadersRef.get().lockedSeqHeader
             , metricsCollector = Some(hlsCollector)
+            , retuneTrigger = Some(retuneTrigger)
             )
               .via(MpegTsSync.cacheFlow(
                 cachedHeadersRef
@@ -2302,6 +2304,10 @@ object Tablo4thGen {
               , metricsInterval = metricsInterval
               , hlsCollector = Some(hlsCollector)
               , latestMetricsRef = Some(latestMetricsRef)
+              , onAudioLossRetune = detail => {
+                  playlistRollover.set(false)
+                  val _ = retuneTrigger.trigger(HlsError.SustainedAudioLoss(detail))
+                }
               ))
               .viaMat(KillSwitches.single)(Keep.right)
               .watchTermination(Keep.both)

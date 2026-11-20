@@ -1,16 +1,19 @@
 package app.stream
 
 import org.apache.pekko.NotUsed
-import org.apache.pekko.stream.{Attributes, FlowShape, Inlet, Outlet}
-import org.apache.pekko.stream.scaladsl.{Flow, RestartSource, Source}
+import org.apache.pekko.stream.{Attributes, FlowShape, Inlet, KillSwitches, Outlet, UniqueKillSwitch}
+import org.apache.pekko.stream.scaladsl.{Flow, Keep, RestartSource, Source}
 import org.apache.pekko.stream.RestartSettings
 import org.apache.pekko.stream.stage.{GraphStage, GraphStageLogic, InHandler, OutHandler, TimerGraphStageLogic}
 import org.apache.pekko.util.ByteString
 
 import org.slf4j.LoggerFactory
 
+import java.util.concurrent.atomic.AtomicReference
+
 import app.AppContext
 
+import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 
 object ResilientHlsSource {
@@ -34,6 +37,26 @@ object ResilientHlsSource {
   final class StallTimeoutException(message: String)
     extends java.util.concurrent.TimeoutException(message)
       with scala.util.control.NoStackTrace
+
+  final class RetuneTrigger {
+    private val activeKillSwitch = new AtomicReference[Option[UniqueKillSwitch]](None)
+
+    private[stream] def attach(killSwitch: UniqueKillSwitch): Unit =
+      activeKillSwitch.set(Some(killSwitch))
+
+    private[stream] def clear(killSwitch: UniqueKillSwitch): Unit = {
+      val _ = activeKillSwitch.compareAndSet(Some(killSwitch), None)
+    }
+
+    def trigger(reason: Throwable): Boolean =
+      activeKillSwitch.getAndSet(None) match {
+        case Some(killSwitch) =>
+          killSwitch.abort(reason)
+          true
+        case None =>
+          false
+      }
+  }
 
   private enum Elem derives CanEqual {
     case Real(data: ByteString)
@@ -59,6 +82,7 @@ object ResilientHlsSource {
   , lockedSeqHeaderSupplier: () => Option[ByteString] = () => None
   , keyframeTimeout: FiniteDuration = Duration.Zero
   , metricsCollector: Option[StreamMetrics.HlsCollector] = None
+  , retuneTrigger: Option[RetuneTrigger] = None
   ): Source[ByteString, ?] = {
     val effectiveMax = if (maxRetryDelay < retryDelay) retryDelay else maxRetryDelay
     val effectiveKeyframeTimeout = keyframeTimeout
@@ -71,7 +95,7 @@ object ResilientHlsSource {
         metricsCollector.foreach(_.onRetune())
         log.warn(s"[$streamName] stream recovery retune attempt=$n")
       }
-      val inner = streamFactory().via(
+      val watched = streamFactory().via(
         StallWatchdog.flow(
           tuneTimeout = tuneTimeout
         , stallTimeout = stallTimeout
@@ -81,6 +105,20 @@ object ResilientHlsSource {
         , videoStreamTypeSupplier = videoStreamTypeSupplier
         )
       )
+      val inner = retuneTrigger match {
+        case Some(trigger) =>
+          watched
+            .viaMat(KillSwitches.single)(Keep.right)
+            .mapMaterializedValue { ks =>
+              trigger.attach(ks)
+              ks
+            }
+            .watchTermination { (ks, done) =>
+              done.onComplete(_ => trigger.clear(ks))(using ExecutionContext.parasitic)
+            }
+        case None =>
+          watched
+      }
       if (n == 1) {
         inner.map(data => Real(data))
       } else {

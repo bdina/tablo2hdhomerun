@@ -2455,5 +2455,278 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = FreezeFramePacer.readPesPts(out(4).toArray, 4, 188) shouldBe 1009009L
       latestMetricsRef.get().ptsScrubs shouldBe 0L
     }
+
+    "cacheFlow should trigger onAudioLossRetune when primary audio PTS drifts beyond 2s during live video" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+      val virtualNowNanos = new java.util.concurrent.atomic.AtomicLong(10_000_000_000L)
+      val retuneDetails = new java.util.concurrent.CopyOnWriteArrayList[String]()
+
+      val chunks = Vector.newBuilder[ByteString]
+      chunks += (
+        pat ++ pmt ++
+          buildVideoPesPacket(videoPid, pts = 900000L, cc = 0, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 900000L, cc = 0) ++
+          buildVideoPesPacket(videoPid, pts = 903003L, cc = 1, isKeyframe = false, sliceRow = Some(1)) ++
+          buildAudioPesPacket(audioPid, pts = 903003L, cc = 1)
+      )
+      var i = 0
+      while (i < 15) {
+        val vPts = 906006L + (i.toLong * 3003L)
+        val driftedAudioPts = vPts - 500000L
+        chunks += (
+          buildVideoPesPacket(videoPid, pts = vPts, cc = (2 + i) & 0x0F, isKeyframe = (i % 5 == 0), sliceRow = Some(1)) ++
+            buildAudioPesPacket(audioPid, pts = driftedAudioPts, cc = (2 + i) & 0x0F)
+        )
+        i += 1
+      }
+
+      val _ = Source(chunks.result())
+        .map { chunk =>
+          val _ = virtualNowNanos.addAndGet(100_000_000L)
+          chunk
+        }
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = Duration.Zero
+          , latestMetricsRef = Some(latestMetricsRef)
+          , audioLossTimeout = 1.second
+          , onAudioLossRetune = detail => { val _ = retuneDetails.add(detail) }
+          , minLiveVideoFramesForAudioLoss = 10L
+          , clockNanos = () => virtualNowNanos.get()
+          )
+        )
+        .runWith(Sink.ignore)
+        .futureValue
+
+      val _ = retuneDetails.size() shouldBe 1
+      val _ = retuneDetails.get(0) should include("ptsScrubbedAudio=")
+      val _ = retuneDetails.get(0) should include("droppedAudioFrames=")
+      latestMetricsRef.get().ptsScrubs should be >= 15L
+    }
+
+    "cacheFlow should trigger onAudioLossRetune when primary audio disappears completely after clean audio" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val virtualNowNanos = new java.util.concurrent.atomic.AtomicLong(20_000_000_000L)
+      val retuneDetails = new java.util.concurrent.CopyOnWriteArrayList[String]()
+
+      val chunks = Vector.newBuilder[ByteString]
+      chunks += (
+        pat ++ pmt ++
+          buildVideoPesPacket(videoPid, pts = 900000L, cc = 0, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 900000L, cc = 0)
+      )
+      var i = 0
+      while (i < 15) {
+        chunks += buildVideoPesPacket(videoPid, pts = 903003L + (i.toLong * 3003L), cc = (1 + i) & 0x0F, isKeyframe = (i % 5 == 0), sliceRow = Some(1))
+        i += 1
+      }
+
+      val _ = Source(chunks.result())
+        .map { chunk =>
+          val _ = virtualNowNanos.addAndGet(100_000_000L)
+          chunk
+        }
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = Duration.Zero
+          , audioLossTimeout = 1.second
+          , onAudioLossRetune = detail => { val _ = retuneDetails.add(detail) }
+          , minLiveVideoFramesForAudioLoss = 10L
+          , clockNanos = () => virtualNowNanos.get()
+          )
+        )
+        .runWith(Sink.ignore)
+        .futureValue
+
+      val _ = retuneDetails.size() shouldBe 1
+      retuneDetails.get(0) should include("droppedAudioFrames=0")
+    }
+
+    "cacheFlow should not falsely trigger onAudioLossRetune when secondary audio PID fails while primary audio is clean" in {
+      val videoPid = 0x0101
+      val primaryAudioPid = 0x0102
+      val secondaryAudioPid = 0x0103
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](
+        MpegTsSync.CachedHeaders(
+          videoPid = Some(videoPid)
+        , videoStreamType = Some(0x02)
+        , audioPids = Seq(primaryAudioPid, secondaryAudioPid)
+        , audioStreamTypes = Map(primaryAudioPid -> 0x81, secondaryAudioPid -> 0x81)
+        )
+      )
+      val virtualNowNanos = new java.util.concurrent.atomic.AtomicLong(30_000_000_000L)
+      val retuneDetails = new java.util.concurrent.CopyOnWriteArrayList[String]()
+
+      val chunks = (0 until 20).map { i =>
+        val vPts = 900000L + (i.toLong * 3003L)
+        buildVideoPesPacket(videoPid, pts = vPts, cc = i & 0x0F, isKeyframe = (i == 0), sliceRow = Some(1)) ++
+          buildAudioPesPacket(primaryAudioPid, pts = vPts, cc = i & 0x0F) ++
+          buildAudioPesPacket(secondaryAudioPid, pts = vPts - 500000L, cc = i & 0x0F)
+      }
+
+      val _ = Source(chunks)
+        .map { chunk =>
+          val _ = virtualNowNanos.addAndGet(100_000_000L)
+          chunk
+        }
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = Duration.Zero
+          , audioLossTimeout = 1.second
+          , onAudioLossRetune = detail => { val _ = retuneDetails.add(detail) }
+          , minLiveVideoFramesForAudioLoss = 5L
+          , clockNanos = () => virtualNowNanos.get()
+          )
+        )
+        .runWith(Sink.ignore)
+        .futureValue
+
+      retuneDetails.size() shouldBe 0
+    }
+
+    "cacheFlow should not falsely trigger onAudioLossRetune across freeze-frame pacing recovery" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val retuneDetails = new java.util.concurrent.CopyOnWriteArrayList[String]()
+
+      val (queue, done) = Source.queue[ByteString](bufferSize = 32)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 80.millis
+          , freezeTickInterval = 25.millis
+          , audioLossTimeout = 120.millis
+          , onAudioLossRetune = detail => { val _ = retuneDetails.add(detail) }
+          , minLiveVideoFramesForAudioLoss = 2L
+          )
+        )
+        .toMat(Sink.ignore)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      val _ = queue.offer(
+        pat ++ pmt ++
+          buildVideoPesPacket(videoPid, pts = 90000L, cc = 0, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 90000L, cc = 0)
+      )
+      Thread.sleep(180L)
+      val _ = queue.offer(
+        buildVideoPesPacket(videoPid, pts = 117000L, cc = 1, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 117000L, cc = 1) ++
+          buildVideoPesPacket(videoPid, pts = 120003L, cc = 2, isKeyframe = false, sliceRow = Some(1)) ++
+          buildAudioPesPacket(audioPid, pts = 120003L, cc = 2)
+      )
+      queue.complete()
+      val _ = done.futureValue
+      retuneDetails.size() shouldBe 0
+    }
+
+    "ResilientHlsSource and MpegTsSync.cacheFlow should cold-retune on sustained audio loss and restore live audio" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val collector = new StreamMetrics.HlsCollector()
+      val retuneTrigger = new ResilientHlsSource.RetuneTrigger()
+      val attempts = new java.util.concurrent.atomic.AtomicInteger(0)
+      val virtualNowNanos = new java.util.concurrent.atomic.AtomicLong(50_000_000_000L)
+
+      val factory = () => {
+        val attempt = attempts.incrementAndGet()
+        if (attempt == 1) {
+          val init = pat ++ pmt ++
+            buildVideoPesPacket(videoPid, pts = 900000L, cc = 0, isKeyframe = true) ++
+            buildAudioPesPacket(audioPid, pts = 900000L, cc = 0)
+          val wedged = (1 to 30).map { i =>
+            val vPts = 900000L + (i.toLong * 3003L)
+            buildVideoPesPacket(videoPid, pts = vPts, cc = i & 0x0F, isKeyframe = (i % 5 == 0), sliceRow = Some(1)) ++
+              buildAudioPesPacket(audioPid, pts = vPts - 500000L, cc = i & 0x0F)
+          }
+          Source(init +: wedged).map { chunk =>
+            val _ = virtualNowNanos.addAndGet(150_000_000L)
+            chunk
+          }.concat(Source.never)
+        } else {
+          val recovered = (0 until 6).map { i =>
+            val pts = 500000L + (i.toLong * 3003L)
+            buildVideoPesPacket(videoPid, pts = pts, cc = i & 0x0F, isKeyframe = (i == 0), sliceRow = Some(1)) ++
+              buildAudioPesPacket(audioPid, pts = pts, cc = i & 0x0F)
+          }
+          Source(recovered).map { chunk =>
+            val _ = virtualNowNanos.addAndGet(100_000_000L)
+            chunk
+          }.concat(Source.never)
+        }
+      }
+
+      val probe = ResilientHlsSource(
+        streamFactory = factory
+      , streamName = "test-audio-loss-e2e"
+      , tuneTimeout = 2.seconds
+      , retryDelay = 50.millis
+      , maxRetryDelay = 1.second
+      , recoveryTimeout = 5.seconds
+      , slateThreshold = 10.seconds
+      , enableSlateVideo = false
+      , resumePrefixSupplier = () => Some(cachedHeadersRef.get().syncPrefix)
+      , videoPidSupplier = () => cachedHeadersRef.get().videoPid
+      , videoStreamTypeSupplier = () => cachedHeadersRef.get().videoStreamType
+      , audioPidsSupplier = () => cachedHeadersRef.get().audioPids
+      , audioStreamTypesSupplier = () => cachedHeadersRef.get().audioStreamTypes
+      , metricsCollector = Some(collector)
+      , retuneTrigger = Some(retuneTrigger)
+      )
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = Duration.Zero
+          , hlsCollector = Some(collector)
+          , audioLossTimeout = 1.second
+          , onAudioLossRetune = detail => { val _ = retuneTrigger.trigger(HlsError.SustainedAudioLoss(detail)) }
+          , minLiveVideoFramesForAudioLoss = 8L
+          , clockNanos = () => virtualNowNanos.get()
+          )
+        )
+        .runWith(org.apache.pekko.stream.testkit.scaladsl.TestSink[ByteString]())
+
+      val _ = probe.ensureSubscription()
+      var postRetuneAudioCount = 0
+      var iterations = 0
+      while (postRetuneAudioCount < 3 && iterations < 200) {
+        val chunk = probe.requestNext(3.seconds)
+        if (attempts.get() >= 2) {
+          var off = 0
+          while (off + 188 <= chunk.length) {
+            val pid = ((chunk(off + 1) & 0x1F) << 8) | (chunk(off + 2) & 0xFF)
+            val pusi = (chunk(off + 1) & 0x40) != 0
+            if (pid == audioPid && pusi) {
+              postRetuneAudioCount += 1
+            }
+            off += 188
+          }
+        }
+        iterations += 1
+      }
+
+      val _ = probe.cancel()
+      val _ = attempts.get() shouldBe 2
+      val _ = collector.currentWindowStats().retunes shouldBe 1L
+      postRetuneAudioCount should be >= 3
+    }
   }
 }

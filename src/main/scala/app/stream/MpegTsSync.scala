@@ -277,6 +277,7 @@ object MpegTsSync {
   val DefaultFreezeThreshold: FiniteDuration = 10.seconds
   val DefaultFreezeTickInterval: FiniteDuration = 100.millis
   val DefaultMetricsInterval: FiniteDuration = 30.seconds
+  val DefaultAudioLossTimeout: FiniteDuration = AudioLossMonitor.DefaultTimeout
 
   def configuredFreezeThreshold: FiniteDuration =
     scala.util.Try(app.AppContext.config.stream.freezeThresholdSec).toOption
@@ -288,6 +289,11 @@ object MpegTsSync {
       .map(sec => if (sec <= 0) Duration.Zero else sec.seconds)
       .getOrElse(DefaultMetricsInterval)
 
+  def configuredAudioLossTimeout: FiniteDuration =
+    scala.util.Try(app.AppContext.config.stream.audioLossTimeoutSec).toOption
+      .map(sec => if (sec <= 0) Duration.Zero else sec.seconds)
+      .getOrElse(DefaultAudioLossTimeout)
+
   def cacheFlow(
     cachedHeadersRef: AtomicReference[CachedHeaders]
   , onHeadersUpdated: CachedHeaders => Unit = _ => ()
@@ -297,6 +303,10 @@ object MpegTsSync {
   , metricsInterval: FiniteDuration = configuredMetricsInterval
   , hlsCollector: Option[StreamMetrics.HlsCollector] = None
   , latestMetricsRef: Option[AtomicReference[StreamMetrics.WindowSnapshot]] = None
+  , audioLossTimeout: FiniteDuration = configuredAudioLossTimeout
+  , onAudioLossRetune: String => Unit = _ => ()
+  , minLiveVideoFramesForAudioLoss: Long = AudioLossMonitor.DefaultMinLiveVideoFrames
+  , clockNanos: () => Long = () => System.nanoTime()
   ): Flow[ByteString, ByteString, NotUsed] =
     Flow.fromGraph(
       new CacheStage(
@@ -308,6 +318,10 @@ object MpegTsSync {
       , metricsInterval
       , hlsCollector
       , latestMetricsRef
+      , audioLossTimeout
+      , onAudioLossRetune
+      , minLiveVideoFramesForAudioLoss
+      , clockNanos
       )
     )
 
@@ -361,6 +375,10 @@ object MpegTsSync {
   , metricsInterval: FiniteDuration
   , hlsCollector: Option[StreamMetrics.HlsCollector]
   , latestMetricsRef: Option[AtomicReference[StreamMetrics.WindowSnapshot]]
+  , audioLossTimeout: FiniteDuration
+  , onAudioLossRetune: String => Unit
+  , minLiveVideoFramesForAudioLoss: Long
+  , clockNanos: () => Long
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.out")
@@ -437,6 +455,14 @@ object MpegTsSync {
       private var latestVideoPts: OptPts = OptPts.Empty
       private var latestAudioPts: OptPts = OptPts.Empty
       private var initialSnapshotPublished: Boolean = false
+      private val audioLossConfig: AudioLossMonitor.Config = AudioLossMonitor.Config(
+        timeout = audioLossTimeout
+      , minLiveVideoFrames = minLiveVideoFramesForAudioLoss
+      , maxInterFrameStep =
+          if (freezeThreshold.toNanos > 0L) freezeThreshold
+          else AudioLossMonitor.DefaultMaxInterFrameStep
+      )
+      private var audioLossState: AudioLossMonitor.State = AudioLossMonitor.State()
 
       private def acquireScratch(needed: Int): Array[Byte] =
         if (scratchBuf.length >= needed) scratchBuf
@@ -647,6 +673,7 @@ object MpegTsSync {
         latestVideoPts = OptPts.Empty
         latestAudioPts = OptPts.Empty
         pendingMetricOutlierPts = OptPts.Empty
+        audioLossState = audioLossState.onDiscontinuity
       }
 
       private def recordAcceptedInputVideoPts(inPts: PtsTicks, inPtsOpt: OptPts): Unit = {
@@ -722,6 +749,7 @@ object MpegTsSync {
                   val newlyConfirmed = !confirmedReplay && (droppingReplayedVideo || isKeyStart)
                   if (newlyConfirmed) {
                     confirmedReplay = true
+                    audioLossState = audioLossState.onPause
                     val regressionMs =
                       if (maxInputVideoPts.isDefined) (maxInputVideoPts.get.signedDiff(inPts.value) * 1000L) / 90000L
                       else 0L
@@ -975,6 +1003,9 @@ object MpegTsSync {
               currentVideoFrameCorrupt = true
             } else if (updated.audioPids.contains(pid)) {
               setDroppingAudioPid(pid)
+              if (!freezeActive && !confirmedReplay && pusi && updated.audioPids.headOption.contains(pid)) {
+                audioLossState = audioLossState.onDroppedLiveAudio(isPtsScrub = false)
+              }
               if (pusi && isAudioFrameStarted(pid)) {
                 windowAudioFramesTotal += 1L
                 if (!isAudioFrameCorrupt(pid)) {
@@ -1193,6 +1224,13 @@ object MpegTsSync {
                 val now = System.nanoTime()
                 if (pusi || isKeyStart) {
                   lastLiveDataNanos = now
+                  if (audioLossConfig.isEnabled) {
+                    audioLossState = audioLossState.onLiveVideoFrame(
+                      nowNanos = clockNanos()
+                    , hasPrimaryAudioPid = updated.audioPids.nonEmpty
+                    , config = audioLossConfig
+                    )
+                  }
                 }
                 if (sliceStuffTargetOffset > pos) {
                   val _ = FreezeFramePacer.stuffPacketPrefix(arr, pos, sliceStuffTargetOffset)
@@ -1287,8 +1325,14 @@ object MpegTsSync {
                 setAudioFrameCorrupt(pid)
               }
               if (isDroppingAudioPid(pid)) {
+                if (audioLossConfig.isEnabled && pusi && hasPayload && payloadLen > 0 && updated.audioPids.headOption.contains(pid)) {
+                  audioLossState = audioLossState.onDroppedLiveAudio(isPtsScrub = hasCorruptPesTimestamp)
+                }
                 val _ = outputBuilder ++= MPEGTS_NULL_PACKET
               } else {
+                if (audioLossConfig.isEnabled && pusi && hasPayload && payloadLen > 0 && updated.audioPids.headOption.contains(pid)) {
+                  audioLossState = audioLossState.onCleanLiveAudio(audioLossConfig)
+                }
                 if (pusi && hasPayload && payloadLen > 0 && !learnedAudioFormats.contains(pid)) {
                   FreezeFramePacer.extractAudioFormat(arr, payloadOffset, payloadLen, streamTypeOpt).foreach { fmt =>
                     val _ = learnedAudioFormats.put(pid, fmt)
@@ -1357,6 +1401,7 @@ object MpegTsSync {
                 )
               }
               freezeActive = true
+              audioLossState = audioLossState.onPause
               totalFreezeBursts += 1L
               val b = ByteString.newBuilder
               if (freezeTicksCount % 5 == 0) {
@@ -1481,6 +1526,24 @@ object MpegTsSync {
               lastLoggedClamped = totalClampedSlices
               lastLoggedScrubbed = totalScrubbedPts
               lastStatsLogNanos = now
+            }
+          }
+
+          if (audioLossConfig.isEnabled) {
+            val (nextAudioLoss, triggerOpt) = audioLossState.evaluate(
+              hasPrimaryAudioPid = updated.audioPids.nonEmpty
+            , freezeActive = freezeActive
+            , confirmedReplay = confirmedReplay
+            , config = audioLossConfig
+            )
+            audioLossState = nextAudioLoss
+            triggerOpt.foreach { info =>
+              log.warn(
+                "[mpegts] sustained audio loss detected{} {}, triggering retune"
+              , labelPrefix
+              , info.detail
+              )
+              onAudioLossRetune(info.detail)
             }
           }
 
