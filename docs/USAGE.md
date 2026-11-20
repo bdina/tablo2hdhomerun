@@ -185,6 +185,7 @@ The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 - 4th gen Tablo player-session keepalive (`POST /player/sessions/{token}/keepalive?lh=1`) both periodically and as an active liveness probe during playlist stalls or `404` responses
 - 4th gen session teardown (`DELETE /player/sessions/{token}`) when the client disconnects and idle grace expires
 - Cold retune (`WatchSession.coldRetune`) with exponential backoff (capped at `STREAM_MAX_RETRY_DELAY_SEC`, default 15s) when the Tablo closes a session
+- Sustained-audio-loss cold retune (`AudioLossMonitor` + `ResilientHlsSource.RetuneTrigger`, `STREAM_AUDIO_LOSS_TIMEOUT_SEC=30`) that recycles wedged Tablo `/watch` sessions if primary audio drops out during active live video (paused during freezes/replays, backed off up to `300s` on broadcaster outages)
 - Single resume prefix injection on retune: multi-PID discontinuity packets plus cached PAT/PMT tables so downstream decoders cleanly reset timelines
 - Decoupled audio `PUSI` alignment and codec-aware video I-Frame / GOP alignment (`alignToIFrame`) with synthesized MPEG-2 Sequence Header injection when needed
 
@@ -197,6 +198,7 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 | :--- | :--- | :--- |
 | `STREAM_METRICS_INTERVAL_SEC` | `30` | Interval in seconds for periodic `[stream:metrics]` operational `INFO` logs (`<= 0` disables periodic logging) |
 | `STREAM_FREEZE_THRESHOLD_SEC` | `10` | Seconds of upstream video silence or media-clock deficit before `FreezeFramePacer` synthesizes repeat P-frames and silent audio (`<= 0` disables freeze-frame synthesis) |
+| `STREAM_AUDIO_LOSS_TIMEOUT_SEC` | `30` | Seconds of active non-frozen live video (`>= 150` frames) with zero recovered primary-PID audio before triggering an automatic cold retune (`<= 0` disables; exponential backoff up to `300s`) |
 | `STREAM_STALL_TIMEOUT_SEC` | `45` | Resilient stall timeout configuration in seconds (`0` disables byte-stall watchdog; 4th-gen HLS uses control-plane keepalive session probing) |
 | `STREAM_TUNE_TIMEOUT_SEC` | `20` | Max seconds to wait for initial or retuned data |
 | `STREAM_RETRY_DELAY_SEC` | `1` | Initial delay in seconds between retune attempts |
