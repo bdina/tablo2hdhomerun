@@ -1456,6 +1456,7 @@ object Tablo4thGen {
       , leaseId: String = ""
       , metricsRef: AtomicReference[ app.stream.StreamMetrics.WindowSnapshot ] =
           new AtomicReference(app.stream.StreamMetrics.WindowSnapshot.initial)
+      , isHealthy: () => Boolean = () => true
       )
 
       sealed trait Command extends Request
@@ -1473,6 +1474,7 @@ object Tablo4thGen {
         case class AcquireFailed(channelId: String, cause: Throwable) extends Command
         case class GraceExpired(channelId: String) extends Command
         case class UpstreamEnded(channelId: String, leaseId: String) extends Command
+        case class SessionUnhealthy(channelId: String, leaseId: String, reason: String) extends Command
       }
 
       private sealed trait SessionState
@@ -1737,15 +1739,27 @@ object Tablo4thGen {
 
               case Some(idle: SessionState.IdleGrace) =>
                 timers.cancel(GraceTimerKey(channelId))
-                idle.drainSwitch.foreach(_.shutdown())
-                sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
-                context.log.info(
-                  "[session] grace-cancel channel={} channelId={} clientId={}"
-                , Lineup.channelLabel(channelId.asString)
-                , channelId.asString
-                , clientId.asString
-                )
-                attachClient(channelId, clientId, idle.hubSource, idle.cachedHeadersRef, replyTo)
+                if (idle.meta.isHealthy()) {
+                  idle.drainSwitch.foreach(_.shutdown())
+                  sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
+                  context.log.info(
+                    "[session] grace-cancel channel={} channelId={} clientId={}"
+                  , Lineup.channelLabel(channelId.asString)
+                  , channelId.asString
+                  , clientId.asString
+                  )
+                  attachClient(channelId, clientId, idle.hubSource, idle.cachedHeadersRef, replyTo)
+                } else {
+                  context.log.info(
+                    "[session] evicting unhealthy idle-grace session channel={} channelId={} leaseId={} clientId={}"
+                  , Lineup.channelLabel(channelId.asString)
+                  , channelId.asString
+                  , idle.meta.leaseId
+                  , clientId.asString
+                  )
+                  teardownAndRemove(channelId, idle.teardown)
+                  openChannel(channelId, clientId, replyTo)
+                }
                 Behaviors.same
             }
 
@@ -1764,8 +1778,16 @@ object Tablo4thGen {
                   , clientId.asString
                   , remaining.size
                   )
-                } else {
+                } else if (live.meta.isHealthy()) {
                   sessions += channelId -> enterIdleGrace(channelId, live.copy(clientIds = Set.empty))
+                } else {
+                  context.log.info(
+                    "[session] skipping idle-grace for unhealthy session channel={} channelId={} leaseId={}"
+                  , Lineup.channelLabel(channelId.asString)
+                  , channelId.asString
+                  , live.meta.leaseId
+                  )
+                  teardownAndRemove(channelId, live.teardown)
                 }
               case Some(opening @ SessionState.Opening(waiters, cancel)) =>
                 val remaining = waiters.filterNot(_.clientId == clientId)
@@ -1882,6 +1904,25 @@ object Tablo4thGen {
             }
             Behaviors.same
 
+          case Command.SessionUnhealthy(rawChannelId, rawLeaseId, reason) =>
+            val channelId = ChannelId(rawChannelId)
+            val leaseId = LeaseId(rawLeaseId)
+            sessions.get(channelId) match {
+              case Some(idle: SessionState.IdleGrace) if LeaseId(idle.meta.leaseId) == leaseId =>
+                timers.cancel(GraceTimerKey(channelId))
+                context.log.info(
+                  "[session] ending idle-grace for unhealthy session channel={} channelId={} leaseId={} reason={}"
+                , Lineup.channelLabel(channelId.asString)
+                , channelId.asString
+                , leaseId.asString
+                , reason
+                )
+                teardownAndRemove(channelId, idle.teardown)
+              case _ =>
+                context.log.debug("[session] session-unhealthy ignored channelId={} leaseId={} reason={}", channelId.asString, leaseId.asString, reason)
+            }
+            Behaviors.same
+
           case Request.ShutdownAll(replyTo) =>
             timers.cancelAll()
             val count = sessions.size
@@ -1917,8 +1958,9 @@ object Tablo4thGen {
       , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit, AtomicReference[MpegTsSync.CachedHeaders]) => Unit
       , onFailed: Throwable => Unit
       , onUpstreamEnded: String => Unit
+      , onSessionUnhealthy: (String, String) => Unit = (_, _) => ()
       ): WithSystem[Unit] = {
-        val _ = startCancellable(channelId, authContext, onCheckIn, onFailed, onUpstreamEnded)
+        val _ = startCancellable(channelId, authContext, onCheckIn, onFailed, onUpstreamEnded, onSessionUnhealthy)
       }
 
       def startCancellable(
@@ -1927,6 +1969,7 @@ object Tablo4thGen {
       , onCheckIn: (SessionManager.TabloSessionMeta, Source[ByteString, NotUsed], () => Unit, AtomicReference[MpegTsSync.CachedHeaders]) => Unit
       , onFailed: Throwable => Unit
       , onUpstreamEnded: String => Unit
+      , onSessionUnhealthy: (String, String) => Unit = (_, _) => ()
       ): WithSystem[() => Unit] = {
         val system = summon[ActorSystem[?]]
         given ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -2089,6 +2132,7 @@ object Tablo4thGen {
         , lastSeqRef: java.util.concurrent.atomic.AtomicInteger
         , isRecovery: Boolean
         , checkSessionAlive: () => Future[Boolean]
+        , onSegmentAdvanced: () => Unit
         ): Source[ByteString, ?] = {
           log.info(
             "[4thgen-channel] stream session channel={} channelId={} leaseId={} expires={} keepalive={} playlist={}"
@@ -2106,7 +2150,10 @@ object Tablo4thGen {
               session.playlistUrl
             , streamLabel
             , initialSeq = startingSeq
-            , onSeqAdvanced = seq => lastSeqRef.set(seq)
+            , onSeqAdvanced = seq => {
+                lastSeqRef.set(seq)
+                onSegmentAdvanced()
+              }
             , liveEdgeCount = liveEdgeCount
             , checkSessionAlive = checkSessionAlive
             , metricsCollector = Some(hlsCollector)
@@ -2228,6 +2275,8 @@ object Tablo4thGen {
 
           import app.stream.ResilientHlsSource
           val attemptCount = new java.util.concurrent.atomic.AtomicInteger(0)
+          val inRecovery = new AtomicBoolean(false)
+          val isFrozen = new AtomicBoolean(false)
 
           def streamFactory(): Source[ByteString, ?] = {
             val attempt = attemptCount.incrementAndGet()
@@ -2235,8 +2284,17 @@ object Tablo4thGen {
             val isRollover = playlistRollover.compareAndSet(true, false)
 
             if ((attempt == 1 || isRollover) && !WatchSession.shouldRefreshSession(session)) {
-              streamFromWatchSession(session, streamKillSwitch, lastSeqRef, isRecovery = isRollover, () => probeSessionAlive())
+              streamFromWatchSession(
+                session
+              , streamKillSwitch
+              , lastSeqRef
+              , isRecovery = isRollover
+              , checkSessionAlive = () => probeSessionAlive()
+              , onSegmentAdvanced = () => inRecovery.set(false)
+              )
             } else {
+              inRecovery.set(true)
+              onSessionUnhealthy(leaseId, s"cold-retune-attempt-$attempt")
               val closedByTablo = sessionClosedByTablo.getAndSet(false)
               log.info(
                 "[4thgen-channel] cold recovery retune attempt={} channel={} channelId={} leaseId={} closedByTablo={}"
@@ -2258,7 +2316,14 @@ object Tablo4thGen {
                   probeFailures.set(0)
                   lastSeqRef.set(0)
                   scheduleKeepalive()
-                  streamFromWatchSession(newSession, streamKillSwitch, lastSeqRef, isRecovery = true, () => probeSessionAlive())
+                  streamFromWatchSession(
+                    newSession
+                  , streamKillSwitch
+                  , lastSeqRef
+                  , isRecovery = true
+                  , checkSessionAlive = () => probeSessionAlive()
+                  , onSegmentAdvanced = () => inRecovery.set(false)
+                  )
                 }(using ec)
               )
             }
@@ -2308,6 +2373,11 @@ object Tablo4thGen {
                   playlistRollover.set(false)
                   val _ = retuneTrigger.trigger(HlsError.SustainedAudioLoss(detail))
                 }
+              , onFreezeStateChanged = frozen => {
+                  isFrozen.set(frozen)
+                  if (frozen) onSessionUnhealthy(leaseId, "freeze-active")
+                  else inRecovery.set(false)
+                }
               ))
               .viaMat(KillSwitches.single)(Keep.right)
               .watchTermination(Keep.both)
@@ -2331,6 +2401,11 @@ object Tablo4thGen {
           , playlistUrl = firstSession.playlistUrl
           , leaseId = leaseId
           , metricsRef = latestMetricsRef
+          , isHealthy = () =>
+              !tornDown.get() && !inRecovery.get() && !isFrozen.get() && {
+                val snap = latestMetricsRef.get()
+                snap.windowSec <= 0.0 || snap.feedQualityPct > 0.0 || snap.segs > 0L
+              }
           )
 
           val teardown: () => Unit = () => {

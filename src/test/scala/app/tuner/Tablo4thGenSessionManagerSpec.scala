@@ -802,5 +802,114 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       mgr ! Request.GetActiveChannelStates(statesProbe.ref)
       statesProbe.receiveMessage() shouldBe Map.empty
     }
+
+    "skip IdleGrace and tear down immediately when last client releases an unhealthy session" in {
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val teardownCount = new AtomicInteger(0)
+      val healthy = new java.util.concurrent.atomic.AtomicBoolean(true)
+      val mgr = spawnManager(
+        startRunner = { (_, self) => selfRef.set(self) }
+      , idleGrace = 30.seconds
+      )
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-unhealthy-release", "client-a", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+      val unhealthyMeta = meta("tok-unhealthy").copy(leaseId = "lease-1", isHealthy = () => healthy.get())
+      selfRef.get() ! Command.CheckIn("ch-unhealthy-release", unhealthyMeta, hubSource, () => { val _ = teardownCount.incrementAndGet() })
+      val _ = probe.expectMessageType[Response.Attached]
+
+      healthy.set(false)
+      mgr ! Request.Release("ch-unhealthy-release", "client-a")
+
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        teardownCount.get() shouldBe 1
+      }
+      val statesProbe = testKit.createTestProbe[Map[String, String]]()
+      mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+      statesProbe.receiveMessage() shouldBe Map.empty
+    }
+
+    "evict an unhealthy IdleGrace session on Acquire and start a fresh runner instead of fast-attaching" in {
+      val runnerCalls = new AtomicInteger(0)
+      val teardownCount = new AtomicInteger(0)
+      val healthy = new java.util.concurrent.atomic.AtomicBoolean(true)
+      val mgr = spawnManager(
+        startRunner = { (channelId, self) =>
+          val attempt = runnerCalls.incrementAndGet()
+          if (attempt == 1) {
+            val m = meta("tok-stale").copy(leaseId = "lease-stale", isHealthy = () => healthy.get())
+            self ! Command.CheckIn(channelId, m, hubSource, () => { val _ = teardownCount.incrementAndGet() })
+          } else {
+            val m = meta("tok-fresh").copy(leaseId = "lease-fresh")
+            self ! Command.CheckIn(channelId, m, hubSource, () => ())
+          }
+        }
+      , idleGrace = 30.seconds
+      )
+      val probeA = testKit.createTestProbe[Response.Acquire]()
+      val probeB = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-stale-grace", "client-a", probeA.ref)
+      val _ = probeA.expectMessageType[Response.Attached]
+      mgr ! Request.Release("ch-stale-grace", "client-a")
+
+      val statesProbe = testKit.createTestProbe[Map[String, String]]()
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+        statesProbe.receiveMessage().get("ch-stale-grace") shouldBe Some("idle-grace")
+      }
+
+      // Session degrades while sitting in IdleGrace; next Acquire must evict and start a fresh tune
+      healthy.set(false)
+      mgr ! Request.Acquire("ch-stale-grace", "client-b", probeB.ref)
+      val _ = probeB.expectMessageType[Response.Attached]
+      val _ = teardownCount.get() shouldBe 1
+      runnerCalls.get() shouldBe 2
+    }
+
+    "tear down IdleGrace immediately on SessionUnhealthy while leaving Live sessions untouched" in {
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val teardownCount = new AtomicInteger(0)
+      val mgr = spawnManager(
+        startRunner = { (_, self) => selfRef.set(self) }
+      , idleGrace = 30.seconds
+      )
+      val probe = testKit.createTestProbe[Response.Acquire]()
+
+      mgr ! Request.Acquire("ch-unhealthy-cmd", "client-a", probe.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        selfRef.get() should not be null
+      }
+      val sessionMeta = meta("tok-cmd").copy(leaseId = "lease-cmd")
+      selfRef.get() ! Command.CheckIn("ch-unhealthy-cmd", sessionMeta, hubSource, () => { val _ = teardownCount.incrementAndGet() })
+      val _ = probe.expectMessageType[Response.Attached]
+
+      // While Live (client connected), SessionUnhealthy must NOT tear down the session
+      selfRef.get() ! Command.SessionUnhealthy("ch-unhealthy-cmd", "lease-cmd", "freeze-active")
+      Thread.sleep(100)
+      val _ = teardownCount.get() shouldBe 0
+
+      // Once in IdleGrace (0 clients), matching lease SessionUnhealthy tears down immediately
+      mgr ! Request.Release("ch-unhealthy-cmd", "client-a")
+      val statesProbe = testKit.createTestProbe[Map[String, String]]()
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+        statesProbe.receiveMessage().get("ch-unhealthy-cmd") shouldBe Some("idle-grace")
+      }
+
+      selfRef.get() ! Command.SessionUnhealthy("ch-unhealthy-cmd", "wrong-lease", "freeze-active")
+      Thread.sleep(50)
+      val _ = teardownCount.get() shouldBe 0
+
+      selfRef.get() ! Command.SessionUnhealthy("ch-unhealthy-cmd", "lease-cmd", "cold-retune-attempt-2")
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        teardownCount.get() shouldBe 1
+      }
+      mgr ! Request.GetActiveChannelStates(statesProbe.ref)
+      statesProbe.receiveMessage() shouldBe Map.empty
+    }
   }
 }

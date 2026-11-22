@@ -307,6 +307,7 @@ object MpegTsSync {
   , onAudioLossRetune: String => Unit = _ => ()
   , minLiveVideoFramesForAudioLoss: Long = AudioLossMonitor.DefaultMinLiveVideoFrames
   , clockNanos: () => Long = () => System.nanoTime()
+  , onFreezeStateChanged: Boolean => Unit = _ => ()
   ): Flow[ByteString, ByteString, NotUsed] =
     Flow.fromGraph(
       new CacheStage(
@@ -322,6 +323,7 @@ object MpegTsSync {
       , onAudioLossRetune
       , minLiveVideoFramesForAudioLoss
       , clockNanos
+      , onFreezeStateChanged
       )
     )
 
@@ -379,6 +381,7 @@ object MpegTsSync {
   , onAudioLossRetune: String => Unit
   , minLiveVideoFramesForAudioLoss: Long
   , clockNanos: () => Long
+  , onFreezeStateChanged: Boolean => Unit
   ) extends GraphStage[FlowShape[ByteString, ByteString]] {
     val in: Inlet[ByteString] = Inlet("MpegTsSync.in")
     val out: Outlet[ByteString] = Outlet("MpegTsSync.out")
@@ -1164,6 +1167,7 @@ object MpegTsSync {
                 , freezeTicksCount
                 )
                 freezeActive = false
+                onFreezeStateChanged(false)
                 freezeTicksCount = 0
                 pendingTimelineSync = true
                 mediaClockAnchorPts = OptPts.Empty
@@ -1399,8 +1403,9 @@ object MpegTsSync {
                 , videoSilenceNanos / 1000000L
                 , (ptsDeficitTicks * 1000L) / 90000L
                 )
+                freezeActive = true
+                onFreezeStateChanged(true)
               }
-              freezeActive = true
               audioLossState = audioLossState.onPause
               totalFreezeBursts += 1L
               val b = ByteString.newBuilder

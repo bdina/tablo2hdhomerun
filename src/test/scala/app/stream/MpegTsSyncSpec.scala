@@ -2728,5 +2728,43 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       val _ = collector.currentWindowStats().retunes shouldBe 1L
       postRetuneAudioCount should be >= 3
     }
+
+    "cacheFlow should invoke onFreezeStateChanged on freeze activation and live keyframe resumption" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x81)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val transitions = new java.util.concurrent.CopyOnWriteArrayList[Boolean]()
+
+      val (queue, done) = Source.queue[ByteString](bufferSize = 32)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 80.millis
+          , freezeTickInterval = 25.millis
+          , onFreezeStateChanged = frozen => { val _ = transitions.add(frozen) }
+          )
+        )
+        .toMat(Sink.ignore)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      val _ = queue.offer(
+        pat ++ pmt ++
+          buildVideoPesPacket(videoPid, pts = 90000L, cc = 0, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 90000L, cc = 0)
+      )
+      Thread.sleep(160L)
+      val _ = queue.offer(
+        buildVideoPesPacket(videoPid, pts = 117000L, cc = 1, isKeyframe = true) ++
+          buildAudioPesPacket(audioPid, pts = 117000L, cc = 1)
+      )
+      queue.complete()
+      val _ = done.futureValue
+
+      val _ = transitions.size() shouldBe 2
+      val _ = transitions.get(0) shouldBe true
+      transitions.get(1) shouldBe false
+    }
   }
 }
