@@ -65,6 +65,7 @@ final case class HlsStreamConfig(
   heartbeatSec: Int
 , pollFailuresMax: Int
 , recoveryLiveEdgeSegments: Int = 3
+, maxStallSec: Int = 60
 )
 
 final case class StreamConfig(
@@ -138,6 +139,7 @@ object AppConfig {
       heartbeatSec = getInt(get, "STREAM_HLS_HEARTBEAT_SEC", 60)
     , pollFailuresMax = getInt(get, "STREAM_HLS_POLL_FAILURES_MAX", 4)
     , recoveryLiveEdgeSegments = getInt(get, "STREAM_RECOVERY_LIVE_EDGE_SEGMENTS", 3)
+    , maxStallSec = getInt(get, "STREAM_HLS_MAX_STALL_SEC", 60)
     )
     val stream = StreamConfig(
       backend = getStreamBackend(get)

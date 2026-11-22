@@ -629,5 +629,63 @@ class ResilientHlsSourceSpec extends ScalaTestWithActorTestKit with AnyWordSpecL
       val _ = collector.currentWindowStats().retunes shouldBe 1L
       probe.cancel()
     }
+
+    "grow retry backoff exponentially when inner attempts take longer than minBackoff to fail" in {
+      val attempts = new AtomicInteger(0)
+      val attemptStarts = new java.util.concurrent.CopyOnWriteArrayList[Long]()
+      val attemptFailures = new java.util.concurrent.CopyOnWriteArrayList[Long]()
+      val recovered = ByteString("recovered-after-backoff")
+
+      val factory = () => {
+        val a = attempts.incrementAndGet()
+        val _ = attemptStarts.add(System.nanoTime())
+        if (a <= 3) {
+          Source.future(
+            org.apache.pekko.pattern.after(
+              120.millis
+            , system.classicSystem.scheduler
+            ) {
+              val _ = attemptFailures.add(System.nanoTime())
+              scala.concurrent.Future.failed(new RuntimeException(s"slow 503 attempt $a"))
+            }(using system.executionContext)
+          )
+        } else {
+          Source.single(recovered)
+        }
+      }
+
+      val wrappedSource = ResilientHlsSource(
+        factory
+      , "test-slow-fail-backoff"
+      , tuneTimeout = 500.millis
+      , retryDelay = 80.millis
+      , maxRetryDelay = 400.millis
+      , recoveryTimeout = 5.seconds
+      )
+
+      val probe = wrappedSource.runWith(TestSink[ByteString]())
+      val _ = probe.ensureSubscription()
+
+      var next = probe.requestNext(3.seconds)
+      while (next == ResilientHlsSource.MPEGTS_NULL_PACKET) {
+        next = probe.requestNext(3.seconds)
+      }
+      val _ = next.containsSlice(recovered) shouldBe true
+      val _ = probe.cancel()
+
+      val _ = attempts.get() shouldBe 4
+      val _ = attemptStarts.size() shouldBe 4
+      val _ = attemptFailures.size() shouldBe 3
+
+      val delay1Ms = (attemptStarts.get(1) - attemptFailures.get(0)) / 1000000L
+      val delay2Ms = (attemptStarts.get(2) - attemptFailures.get(1)) / 1000000L
+      val delay3Ms = (attemptStarts.get(3) - attemptFailures.get(2)) / 1000000L
+
+      // With retryDelay=80ms, maxRetryDelay=400ms, randomFactor=0.2:
+      // delay1 ~ 64..96ms, delay2 ~ 128..192ms, delay3 ~ 256..384ms.
+      val _ = delay2Ms should be > delay1Ms
+      val _ = delay3Ms should be > delay2Ms
+      delay3Ms should be >= 220L
+    }
   }
 }

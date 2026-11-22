@@ -43,6 +43,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.hls.heartbeatSec shouldBe 60
     val _ = config.stream.hls.pollFailuresMax shouldBe 4
     val _ = config.stream.hls.recoveryLiveEdgeSegments shouldBe 3
+    val _ = config.stream.hls.maxStallSec shouldBe 60
     val _ = config.mediaRoot shouldBe None
     val _ = loaded.tabloAuth.email shouldBe None
     val _ = loaded.tabloAuth.password shouldBe None
@@ -63,6 +64,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "STREAM_PRE_ROLL_INTERVAL_MS" -> "50",
       "STREAM_PRE_ROLL_PACKETS" -> "14",
       "STREAM_RECOVERY_LIVE_EDGE_SEGMENTS" -> "5",
+      "STREAM_HLS_MAX_STALL_SEC" -> "90",
       "STREAM_METRICS_INTERVAL_SEC" -> "15",
       "STREAM_FREEZE_THRESHOLD_SEC" -> "8",
       "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "45"
@@ -77,22 +79,28 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 90
     val _ = config.stream.resilient.enableSlateVideo shouldBe true
     val _ = config.stream.hls.recoveryLiveEdgeSegments shouldBe 5
+    val _ = config.stream.hls.maxStallSec shouldBe 90
     val _ = config.proxy.idleGraceSec shouldBe 60
     val _ = config.proxy.preRollIntervalMs shouldBe 50
     val _ = config.proxy.preRollPackets shouldBe 14
 
     val fallbackConfig = AppConfig.load(Map(
       "STREAM_STALL_TIMEOUT_SEC" -> "bad",
-      "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "bad"
+      "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "bad",
+      "STREAM_HLS_MAX_STALL_SEC" -> "bad"
     )).config
     val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 45
     val _ = fallbackConfig.stream.hls.recoveryLiveEdgeSegments shouldBe 3
+    val _ = fallbackConfig.stream.hls.maxStallSec shouldBe 60
     val _ = fallbackConfig.stream.audioLossTimeoutSec shouldBe 30
 
-    val disabledAudioLossConfig = AppConfig.load(Map(
-      "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "0"
+    val disabledConfig = AppConfig.load(Map(
+      "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "0",
+      "STREAM_HLS_MAX_STALL_SEC" -> "0"
     )).config
-    val _ = disabledAudioLossConfig.stream.audioLossTimeoutSec shouldBe 0  }
+    val _ = disabledConfig.stream.audioLossTimeoutSec shouldBe 0
+    disabledConfig.stream.hls.maxStallSec shouldBe 0
+  }
 
   it should "parse bool env vars" in {
     val config = AppConfig.load(Map(

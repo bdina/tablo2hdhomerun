@@ -532,5 +532,102 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     )
     resolved shouldBe HlsPlaylistPoller.Fail(err404)
   }
+
+  it should "stay open below maxStallSec, fail with PlaylistStalled at maxStallSec, and respect disabled maxStallSec" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.duration._
+
+    val pStalled = playlist(1, (1 to 36).map(i => s"seg$i.ts"))
+    val t0 = 10_000_000_000L
+    val state0 = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 37)
+
+    val raw1 = HlsPlaylistPoller.onPlaylist(state0, pStalled, defaultPollSec = 2, nowNanos = t0)
+    val state1 = raw1 match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs shouldBe empty
+        val _ = next.stallStartNanos shouldBe t0
+        next
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+
+    // 59s elapsed (< 60s): remains open
+    val t59 = t0 + 59.seconds.toNanos
+    val raw59 = HlsPlaylistPoller.onPlaylist(state1, pStalled, defaultPollSec = 2, nowNanos = t59)
+    var probeCalls = 0
+    val resolved59 = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(
+        raw59
+      , () => { probeCalls += 1; Future.successful(true) }
+      , state1
+      , maxStallSec = 60
+      , nowNanos = t59
+      )
+    , 2.seconds
+    )
+    val state59 = resolved59 match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs shouldBe empty
+        val _ = next.stallStartNanos shouldBe t0
+        next
+      case HlsPlaylistPoller.Fail(err) => fail(s"expected Emit at 59s, got Fail($err)")
+    }
+
+    // 60s elapsed (>= 60s) with maxStallSec = 0 (disabled): stays open
+    val t60 = t0 + 60.seconds.toNanos
+    val raw60Disabled = HlsPlaylistPoller.onPlaylistNotModified(state59, nowNanos = t60)
+    val resolvedDisabled = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(
+        raw60Disabled
+      , () => Future.successful(true)
+      , state59
+      , maxStallSec = 0
+      , nowNanos = t60
+      )
+    , 2.seconds
+    )
+    val _ = resolvedDisabled match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs shouldBe empty
+        next.stallStartNanos shouldBe t0
+      case HlsPlaylistPoller.Fail(err) => fail(s"expected Emit when disabled, got Fail($err)")
+    }
+
+    // 60s elapsed (>= 60s) with maxStallSec = 60: fails with PlaylistStalled(60) without invoking session probe
+    val raw60 = HlsPlaylistPoller.onPlaylist(state59.copy(stallPolls = 3), pStalled, defaultPollSec = 2, nowNanos = t60)
+    val resolved60 = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(
+        raw60
+      , () => { probeCalls += 1; Future.successful(true) }
+      , state59
+      , maxStallSec = 60
+      , nowNanos = t60
+      )
+    , 2.seconds
+    )
+    val _ = resolved60 shouldBe HlsPlaylistPoller.Fail(HlsError.PlaylistStalled(60))
+    probeCalls shouldBe 0
+  }
+
+  it should "reset stallStartNanos to 0 when a new segment advances" in {
+    val t0 = 20_000_000_000L
+    val pStalled = playlist(1, (1 to 36).map(i => s"seg$i.ts"))
+    val state0 = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 37)
+
+    val stalledState = HlsPlaylistPoller.onPlaylist(state0, pStalled, defaultPollSec = 2, nowNanos = t0) match {
+      case HlsPlaylistPoller.Emit(next, _) => next
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+    val _ = stalledState.stallStartNanos shouldBe t0
+
+    val pAdvanced = playlist(1, (1 to 37).map(i => s"seg$i.ts"))
+    HlsPlaylistPoller.onPlaylist(stalledState, pAdvanced, defaultPollSec = 2, nowNanos = t0 + 10_000_000_000L) match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs.map(_.sequence) shouldBe Seq(37)
+        val _ = next.stallPolls shouldBe 0
+        next.stallStartNanos shouldBe 0L
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+  }
 }
 

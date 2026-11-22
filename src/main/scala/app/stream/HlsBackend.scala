@@ -254,6 +254,7 @@ object HlsBackend extends StreamBackend {
               }
             , state
             , hlsConfig.pollFailuresMax
+            , hlsConfig.maxStallSec
             )
           }
           .flatMap { outcome =>

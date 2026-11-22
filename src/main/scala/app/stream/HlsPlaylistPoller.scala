@@ -1,6 +1,7 @@
 package app.stream
 
 import scala.concurrent.{ExecutionContext, Future}
+import scala.concurrent.duration._
 
 object HlsPlaylistPoller {
   val liveEdgeSegmentCount: Int = 3
@@ -30,6 +31,7 @@ object HlsPlaylistPoller {
   , lastModified: Option[String] = None
   , liveEdgeCount: Int = liveEdgeSegmentCount
   , lastSegmentDuration: Double = 0.0
+  , stallStartNanos: Long = 0L
   )
 
   enum Outcome derives CanEqual {
@@ -53,8 +55,14 @@ object HlsPlaylistPoller {
   , checkSessionAlive: () => Future[Boolean]
   , state: PollState = PollState("", 0, 0, 0, 0, false)
   , maxFetchFailures: Int = 4
+  , maxStallSec: Int = 0
+  , nowNanos: Long = System.nanoTime()
   )(using ec: ExecutionContext): Future[Outcome] =
     outcome match {
+      case Emit(next, segments)
+          if segments.isEmpty && maxStallSec > 0 && next.stallStartNanos > 0L &&
+            (nowNanos - next.stallStartNanos) >= maxStallSec.seconds.toNanos =>
+        Future.successful(Fail(HlsError.PlaylistStalled(maxStallSec)))
       case emit @ Emit(next, segments) if segments.isEmpty && shouldProbeSession(next) =>
         checkSessionAlive().map { alive =>
           if (alive) emit
@@ -70,6 +78,7 @@ object HlsPlaylistPoller {
                 fetchFailures = nextFailures
               , stallPolls = state.stallPolls + 1
               , lastAdvanced = false
+              , stallStartNanos = if (state.stallStartNanos > 0L) state.stallStartNanos else nowNanos
               )
             , Seq.empty
             )
@@ -145,6 +154,7 @@ object HlsPlaylistPoller {
     state: PollState
   , playlist: M3U8.Playlist
   , defaultPollSec: Int
+  , nowNanos: Long = System.nanoTime()
   ): Outcome = {
     if (playlist.isEndList) {
       Fail(HlsError.SessionEnded)
@@ -169,6 +179,10 @@ object HlsPlaylistPoller {
       val segments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
       val advanced = isFirstPoll || segments.nonEmpty || (newLastSeq > effectiveLastSeq)
       val nextStall = if (advanced) 0 else state.stallPolls + 1
+      val nextStallStartNanos =
+        if (nextStall == 0) 0L
+        else if (state.stallStartNanos > 0L) state.stallStartNanos
+        else nowNanos
       val nextTarget = if (playlist.targetDuration > 0) playlist.targetDuration else defaultPollSec
       val nextSegDuration = allSegments.lastOption.map(_.duration).filter(_ > 0.0).getOrElse(state.lastSegmentDuration)
       val playlistKeys = allSegments.map(segmentKey).toSet
@@ -184,6 +198,7 @@ object HlsPlaylistPoller {
         , emittedKeys = newEmittedKeys
         , lastAdvanced = advanced
         , lastSegmentDuration = nextSegDuration
+        , stallStartNanos = nextStallStartNanos
         )
       , segments
       )
@@ -216,12 +231,16 @@ object HlsPlaylistPoller {
   def onFetchError(state: PollState, maxFetchFailures: Int): Outcome =
     onFetchError(state, maxFetchFailures, HlsError.PollExhausted)
 
-  def onPlaylistNotModified(state: PollState): Outcome =
+  def onPlaylistNotModified(
+    state: PollState
+  , nowNanos: Long = System.nanoTime()
+  ): Outcome =
     Emit(
       state.copy(
         stallPolls = state.stallPolls + 1
       , fetchFailures = 0
       , lastAdvanced = false
+      , stallStartNanos = if (state.stallStartNanos > 0L) state.stallStartNanos else nowNanos
       )
     , Seq.empty
     )

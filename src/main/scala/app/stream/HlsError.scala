@@ -16,6 +16,7 @@ object HlsError {
   case object SessionEnded extends RuntimeException("playlist ended (EXT-X-ENDLIST)") with HlsError
   case object PollExhausted extends RuntimeException("playlist poll failures exhausted") with HlsError
   case object UnexpectedNotModified extends RuntimeException("unexpected 304 without validators") with HlsError
+  case class PlaylistStalled(seconds: Int) extends RuntimeException(s"playlist stalled for ${seconds}s") with HlsError
   case class SustainedAudioLoss(detail: String) extends RuntimeException(s"sustained audio loss: $detail") with HlsError
 }
 
