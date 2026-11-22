@@ -184,7 +184,7 @@ The native HLS backend (`STREAM_BACKEND=hls`, default) adds:
 - 4th gen watch-session expiry awareness before recovery retune, plus automatic Lighthouse cloud token refresh on `401`/`403`
 - 4th gen Tablo player-session keepalive (`POST /player/sessions/{token}/keepalive?lh=1`) both periodically and as an active liveness probe during playlist stalls or `404` responses
 - 4th gen session teardown (`DELETE /player/sessions/{token}`) when the client disconnects and idle grace expires
-- Cold retune (`WatchSession.coldRetune`) with exponential backoff (capped at `STREAM_MAX_RETRY_DELAY_SEC`, default 15s) when the Tablo closes a session
+- Cold retune (`WatchSession.coldRetune`) with true exponential backoff (capped at `STREAM_MAX_RETRY_DELAY_SEC`, default `15s`, with `tuneTimeout + maxRetryDelay` reset window via `e811d2f`) when the Tablo closes a session or an unchanged playlist exceeds `STREAM_HLS_MAX_STALL_SEC` (`60s` default); health-gated `IdleGrace` (`ecd3da8`) immediately tears down frozen or retuning leases on client disconnect (and evicts stale `IdleGrace` leases on reconnect) so background retunes cease when viewers leave
 - Sustained-audio-loss cold retune (`AudioLossMonitor` + `ResilientHlsSource.RetuneTrigger`, `STREAM_AUDIO_LOSS_TIMEOUT_SEC=30`) that recycles wedged Tablo `/watch` sessions if primary audio drops out during active live video (paused during freezes/replays, backed off up to `300s` on broadcaster outages)
 - Single resume prefix injection on retune: multi-PID discontinuity packets plus cached PAT/PMT tables so downstream decoders cleanly reset timelines
 - Decoupled audio `PUSI` alignment and codec-aware video I-Frame / GOP alignment (`alignToIFrame`) with synthesized MPEG-2 Sequence Header injection when needed
@@ -208,6 +208,7 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 | `STREAM_RECOVERY_LIVE_EDGE_SEGMENTS` | `3` | Number of live-edge segments (~7.5s cushion) fetched upon stream recovery to prime player/transcoder buffers |
 | `STREAM_HLS_HEARTBEAT_SEC` | `60` | Interval for HLS stream heartbeat DEBUG logs |
 | `STREAM_HLS_POLL_FAILURES_MAX` | `4` | Consecutive playlist fetch or keepalive probe failures before retune |
+| `STREAM_HLS_MAX_STALL_SEC` | `60` | Maximum seconds an unchanged HLS playlist may stall before triggering cold retune (`<= 0` disables cap) |
 
 ### Operational Stream Quality Metrics (`[stream:metrics]` & `GET /status.json`)
 
