@@ -53,6 +53,8 @@ object HlsBackend extends StreamBackend {
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   , metricsCollector: Option[StreamMetrics.HlsCollector] = None
+  , initialEmittedKeys: Set[String] = Set.empty
+  , onSegmentKeyCompleted: String => Unit = _ => ()
   )(using system: ActorSystem[?]): Source[ByteString, ?] = {
     given ec: scala.concurrent.ExecutionContext = system.executionContext
     given pekko.stream.Materializer = pekko.stream.SystemMaterializer(system).materializer
@@ -266,6 +268,13 @@ object HlsBackend extends StreamBackend {
                 if (next.stallPolls > state.stallPolls) {
                   metricsCollector.foreach(_.onStallPoll())
                 }
+                if (state.lastSeq == 0 && next.lastSeq > 0 && segments.isEmpty) {
+                  log.info(
+                    "[stream:hls] suppressing stale retune segments label={} throughSeq={}"
+                  , label
+                  , next.lastSeq - 1
+                  )
+                }
                 if (next.fetchFailures > state.fetchFailures && segments.isEmpty) {
                   log.info(
                     "[stream:hls] playlist fetch retry ({}/{}) label={}"
@@ -332,7 +341,7 @@ object HlsBackend extends StreamBackend {
       Source.futureSource(
         resolveMediaPlaylistUrl(playlistUrl).map { url =>
           log.debug("[stream:hls] resolved media playlist label={} url={}", label, url)
-          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount))(s => step(s))
+          Source.unfoldAsync(HlsPlaylistPoller.initial(url, initialSeq, liveEdgeCount, initialEmittedKeys))(s => step(s))
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
@@ -378,6 +387,7 @@ object HlsBackend extends StreamBackend {
                         }
                       }
                       metricsCollector.foreach(_.onSegmentCompleted(gapMs, isShortRead))
+                      onSegmentKeyCompleted(HlsPlaylistPoller.segmentKey(seg))
                       onSeqAdvanced(seg.sequence + 1)
                     case Failure(ex) =>
                       log.warn("[stream:hls] segment fetch aborted label={} seq={} error={}", label, seg.sequence, ex.getMessage)

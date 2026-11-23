@@ -45,8 +45,9 @@ object HlsPlaylistPoller {
     baseUrl: String
   , lastSeq: Int = 0
   , liveEdgeCount: Int = liveEdgeSegmentCount
+  , initialEmittedKeys: Set[String] = Set.empty
   ): PollState =
-    PollState(baseUrl, lastSeq, 0, 0, 0, false, liveEdgeCount = liveEdgeCount)
+    PollState(baseUrl, lastSeq, 0, 0, 0, false, emittedKeys = initialEmittedKeys, liveEdgeCount = liveEdgeCount)
 
   def shouldProbeSession(state: PollState): Boolean =
     state.stallPolls >= sessionProbeMinPolls &&
@@ -162,7 +163,9 @@ object HlsPlaylistPoller {
     } else {
       val allSegments = segmentInfos(state.baseUrl, playlist)
       val newLastSeq = playlist.mediaSequence + playlist.segments.size
-      val hasKnownEmittedKey = allSegments.exists(seg => state.emittedKeys.contains(segmentKey(seg)))
+      val maxKnownEmittedSeq =
+        allSegments.filter(seg => state.emittedKeys.contains(segmentKey(seg))).map(_.sequence).maxOption
+      val hasKnownEmittedKey = maxKnownEmittedSeq.isDefined
       val isReset =
         state.lastSeq > 0 &&
         allSegments.lastOption.exists { lastSeg =>
@@ -173,12 +176,15 @@ object HlsPlaylistPoller {
       val effectiveLastSeq = if (isReset) 0 else state.lastSeq
       val candidates = if (isFirstPoll) {
         val count = if (isReset) 1 else state.liveEdgeCount
-        allSegments.takeRight(count)
+        maxKnownEmittedSeq match {
+          case Some(knownSeq) => allSegments.filter(_.sequence > knownSeq).takeRight(count)
+          case None => allSegments.takeRight(count)
+        }
       } else {
         allSegments.filter(_.sequence >= effectiveLastSeq)
       }
       val segments = candidates.filter(seg => !state.emittedKeys.contains(segmentKey(seg)))
-      val advanced = isFirstPoll || segments.nonEmpty || (newLastSeq > effectiveLastSeq)
+      val advanced = segments.nonEmpty || (!hasKnownEmittedKey && (isFirstPoll || newLastSeq > effectiveLastSeq))
       val nextStall = if (advanced) 0 else state.stallPolls + 1
       val nextStallStartNanos =
         if (nextStall == 0) 0L

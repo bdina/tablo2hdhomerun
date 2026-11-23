@@ -23,6 +23,8 @@ object FFmpegBackend extends StreamBackend {
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   , metricsCollector: Option[StreamMetrics.HlsCollector] = None
+  , initialEmittedKeys: Set[String] = Set.empty
+  , onSegmentKeyCompleted: String => Unit = _ => ()
   )(using system: ActorSystem[?]): Source[ByteString, ?] = {
     given scala.concurrent.ExecutionContext = system.executionContext
     Source.lazySource { () =>

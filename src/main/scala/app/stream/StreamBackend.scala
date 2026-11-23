@@ -20,6 +20,8 @@ trait StreamBackend {
   , liveEdgeCount: Int = HlsPlaylistPoller.liveEdgeSegmentCount
   , checkSessionAlive: () => Future[Boolean] = () => Future.successful(true)
   , metricsCollector: Option[StreamMetrics.HlsCollector] = None
+  , initialEmittedKeys: Set[String] = Set.empty
+  , onSegmentKeyCompleted: String => Unit = _ => ()
   )(using system: ActorSystem[?]): Source[ByteString, ?]
   def name: String
 }

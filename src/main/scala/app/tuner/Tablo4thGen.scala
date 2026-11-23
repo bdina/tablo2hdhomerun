@@ -2145,6 +2145,7 @@ object Tablo4thGen {
           session: WatchSession.Session
         , streamKillSwitch: AtomicReference[Option[UniqueKillSwitch]]
         , lastSeqRef: java.util.concurrent.atomic.AtomicInteger
+        , recentEmittedKeys: AtomicReference[Vector[String]]
         , isRecovery: Boolean
         , checkSessionAlive: () => Future[Boolean]
         , onSegmentAdvanced: () => Unit
@@ -2160,6 +2161,7 @@ object Tablo4thGen {
           )
           val liveEdgeCount = if (isRecovery) HlsPlaylistPoller.recoveryLiveEdgeSegmentCount else HlsPlaylistPoller.liveEdgeSegmentCount
           val startingSeq = lastSeqRef.get()
+          val priorEmittedKeys = recentEmittedKeys.get().toSet
           StreamBackend()
             .stream(
               session.playlistUrl
@@ -2172,6 +2174,10 @@ object Tablo4thGen {
             , liveEdgeCount = liveEdgeCount
             , checkSessionAlive = checkSessionAlive
             , metricsCollector = Some(hlsCollector)
+            , initialEmittedKeys = priorEmittedKeys
+            , onSegmentKeyCompleted = key => {
+                val _ = recentEmittedKeys.updateAndGet(keys => (keys :+ key).takeRight(8))
+              }
             )
             .viaMat(KillSwitches.single)(Keep.right)
             .mapMaterializedValue { killSwitch =>
@@ -2184,6 +2190,7 @@ object Tablo4thGen {
           val currentSession = new AtomicReference[WatchSession.Session](firstSession)
           val streamKillSwitch = new AtomicReference[Option[UniqueKillSwitch]](None)
           val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
+          val recentEmittedKeys = new AtomicReference[Vector[String]](Vector.empty)
           val playlistRollover = new AtomicBoolean(false)
           val sessionClosedByTablo = new AtomicBoolean(false)
           val probeFailures = new java.util.concurrent.atomic.AtomicInteger(0)
@@ -2303,6 +2310,7 @@ object Tablo4thGen {
                 session
               , streamKillSwitch
               , lastSeqRef
+              , recentEmittedKeys
               , isRecovery = isRollover
               , checkSessionAlive = () => probeSessionAlive()
               , onSegmentAdvanced = () => inRecovery.set(false)
@@ -2368,6 +2376,7 @@ object Tablo4thGen {
                           newSession
                         , streamKillSwitch
                         , lastSeqRef
+                        , recentEmittedKeys
                         , isRecovery = true
                         , checkSessionAlive = () => probeSessionAlive()
                         , onSegmentAdvanced = () => inRecovery.set(false)

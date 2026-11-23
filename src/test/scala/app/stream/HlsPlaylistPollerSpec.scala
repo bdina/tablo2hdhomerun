@@ -675,5 +675,73 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
     }
   }
+
+  it should "suppress already-emitted stale segments across cold retunes and resume strictly on new content" in {
+    val seg955 = M3U8.Segment("/stream/segw.ts?sameToken", 1.23, None, Some((100L, 200L)))
+    val seg956 = M3U8.Segment("/stream/segw.ts?sameToken", 3.07, None, Some((300L, 400L)))
+    val seg957 = M3U8.Segment("/stream/segw.ts?sameToken", 3.30, None, Some((700L, 500L)))
+    val seg958 = M3U8.Segment("/stream/segw.ts?sameToken", 3.24, None, Some((1200L, 500L)))
+    val stalePlaylist = byteRangePlaylist(955, Seq(seg955, seg956, seg957))
+
+    val priorKey957 = HlsPlaylistPoller.segmentKey(
+      HlsPlaylistPoller.SegmentInfo("http://host/stream/segw.ts?sameToken", Some((700L, 500L)), 957, 3.30)
+    )
+    val t0 = 50_000_000_000L
+    // Even with only the final emitted key known and liveEdgeCount=3, maxKnownEmittedSeq prevents re-emitting 955..957
+    val recoveryState = HlsPlaylistPoller.initial(
+      "http://host/stream/pls.m3u8"
+    , lastSeq = 0
+    , liveEdgeCount = 3
+    , initialEmittedKeys = Set(priorKey957)
+    )
+
+    val afterStale = HlsPlaylistPoller.onPlaylist(recoveryState, stalePlaylist, defaultPollSec = 2, nowNanos = t0) match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs shouldBe empty
+        val _ = next.lastSeq shouldBe 958
+        val _ = next.stallPolls shouldBe 1
+        val _ = next.lastAdvanced shouldBe false
+        val _ = next.stallStartNanos shouldBe t0
+        next
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+
+    // When new segment 958 arrives on the same buffer, emit ONLY 958
+    val advancedPlaylist = byteRangePlaylist(955, Seq(seg955, seg956, seg957, seg958))
+    val _ = HlsPlaylistPoller.onPlaylist(afterStale, advancedPlaylist, defaultPollSec = 2, nowNanos = t0 + 5_000_000_000L) match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs.map(_.sequence) shouldBe Seq(958)
+        val _ = next.lastSeq shouldBe 959
+        val _ = next.stallPolls shouldBe 0
+        next.stallStartNanos shouldBe 0L
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+
+    // If 958 was already present on the first retune poll alongside 955..957, emit ONLY 958
+    val _ = HlsPlaylistPoller.onPlaylist(recoveryState, advancedPlaylist, defaultPollSec = 2, nowNanos = t0) match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs.map(_.sequence) shouldBe Seq(958)
+        val _ = next.lastSeq shouldBe 959
+        next.stallPolls shouldBe 0
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+
+    // When Tablo returns a brand-new segment file URL, emit all 3 live-edge segments immediately
+    val freshPlaylist = byteRangePlaylist(
+      1
+    , Seq(
+        M3U8.Segment("/stream/segw.ts?freshToken", 3.0, None, Some((0L, 400L)))
+      , M3U8.Segment("/stream/segw.ts?freshToken", 3.0, None, Some((400L, 400L)))
+      , M3U8.Segment("/stream/segw.ts?freshToken", 3.0, None, Some((800L, 400L)))
+      )
+    )
+    HlsPlaylistPoller.onPlaylist(recoveryState, freshPlaylist, defaultPollSec = 2, nowNanos = t0) match {
+      case HlsPlaylistPoller.Emit(next, segs) =>
+        val _ = segs.map(_.sequence) shouldBe Seq(1, 2, 3)
+        val _ = next.lastSeq shouldBe 4
+        next.stallPolls shouldBe 0
+      case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
+    }
+  }
 }
 
