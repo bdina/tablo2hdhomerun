@@ -655,6 +655,59 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     probeCalls shouldBe 0
   }
 
+  it should "report distinct ProbeReason values for unchanged stalls vs 404 Not Found and skip onProbe on maxStallSec" in {
+    import scala.concurrent.ExecutionContext.Implicits.global
+    import scala.concurrent.{Await, Future}
+    import scala.concurrent.duration._
+
+    val reasons = scala.collection.mutable.ListBuffer.empty[HlsPlaylistPoller.ProbeReason]
+    val stateBeforeProbe =
+      HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105).copy(stallPolls = HlsPlaylistPoller.sessionProbeMinPolls - 1)
+    val unchangedOutcome = HlsPlaylistPoller.onPlaylistNotModified(stateBeforeProbe)
+    val _ = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(
+        unchangedOutcome
+      , () => Future.successful(true)
+      , stateBeforeProbe
+      , onProbe = r => { val _ = reasons += r }
+      )
+    , 2.seconds
+    )
+
+    val err404 = HlsBackend.HlsError.PlaylistFetchError(org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound)
+    val raw404 = HlsPlaylistPoller.onFetchError(stateBeforeProbe, maxFetchFailures = 4, err404)
+    val _ = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(
+        raw404
+      , () => Future.successful(true)
+      , stateBeforeProbe
+      , maxFetchFailures = 4
+      , onProbe = r => { val _ = reasons += r }
+      )
+    , 2.seconds
+    )
+
+    val t0 = 10_000_000_000L
+    val t60 = t0 + 60.seconds.toNanos
+    val timedOutState = stateBeforeProbe.copy(stallStartNanos = t0)
+    val rawTimedOut = HlsPlaylistPoller.onPlaylistNotModified(timedOutState, nowNanos = t60)
+    val _ = Await.result(
+      HlsPlaylistPoller.resolveStallOutcome(
+        rawTimedOut
+      , () => Future.successful(true)
+      , timedOutState
+      , maxStallSec = 60
+      , nowNanos = t60
+      , onProbe = r => { val _ = reasons += r }
+      )
+    , 2.seconds
+    )
+
+    val _ = reasons.toList shouldBe List(HlsPlaylistPoller.ProbeReason.Unchanged, HlsPlaylistPoller.ProbeReason.NotFound)
+    val _ = HlsPlaylistPoller.ProbeReason.Unchanged.label shouldBe "unchanged"
+    HlsPlaylistPoller.ProbeReason.NotFound.label shouldBe "404"
+  }
+
   it should "reset stallStartNanos to 0 when a new segment advances" in {
     val t0 = 20_000_000_000L
     val pStalled = playlist(1, (1 to 36).map(i => s"seg$i.ts"))

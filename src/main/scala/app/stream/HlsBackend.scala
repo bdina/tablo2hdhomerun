@@ -245,18 +245,18 @@ object HlsBackend extends StreamBackend {
           .flatMap { rawOutcome =>
             HlsPlaylistPoller.resolveStallOutcome(
               rawOutcome
-            , () => {
-                log.info(
-                  "[stream:hls] playlist stalled, probing session liveness label={} stallPolls={} lastSeq={}"
-                , label
-                , state.stallPolls + 1
-                , state.lastSeq
-                )
-                checkSessionAlive()
-              }
+            , () => checkSessionAlive()
             , state
             , hlsConfig.pollFailuresMax
             , hlsConfig.maxStallSec
+            , onProbe = reason =>
+                log.info(
+                  "[stream:hls] playlist stalled, probing session liveness label={} reason={} stallPolls={} lastSeq={}"
+                , label
+                , reason.label
+                , state.stallPolls + 1
+                , state.lastSeq
+                )
             )
           }
           .flatMap { outcome =>

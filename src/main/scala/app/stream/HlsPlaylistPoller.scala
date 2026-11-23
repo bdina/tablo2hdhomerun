@@ -41,6 +41,11 @@ object HlsPlaylistPoller {
   }
   export Outcome.{Emit, Fail}
 
+  enum ProbeReason(val label: String) derives CanEqual {
+    case Unchanged extends ProbeReason("unchanged")
+    case NotFound extends ProbeReason("404")
+  }
+
   def initial(
     baseUrl: String
   , lastSeq: Int = 0
@@ -60,6 +65,7 @@ object HlsPlaylistPoller {
   , maxFetchFailures: Int = 4
   , maxStallSec: Int = 0
   , nowNanos: Long = System.nanoTime()
+  , onProbe: ProbeReason => Unit = _ => ()
   )(using ec: ExecutionContext): Future[Outcome] =
     outcome match {
       case Emit(next, segments)
@@ -67,12 +73,14 @@ object HlsPlaylistPoller {
             (nowNanos - next.stallStartNanos) >= maxStallSec.seconds.toNanos =>
         Future.successful(Fail(HlsError.PlaylistStalled(maxStallSec)))
       case emit @ Emit(next, segments) if segments.isEmpty && shouldProbeSession(next) =>
+        onProbe(ProbeReason.Unchanged)
         checkSessionAlive().map { alive =>
           if (alive) emit
           else Fail(HlsError.SessionEnded)
         }
       case fail @ Fail(HlsError.PlaylistFetchError(status))
           if status == org.apache.pekko.http.scaladsl.model.StatusCodes.NotFound =>
+        onProbe(ProbeReason.NotFound)
         checkSessionAlive().map { alive =>
           val nextFailures = state.fetchFailures + 1
           if (alive && nextFailures < maxFetchFailures) {
