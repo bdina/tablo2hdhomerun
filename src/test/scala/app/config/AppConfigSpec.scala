@@ -35,7 +35,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.freezeThresholdSec shouldBe 10
     val _ = config.stream.audioLossTimeoutSec shouldBe 30
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 45
-    val _ = config.stream.resilient.tuneTimeoutSec shouldBe 20
+    val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
     val _ = config.stream.resilient.retryDelaySec shouldBe 1
     val _ = config.stream.resilient.maxRetryDelaySec shouldBe 15
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 0
@@ -55,7 +55,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
   it should "parse integer env vars and fall back on invalid values" in {
     val config = AppConfig.load(Map(
       "STREAM_STALL_TIMEOUT_SEC" -> "12",
-      "STREAM_TUNE_TIMEOUT_SEC" -> "30",
+      "STREAM_TUNE_TIMEOUT_SEC" -> "45",
       "STREAM_RETRY_DELAY_SEC" -> "2",
       "STREAM_MAX_RETRY_DELAY_SEC" -> "120",
       "STREAM_RECOVERY_TIMEOUT_SEC" -> "90",
@@ -73,7 +73,7 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.stream.freezeThresholdSec shouldBe 8
     val _ = config.stream.audioLossTimeoutSec shouldBe 45
     val _ = config.stream.resilient.stallTimeoutSec shouldBe 12
-    val _ = config.stream.resilient.tuneTimeoutSec shouldBe 30
+    val _ = config.stream.resilient.tuneTimeoutSec shouldBe 45
     val _ = config.stream.resilient.retryDelaySec shouldBe 2
     val _ = config.stream.resilient.maxRetryDelaySec shouldBe 120
     val _ = config.stream.resilient.recoveryTimeoutSec shouldBe 90
@@ -86,10 +86,12 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
 
     val fallbackConfig = AppConfig.load(Map(
       "STREAM_STALL_TIMEOUT_SEC" -> "bad",
+      "STREAM_TUNE_TIMEOUT_SEC" -> "bad",
       "STREAM_AUDIO_LOSS_TIMEOUT_SEC" -> "bad",
       "STREAM_HLS_MAX_STALL_SEC" -> "bad"
     )).config
     val _ = fallbackConfig.stream.resilient.stallTimeoutSec shouldBe 45
+    val _ = fallbackConfig.stream.resilient.tuneTimeoutSec shouldBe 30
     val _ = fallbackConfig.stream.hls.recoveryLiveEdgeSegments shouldBe 3
     val _ = fallbackConfig.stream.hls.maxStallSec shouldBe 60
     val _ = fallbackConfig.stream.audioLossTimeoutSec shouldBe 30

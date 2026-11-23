@@ -1372,6 +1372,21 @@ object Tablo4thGen {
       )(using ec: scala.concurrent.ExecutionContext): Future[A] =
         if (sessionClosedByTablo) tune()
         else releaseThenTune(release, tune)
+
+      enum LateRetuneAction derives CanEqual {
+        case Accept
+        case ReleaseLeaked
+        case ReleaseSuperseded
+      }
+
+      def classifyColdRetuneCompletion(
+        attempt: Int
+      , currentAttempt: Int
+      , leaseStopped: Boolean
+      ): LateRetuneAction =
+        if (leaseStopped) LateRetuneAction.ReleaseLeaked
+        else if (attempt != currentAttempt) LateRetuneAction.ReleaseSuperseded
+        else LateRetuneAction.Accept
     }
 
     object SessionIds {
@@ -2312,18 +2327,53 @@ object Tablo4thGen {
                 , release = () => oldToken.map(endSession).getOrElse(Future.successful(()))
                 , tune = () => retuneWatchSession()
                 ).map { newSession =>
-                  currentSession.set(newSession)
-                  probeFailures.set(0)
-                  lastSeqRef.set(0)
-                  scheduleKeepalive()
-                  streamFromWatchSession(
-                    newSession
-                  , streamKillSwitch
-                  , lastSeqRef
-                  , isRecovery = true
-                  , checkSessionAlive = () => probeSessionAlive()
-                  , onSegmentAdvanced = () => inRecovery.set(false)
-                  )
+                  WatchSession.classifyColdRetuneCompletion(attempt, attemptCount.get(), leaseStopped.get()) match {
+                    case WatchSession.LateRetuneAction.ReleaseLeaked =>
+                      log.info(
+                        "[4thgen-channel] releasing late cold-retune session after teardown attempt={} channel={} leaseId={}"
+                      , attempt
+                      , channelDisplay
+                      , leaseId
+                      )
+                      endSessionIfNeeded(newSession.token, None)
+                      Source.empty
+                    case WatchSession.LateRetuneAction.ReleaseSuperseded =>
+                      log.info(
+                        "[4thgen-channel] discarding superseded cold-retune session attempt={} currentAttempt={} channel={} leaseId={}"
+                      , attempt
+                      , attemptCount.get()
+                      , channelDisplay
+                      , leaseId
+                      )
+                      if (newSession.token != currentSession.get().token) {
+                        endSessionIfNeeded(newSession.token, None)
+                      }
+                      Source.empty
+                    case WatchSession.LateRetuneAction.Accept =>
+                      currentSession.set(newSession)
+                      if (leaseStopped.get()) {
+                        log.info(
+                          "[4thgen-channel] releasing late cold-retune session after concurrent teardown attempt={} channel={} leaseId={}"
+                        , attempt
+                        , channelDisplay
+                        , leaseId
+                        )
+                        endSessionIfNeeded(newSession.token, None)
+                        Source.empty
+                      } else {
+                        probeFailures.set(0)
+                        lastSeqRef.set(0)
+                        scheduleKeepalive()
+                        streamFromWatchSession(
+                          newSession
+                        , streamKillSwitch
+                        , lastSeqRef
+                        , isRecovery = true
+                        , checkSessionAlive = () => probeSessionAlive()
+                        , onSegmentAdvanced = () => inRecovery.set(false)
+                        )
+                      }
+                  }
                 }(using ec)
               )
             }

@@ -424,6 +424,14 @@ class Tablo4thGenWatchSessionSpec extends AnyFlatSpec with Matchers with ScalaFu
     Tablo4thGen.Auth.selectProfileAndDevice(withDevices, None) shouldBe Tablo4thGen.Auth.SelectedTarget(profile, localDev)
   }
 
+  "WatchSession.classifyColdRetuneCompletion" should "accept current active attempt, release superseded attempts, and prioritize teardown release" in {
+    import Tablo4thGen.Channel.WatchSession.{LateRetuneAction, classifyColdRetuneCompletion}
+    val _ = classifyColdRetuneCompletion(attempt = 8, currentAttempt = 8, leaseStopped = false) shouldBe LateRetuneAction.Accept
+    val _ = classifyColdRetuneCompletion(attempt = 8, currentAttempt = 9, leaseStopped = false) shouldBe LateRetuneAction.ReleaseSuperseded
+    val _ = classifyColdRetuneCompletion(attempt = 8, currentAttempt = 8, leaseStopped = true) shouldBe LateRetuneAction.ReleaseLeaked
+    classifyColdRetuneCompletion(attempt = 8, currentAttempt = 9, leaseStopped = true) shouldBe LateRetuneAction.ReleaseLeaked
+  }
+
   "Tablo4thGen.Auth.initialize" should "return Failure(FourthGenError.MissingEmail) instead of throwing" in {
     val sys = org.apache.pekko.actor.typed.ActorSystem(
       org.apache.pekko.actor.typed.scaladsl.Behaviors.empty[Any]
