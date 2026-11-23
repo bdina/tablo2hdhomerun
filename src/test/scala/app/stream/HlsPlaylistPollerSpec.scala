@@ -329,7 +329,7 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
       case HlsPlaylistPoller.Fail(err) => fail(s"unexpected fail: $err")
     }
 
-    (1 to 4).foreach { expectedStallPolls =>
+    (1 to HlsPlaylistPoller.sessionProbeMinPolls).foreach { expectedStallPolls =>
       state = HlsPlaylistPoller.onPlaylist(state, stalledPlaylist, defaultPollSec = 2) match {
         case HlsPlaylistPoller.Emit(next, segs) =>
           val _ = segs shouldBe empty
@@ -429,18 +429,55 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     }
   }
 
-  "HlsPlaylistPoller.shouldProbeSession" should "trigger every 4th consecutive stall poll" in {
-    val base = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 10)
-    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 0)) shouldBe false
-    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 1)) shouldBe false
-    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 2)) shouldBe false
-    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 3)) shouldBe false
-    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 4)) shouldBe true
-    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 5)) shouldBe false
-    HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = 8)) shouldBe true
+  it should "use lastSegmentDuration even when targetDuration is smaller (Tablo TARGETDURATION:1)" in {
+    val cbsPlaylist = M3U8.Playlist(
+      targetDuration = 1
+    , mediaSequence = 1
+    , segments = Seq(
+        M3U8.Segment("segw.ts", 3.003, None, Some((0L, 4998732L)))
+      , M3U8.Segment("segw.ts", 3.003, None, Some((4998732L, 4714100L)))
+      )
+    , isEndList = false
+    )
+    val stateAfterCbs = HlsPlaylistPoller.onPlaylist(HlsPlaylistPoller.initial("http://host/pls.m3u8"), cbsPlaylist, defaultPollSec = 2) match {
+      case HlsPlaylistPoller.Emit(next, _) => next
+      case HlsPlaylistPoller.Fail(_) => fail("expected emit")
+    }
+    val _ = HlsPlaylistPoller.pollDelayMs(stateAfterCbs, playlistAdvanced = true, targetDurationSec = 1, defaultPollSec = 2) shouldBe 2252L
+
+    val coziState = stateAfterCbs.copy(lastSegmentDuration = 2.002)
+    val _ = HlsPlaylistPoller.pollDelayMs(coziState, playlistAdvanced = true, targetDurationSec = 1, defaultPollSec = 2) shouldBe 1501L
+
+    val exactTargetState = stateAfterCbs.copy(lastSegmentDuration = 6.0)
+    val _ = HlsPlaylistPoller.pollDelayMs(exactTargetState, playlistAdvanced = true, targetDurationSec = 6, defaultPollSec = 2) shouldBe 4500L
+
+    val shortSegState = stateAfterCbs.copy(lastSegmentDuration = 0.2)
+    val _ = HlsPlaylistPoller.pollDelayMs(shortSegState, playlistAdvanced = true, targetDurationSec = 1, defaultPollSec = 2) shouldBe HlsPlaylistPoller.pollDelayMinMs
+
+    val longSegState = stateAfterCbs.copy(lastSegmentDuration = 30.0)
+    val _ = HlsPlaylistPoller.pollDelayMs(longSegState, playlistAdvanced = true, targetDurationSec = 10, defaultPollSec = 2) shouldBe HlsPlaylistPoller.pollDelayMaxMs
+
+    val zeroSegState = stateAfterCbs.copy(lastSegmentDuration = 0.0)
+    val _ = HlsPlaylistPoller.pollDelayMs(zeroSegState, playlistAdvanced = true, targetDurationSec = 4, defaultPollSec = 2) shouldBe 4000L
+
+    val nonFiniteState = stateAfterCbs.copy(lastSegmentDuration = Double.PositiveInfinity)
+    HlsPlaylistPoller.pollDelayMs(nonFiniteState, playlistAdvanced = true, targetDurationSec = 4, defaultPollSec = 2) shouldBe 4000L
   }
 
-  "HlsPlaylistPoller.resolveStallOutcome" should "probe session on 4th stall poll and continue emitting when session is alive" in {
+  "HlsPlaylistPoller.shouldProbeSession" should "require sessionProbeMinPolls before probing every sessionProbeIntervalPolls" in {
+    val base = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 10)
+    (0 until HlsPlaylistPoller.sessionProbeMinPolls).foreach { n =>
+      val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = n)) shouldBe false
+    }
+    val min = HlsPlaylistPoller.sessionProbeMinPolls
+    val interval = HlsPlaylistPoller.sessionProbeIntervalPolls
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = min)) shouldBe true
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = min + 1)) shouldBe false
+    val _ = HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = min + interval - 1)) shouldBe false
+    HlsPlaylistPoller.shouldProbeSession(base.copy(stallPolls = min + interval)) shouldBe true
+  }
+
+  "HlsPlaylistPoller.resolveStallOutcome" should "probe session at sessionProbeMinPolls and continue emitting when session is alive" in {
     import scala.concurrent.ExecutionContext.Implicits.global
     import scala.concurrent.{Await, Future}
     import scala.concurrent.duration._
@@ -449,7 +486,7 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     val pStalled = playlist(102, Seq("seg102.ts", "seg103.ts", "seg104.ts"))
     var state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105)
 
-    (1 to 4).foreach { i =>
+    (1 to HlsPlaylistPoller.sessionProbeMinPolls).foreach { i =>
       val raw = HlsPlaylistPoller.onPlaylist(state, pStalled, defaultPollSec = 2)
       val resolved = Await.result(
         HlsPlaylistPoller.resolveStallOutcome(raw, () => { probeCalls += 1; Future.successful(true) })
@@ -459,6 +496,9 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
         case HlsPlaylistPoller.Emit(next, segments) =>
           val _ = segments shouldBe empty
           val _ = next.stallPolls shouldBe i
+          if (i < HlsPlaylistPoller.sessionProbeMinPolls) {
+            val _ = probeCalls shouldBe 0
+          }
           state = next
         case HlsPlaylistPoller.Fail(err) =>
           fail(s"unexpected failure on poll $i: $err")
@@ -467,13 +507,14 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     probeCalls shouldBe 1
   }
 
-  it should "fail with SessionEnded when session probe returns false on 4th stall poll" in {
+  it should "fail with SessionEnded when session probe returns false at sessionProbeMinPolls" in {
     import scala.concurrent.ExecutionContext.Implicits.global
     import scala.concurrent.{Await, Future}
     import scala.concurrent.duration._
 
-    val stateAt3 = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105).copy(stallPolls = 3)
-    val raw = HlsPlaylistPoller.onPlaylistNotModified(stateAt3)
+    val stateBeforeProbe =
+      HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 105).copy(stallPolls = HlsPlaylistPoller.sessionProbeMinPolls - 1)
+    val raw = HlsPlaylistPoller.onPlaylistNotModified(stateBeforeProbe)
     val resolved = Await.result(
       HlsPlaylistPoller.resolveStallOutcome(raw, () => Future.successful(false))
     , 2.seconds
@@ -594,7 +635,12 @@ class HlsPlaylistPollerSpec extends AnyFlatSpec with Matchers {
     }
 
     // 60s elapsed (>= 60s) with maxStallSec = 60: fails with PlaylistStalled(60) without invoking session probe
-    val raw60 = HlsPlaylistPoller.onPlaylist(state59.copy(stallPolls = 3), pStalled, defaultPollSec = 2, nowNanos = t60)
+    val raw60 = HlsPlaylistPoller.onPlaylist(
+      state59.copy(stallPolls = HlsPlaylistPoller.sessionProbeMinPolls - 1)
+    , pStalled
+    , defaultPollSec = 2
+    , nowNanos = t60
+    )
     val resolved60 = Await.result(
       HlsPlaylistPoller.resolveStallOutcome(
         raw60

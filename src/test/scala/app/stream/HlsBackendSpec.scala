@@ -63,7 +63,7 @@ class HlsBackendSpec extends AnyFlatSpec with Matchers with ScalaFutures {
   it should "propagate SessionEnded when stall probe reports session closed" in {
     import scala.concurrent.ExecutionContext.Implicits.global
     import scala.concurrent.Future
-    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 10).copy(stallPolls = 3)
+    val state = HlsPlaylistPoller.initial("http://host/pl.m3u8", lastSeq = 10).copy(stallPolls = HlsPlaylistPoller.sessionProbeMinPolls - 1)
     val rawOutcome = HlsPlaylistPoller.onPlaylistNotModified(state)
     val failed = HlsPlaylistPoller
       .resolveStallOutcome(rawOutcome, () => Future.successful(false))

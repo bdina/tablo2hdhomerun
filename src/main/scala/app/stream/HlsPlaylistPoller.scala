@@ -6,6 +6,7 @@ import scala.concurrent.duration._
 object HlsPlaylistPoller {
   val liveEdgeSegmentCount: Int = 3
   val defaultRecoveryLiveEdgeSegmentCount: Int = 3
+  val sessionProbeMinPolls: Int = 12
   val sessionProbeIntervalPolls: Int = 4
 
   def recoveryLiveEdgeSegmentCount: Int =
@@ -48,7 +49,8 @@ object HlsPlaylistPoller {
     PollState(baseUrl, lastSeq, 0, 0, 0, false, liveEdgeCount = liveEdgeCount)
 
   def shouldProbeSession(state: PollState): Boolean =
-    state.stallPolls > 0 && (state.stallPolls % sessionProbeIntervalPolls == 0)
+    state.stallPolls >= sessionProbeMinPolls &&
+      ((state.stallPolls - sessionProbeMinPolls) % sessionProbeIntervalPolls == 0)
 
   def resolveStallOutcome(
     outcome: Outcome
@@ -119,9 +121,8 @@ object HlsPlaylistPoller {
   ): Long = {
     if (state.lastSeq == 0) 0L
     else if (!playlistAdvanced) pollDelayMinMs
-    else if (state.lastSegmentDuration > 0.0 && state.lastSegmentDuration < targetDurationSec.toDouble) {
-      val segMs = (state.lastSegmentDuration * 1000.0).toLong
-      val rawMs = (segMs * 3L) / 4L
+    else if (state.lastSegmentDuration.isFinite && state.lastSegmentDuration > 0.0) {
+      val rawMs = (state.lastSegmentDuration * 750.0).toLong
       rawMs.max(pollDelayMinMs).min(pollDelayMaxMs)
     } else {
       pollDelaySec(state, playlistAdvanced, targetDurationSec, defaultPollSec).toLong * 1000L

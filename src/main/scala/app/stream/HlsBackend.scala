@@ -275,7 +275,7 @@ object HlsBackend extends StreamBackend {
                   )
                 }
                 segments.headOption.foreach { head =>
-                  if (state.stallPolls >= HlsPlaylistPoller.sessionProbeIntervalPolls) {
+                  if (state.stallPolls >= HlsPlaylistPoller.sessionProbeMinPolls) {
                     log.info(
                       "[stream:hls] playlist resumed after stall label={} stallPolls={} seq={}"
                     , label
