@@ -83,8 +83,8 @@ followed by 1.5s–2.4s polling intervals, the freeze threshold defaults to `10s
 so synthetic frames are never injected between healthy HLS segments and leading audio/video packets of subsequent segments are never gated.
 During normal inter-segment polling intervals and brief RF pauses (`< 10s`), `ResilientHlsSource.keepAlive` emits standard `0x1FFF` null packets every 40ms
 while client decoders naturally hold the last decoded frame. When upstream pauses or media-clock deficits reach `freezeThreshold` (`>= 10s` by default),
-`FreezeFramePacer` emits live-compatible `PAT`/`PMT`, MPEG-2 repeat/skip P-frames (or H.264 keepalive units), and silent AC-3 (`0x0B77` with valid CRC-16)
-or ADTS AAC frames every 100ms so downstream Plex ingest grabbers (`-codec copy -f ssegment`) keep segmenting without timing out.
+`FreezeFramePacer` emits live-compatible `PAT`/`PMT`, MPEG-2 repeat/skip P-frames (or H.264 keepalive units), and exact codec-rate silent AC-3 (`0x0B77` with valid CRC-16, `2880` ticks/frame)
+or ADTS AAC (`1920` ticks/frame at `48 kHz`, `FreezeFramePacer.audioFrameStepTicks` per `f415a15`) frames paced from each PID's outbound audio PTS cursor every 100ms so downstream Plex ingest grabbers (`-codec copy -f ssegment`) keep segmenting without timing out or drifting A/V sync (`f415a15`). During non-frozen live video, `CacheStage.maybeFillLiveAudioGaps` (`b1188e5`) smoothly bridges `>= 1.5s` audio gaps/wedges on learned audio PIDs (`250 ms` behind video) so Plex's `-codec:a copy` muxer never latches a permanent A/V offset while leaving `AudioLossMonitor` and `windowAudioFramesClean` metrics untouched.
 Pacer activation is strictly **video-anchored** (`lastLiveDataNanos` updates solely on emitted live video packets `!freezeActive && !droppingVideoSlice`),
 so incoming PAT/PMT, audio, or discarded packets cannot reset the pacer. Furthermore, `CacheStage` anchors a real-time media clock
 (`mediaClockAnchorPts`, `mediaClockAnchorNanos`): when upstream segment trickle causes `lastOutputPts` to fall behind wall clock by
