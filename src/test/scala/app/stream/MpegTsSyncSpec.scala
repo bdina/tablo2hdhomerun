@@ -2874,6 +2874,142 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       retuneDetails.get(0) should include("droppedAudioFrames=0")
     }
 
+    "cacheFlow should bridge sustained live-video audio wedge with silent ADTS filler while keeping AudioLossMonitor and metrics honest" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x0F)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
+      val virtualNowNanos = new java.util.concurrent.atomic.AtomicLong(50_000_000_000L)
+      val retuneDetails = new java.util.concurrent.CopyOnWriteArrayList[String]()
+
+      val chunks = Vector.newBuilder[ByteString]
+      // Start clean so ADTS 48 kHz format and initial audio PTS are learned
+      chunks += (
+        pat ++ pmt ++
+          buildVideoPesPacket(videoPid, pts = 900000L, cc = 0, isKeyframe = true) ++
+          buildAdtsAudioPesPacket(audioPid, pts = 900000L, cc = 0) ++
+          buildVideoPesPacket(videoPid, pts = 903003L, cc = 1, isKeyframe = false, sliceRow = Some(1)) ++
+          buildAdtsAudioPesPacket(audioPid, pts = 901920L, cc = 1)
+      )
+
+      // 90 frames (~3.0s) of live 30fps video while Tablo audio PTS is wedged -500,000 ticks behind (scrubbed)
+      var i = 0
+      while (i < 90) {
+        val vPts = 906006L + (i.toLong * 3003L)
+        val wedgedAudioPts = vPts - 500000L
+        chunks += (
+          buildVideoPesPacket(videoPid, pts = vPts, cc = (2 + i) & 0x0F, isKeyframe = (i % 15 == 0), sliceRow = Some(1)) ++
+            buildAdtsAudioPesPacket(audioPid, pts = wedgedAudioPts, cc = (2 + i) & 0x0F)
+        )
+        i += 1
+      }
+
+      // Live audio recovers cleanly at current video PTS
+      val recoveryVideoPts = 906006L + (90L * 3003L)
+      chunks += (
+        buildVideoPesPacket(videoPid, pts = recoveryVideoPts, cc = 12, isKeyframe = true) ++
+          buildAdtsAudioPesPacket(audioPid, pts = recoveryVideoPts - 3000L, cc = 12) ++
+          buildAdtsAudioPesPacket(audioPid, pts = recoveryVideoPts - 1080L, cc = 13)
+      )
+
+      val emitted = Source(chunks.result())
+        .map { chunk =>
+          val _ = virtualNowNanos.addAndGet(33_366_667L)
+          chunk
+        }
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 10.seconds
+          , freezeTickInterval = 10.seconds
+          , latestMetricsRef = Some(latestMetricsRef)
+          , audioLossTimeout = 1.second
+          , onAudioLossRetune = detail => { val _ = retuneDetails.add(detail) }
+          , minLiveVideoFramesForAudioLoss = 10L
+          , clockNanos = () => virtualNowNanos.get()
+          )
+        )
+        .runWith(Sink.seq)
+        .futureValue
+        .foldLeft(ByteString.empty)(_ ++ _)
+
+      // AudioLossMonitor must STILL detect the sustained audio wedge and trigger retune!
+      val _ = retuneDetails.size() shouldBe 1
+      val _ = retuneDetails.get(0) should include("ptsScrubbedAudio=")
+
+      // Metrics must still report the 90 scrubbed live audio packets honestly (not inflated by silent filler)
+      val snap = latestMetricsRef.get()
+      val _ = snap.ptsScrubs should be >= 90L
+      val _ = snap.audioFramesClean should be <= 5L
+
+      // Inspect emitted audio packets: strictly continuous CC, strictly monotonic PTS, no gap > 2.0s, bridged to within 300ms of recovery video!
+      val pktCount = emitted.length / 188
+      val audioPtsList = scala.collection.mutable.ArrayBuffer.empty[Long]
+      var lastAudioCc = -1
+      var p = 0
+      while (p < pktCount) {
+        val pkt = emitted.slice(p * 188, (p + 1) * 188).toArray
+        val pid = ((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF)
+        if (pid == audioPid) {
+          val cc = pkt(3) & 0x0F
+          if (lastAudioCc >= 0) {
+            val _ = cc shouldBe ((lastAudioCc + 1) & 0x0F)
+          }
+          lastAudioCc = cc
+          if ((pkt(1) & 0x40) != 0) {
+            val pesOff = FreezeFramePacer.findPesHeaderOffset(pkt, 0)
+            if (pesOff >= 0) {
+              val pts = FreezeFramePacer.readPesPts(pkt, pesOff, 188)
+              if (pts >= 0L) audioPtsList += pts
+            }
+          }
+        }
+        p += 1
+      }
+
+      // ~3.0s at 46.875 fps -> well over 100 silent ADTS frames emitted during the 3s wedge
+      val _ = audioPtsList.size should be >= 120
+      var j = 1
+      while (j < audioPtsList.size) {
+        val diff = audioPtsList(j) - audioPtsList(j - 1)
+        val _ = diff should be > 0L
+        val _ = diff should be <= 27000L // max step <= 300ms (250ms headroom splice on live resume)
+        j += 1
+      }
+      audioPtsList.last shouldBe (recoveryVideoPts - 1080L)
+    }
+
+    "cacheFlow should not inject live audio gap-fill during healthy playback with normal 300ms A/V interleaving" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(0x0100, videoPid, videoPid, 0x02, audioPid, 0x0F)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val packets = Vector.newBuilder[ByteString]
+      packets += pat
+      packets += pmt
+      // 45 frames (~1.5s) where live audio naturally lags video by 300ms (27,000 ticks)
+      var i = 0
+      while (i < 45) {
+        val vPts = 900000L + (i.toLong * 3003L)
+        packets += buildVideoPesPacket(videoPid, pts = vPts, cc = i & 0x0F, isKeyframe = (i % 15 == 0), sliceRow = Some(1))
+        packets += buildAdtsAudioPesPacket(audioPid, pts = vPts - 27000L, cc = i & 0x0F)
+        i += 1
+      }
+
+      val emitted = Source(packets.result())
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef, freezeThreshold = 10.seconds, freezeTickInterval = 10.seconds))
+        .runWith(Sink.seq)
+        .futureValue
+        .foldLeft(ByteString.empty)(_ ++ _)
+
+      // Exactly 2 + 90 = 92 packets emitted (zero synthetic audio filler injected)
+      (emitted.length / 188) shouldBe 92
+    }
+
     "cacheFlow should not falsely trigger onAudioLossRetune when secondary audio PID fails while primary audio is clean" in {
       val videoPid = 0x0101
       val primaryAudioPid = 0x0102

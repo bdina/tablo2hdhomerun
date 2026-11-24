@@ -565,9 +565,14 @@ object MpegTsSync {
       private var activeAudioFrameCount: Int = 0
       private val MaxAudioBridgeJumpTicks: Long = 360000L
       private val MaxSilentAudioFramesPerBurst: Int = 96
+      private val LiveAudioGapThresholdTicks: Long = 135000L
+      private val LiveAudioGapHeadroomTicks: Long = 22500L
+      private val MinVideoFramesForAudioGapFill: Long = 30L
       private var audioCursorPids = new Array[Int](8)
       private var audioCursorLastPts = Array.fill[Long](8)(OptPts.EmptyRaw)
       private var audioCursorFlags = new Array[Byte](8)
+      private var audioCursorVideoFramesSince = new Array[Long](8)
+      private var audioCursorGapFillFrames = new Array[Long](8)
       private var audioCursorCount: Int = 0
       private var windowKeyframes: Long = 0L
       private var windowTei: Long = 0L
@@ -645,17 +650,25 @@ object MpegTsSync {
             val grownPids = new Array[Int](newLen)
             val grownPts = Array.fill[Long](newLen)(OptPts.EmptyRaw)
             val grownFlags = new Array[Byte](newLen)
+            val grownVideoFrames = new Array[Long](newLen)
+            val grownGapFrames = new Array[Long](newLen)
             System.arraycopy(audioCursorPids, 0, grownPids, 0, audioCursorCount)
             System.arraycopy(audioCursorLastPts, 0, grownPts, 0, audioCursorCount)
             System.arraycopy(audioCursorFlags, 0, grownFlags, 0, audioCursorCount)
+            System.arraycopy(audioCursorVideoFramesSince, 0, grownVideoFrames, 0, audioCursorCount)
+            System.arraycopy(audioCursorGapFillFrames, 0, grownGapFrames, 0, audioCursorCount)
             audioCursorPids = grownPids
             audioCursorLastPts = grownPts
             audioCursorFlags = grownFlags
+            audioCursorVideoFramesSince = grownVideoFrames
+            audioCursorGapFillFrames = grownGapFrames
           }
           val idx = audioCursorCount
           audioCursorPids(idx) = pid
           audioCursorLastPts(idx) = OptPts.EmptyRaw
           audioCursorFlags(idx) = 0.toByte
+          audioCursorVideoFramesSince(idx) = 0L
+          audioCursorGapFillFrames(idx) = 0L
           audioCursorCount += 1
           idx
         }
@@ -692,6 +705,64 @@ object MpegTsSync {
           if (synthetic) (audioCursorFlags(idx) | 0x01).toByte
           else (audioCursorFlags(idx) & ~0x01).toByte
       }
+
+      private def clearAllAudioGapFill(): Unit = {
+        var i = 0
+        while (i < audioCursorCount) {
+          audioCursorFlags(i) = (audioCursorFlags(i) & ~0x04).toByte
+          audioCursorVideoFramesSince(i) = 0L
+          audioCursorGapFillFrames(i) = 0L
+          i += 1
+        }
+      }
+
+      private def maybeFillLiveAudioGaps(
+        headers: CachedHeaders
+      , outputBuilder: org.apache.pekko.util.ByteStringBuilder
+      ): Unit =
+        if (seenLiveKeyframe && freezeThreshold.toNanos > 0L && lastOutputPts.isDefined && headers.audioPids.nonEmpty) {
+          val videoPts = lastOutputPts.get
+          headers.audioPids.foreach { apid =>
+            val idx = findAudioCursorIndex(apid)
+            if (idx >= 0 && learnedAudioFormats.contains(apid)) {
+              val lastOpt = OptPts.fromRaw(audioCursorLastPts(idx))
+              if (lastOpt.isDefined) {
+                audioCursorVideoFramesSince(idx) += 1L
+                val lagTicks = videoPts.signedDiff(lastOpt.rawValue)
+                val active = (audioCursorFlags(idx) & 0x04) != 0
+                val shouldActivate =
+                  !active &&
+                    lagTicks >= LiveAudioGapThresholdTicks &&
+                    (isDroppingAudioPid(apid) || audioCursorVideoFramesSince(idx) >= MinVideoFramesForAudioGapFill) &&
+                    (lagTicks <= MaxAudioBridgeJumpTicks || isDroppingAudioPid(apid))
+                if (shouldActivate) {
+                  audioCursorFlags(idx) = (audioCursorFlags(idx) | 0x04).toByte
+                  audioCursorGapFillFrames(idx) = 0L
+                  log.info(
+                    "[mpegts] live audio gap-fill activated{} pid={} lagMs={}"
+                  , labelPrefix
+                  , apid
+                  , (lagTicks * 1000L) / 90000L
+                  )
+                }
+                if ((audioCursorFlags(idx) & 0x04) != 0) {
+                  val targetPts = videoPts.advance(-LiveAudioGapHeadroomTicks)
+                  val emitted = emitSilentAudioUpTo(
+                    apid
+                  , headers.audioStreamTypes.get(apid)
+                  , learnedAudioFormats.get(apid)
+                  , targetPts
+                  , MaxSilentAudioFramesPerBurst
+                  , outputBuilder
+                  )
+                  if (emitted > 0) {
+                    audioCursorGapFillFrames(idx) += emitted.toLong
+                  }
+                }
+              }
+            }
+          }
+        }
 
       private def emitSilentAudioUpTo(
         apid: Int
@@ -1561,6 +1632,9 @@ object MpegTsSync {
                   }
                 }
                 emitWithOutboundCc(arr, pos, pid, hasPayload = (pktAfc == 1 || pktAfc == 3), outputBuilder)
+                if (hasVideoPesStart) {
+                  maybeFillLiveAudioGaps(updated, outputBuilder)
+                }
               }
             }
           } else if (updated.audioPids.contains(pid)) {
@@ -1642,6 +1716,18 @@ object MpegTsSync {
                   val _ = outputBuilder ++= MPEGTS_NULL_PACKET
                 } else {
                   if (outAudioPts.isDefined) {
+                    val idx = ensureAudioCursorIndex(pid)
+                    if ((audioCursorFlags(idx) & 0x04) != 0) {
+                      log.info(
+                        "[mpegts] live audio resumed after gap-fill{} pid={} silentFrames={}"
+                      , labelPrefix
+                      , pid
+                      , audioCursorGapFillFrames(idx)
+                      )
+                      audioCursorFlags(idx) = (audioCursorFlags(idx) & ~0x04).toByte
+                      audioCursorGapFillFrames(idx) = 0L
+                    }
+                    audioCursorVideoFramesSince(idx) = 0L
                     setLastEmittedAudioPts(pid, outAudioPts.rawValue, synthetic = false)
                   }
                   if (updated.audioPids.headOption.contains(pid)) {
@@ -1706,6 +1792,7 @@ object MpegTsSync {
                 , (ptsDeficitTicks * 1000L) / 90000L
                 )
                 freezeActive = true
+                clearAllAudioGapFill()
                 onFreezeStateChanged(true)
               }
               audioLossState = audioLossState.onPause
