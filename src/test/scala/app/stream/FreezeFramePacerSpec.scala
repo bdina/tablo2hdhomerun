@@ -810,6 +810,22 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val es = pesOffset + 9 + 5
       (arr(es) == 0xFF.toByte && (arr(es + 1) & 0xF6) == 0xF0) shouldBe true
     }
+
+    "compute exact audioFrameStepTicks for ADTS sample rates and AC-3" in {
+      val adts48k = FreezeFramePacer.AdtsFormat(ByteString(0xFF.toByte, 0xF1.toByte, 0x4C.toByte, 0x80.toByte, 0x01.toByte, 0xBF.toByte, 0xFC.toByte))
+      val adts44k = FreezeFramePacer.AdtsFormat(ByteString(0xFF.toByte, 0xF1.toByte, 0x50.toByte, 0x80.toByte, 0x01.toByte, 0xBF.toByte, 0xFC.toByte))
+      val adts32k = FreezeFramePacer.AdtsFormat(ByteString(0xFF.toByte, 0xF1.toByte, 0x54.toByte, 0x80.toByte, 0x01.toByte, 0xBF.toByte, 0xFC.toByte))
+      val adtsBadIdx = FreezeFramePacer.AdtsFormat(ByteString(0xFF.toByte, 0xF1.toByte, 0x7C.toByte, 0x80.toByte, 0x01.toByte, 0xBF.toByte, 0xFC.toByte))
+      val ac3Fmt = FreezeFramePacer.Ac3Format(0, 4, 8, 0, 2)
+
+      val _ = FreezeFramePacer.audioFrameStepTicks(Some(0x0F), Some(adts48k)) shouldBe 1920L
+      val _ = FreezeFramePacer.audioFrameStepTicks(Some(0x0F), Some(adts44k)) shouldBe 2090L
+      val _ = FreezeFramePacer.audioFrameStepTicks(Some(0x0F), Some(adts32k)) shouldBe 2880L
+      val _ = FreezeFramePacer.audioFrameStepTicks(Some(0x0F), Some(adtsBadIdx)) shouldBe FreezeFramePacer.AdtsStepTicks
+      val _ = FreezeFramePacer.audioFrameStepTicks(Some(0x0F), None) shouldBe FreezeFramePacer.AdtsStepTicks
+      val _ = FreezeFramePacer.audioFrameStepTicks(Some(0x81), Some(ac3Fmt)) shouldBe FreezeFramePacer.Ac3StepTicks
+      FreezeFramePacer.audioFrameStepTicks(Some(0x81), None) shouldBe FreezeFramePacer.Ac3StepTicks
+    }
   }
 
   "MpegTsTypes" should {

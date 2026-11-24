@@ -22,6 +22,25 @@ object FreezeFramePacer {
   val DefaultMaxSliceRow: Int = 68
 
   private val Crc16Poly: Int = 0x18005
+  private val AdtsSampleRates: Array[Int] = Array(
+    96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350
+  )
+
+  def audioFrameStepTicks(streamType: Option[Int], formatOpt: Option[AudioFormat]): Long = {
+    val isAdts = streamType.contains(0x0F) || streamType.contains(0x11) || formatOpt.exists(_.isInstanceOf[AdtsFormat])
+    if (isAdts) {
+      formatOpt match {
+        case Some(AdtsFormat(raw)) if raw.length >= 3 =>
+          val freqIdx = (raw(2) & 0x3C) >> 2
+          if (freqIdx >= 0 && freqIdx < AdtsSampleRates.length) {
+            math.max(1L, math.round((1024.0 * 90000.0) / AdtsSampleRates(freqIdx).toDouble))
+          } else AdtsStepTicks
+        case _ => AdtsStepTicks
+      }
+    } else {
+      Ac3StepTicks
+    }
+  }
 
   enum AudioFormat derives CanEqual {
     case Ac3Format(fscod: Int, frmsizecod: Int, bsid: Int, bsmod: Int, acmod: Int)

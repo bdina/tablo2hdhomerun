@@ -563,6 +563,12 @@ object MpegTsSync {
       private var windowAudioFramesTotal: Long = 0L
       private var activeAudioFramePids = new Array[Int](8)
       private var activeAudioFrameCount: Int = 0
+      private val MaxAudioBridgeJumpTicks: Long = 360000L
+      private val MaxSilentAudioFramesPerBurst: Int = 96
+      private var audioCursorPids = new Array[Int](8)
+      private var audioCursorLastPts = Array.fill[Long](8)(OptPts.EmptyRaw)
+      private var audioCursorFlags = new Array[Byte](8)
+      private var audioCursorCount: Int = 0
       private var windowKeyframes: Long = 0L
       private var windowTei: Long = 0L
       private var windowCcErr: Long = 0L
@@ -618,6 +624,120 @@ object MpegTsSync {
       private def isAudioFrameCorrupt(pid: Int): Boolean = (pidFlags(pid) & 0x08) != 0
       private def setAudioFrameCorrupt(pid: Int): Unit = { pidFlags(pid) = (pidFlags(pid) | 0x08).toByte }
       private def clearAudioFrameCorrupt(pid: Int): Unit = { pidFlags(pid) = (pidFlags(pid) & ~0x08).toByte }
+
+      private def findAudioCursorIndex(pid: Int): Int = {
+        var i = 0
+        var found = -1
+        while (i < audioCursorCount && found < 0) {
+          if (audioCursorPids(i) == pid) found = i
+          i += 1
+        }
+        found
+      }
+
+      private def ensureAudioCursorIndex(pid: Int): Int = {
+        val existing = findAudioCursorIndex(pid)
+        if (existing >= 0) {
+          existing
+        } else {
+          if (audioCursorCount == audioCursorPids.length) {
+            val newLen = audioCursorPids.length * 2
+            val grownPids = new Array[Int](newLen)
+            val grownPts = Array.fill[Long](newLen)(OptPts.EmptyRaw)
+            val grownFlags = new Array[Byte](newLen)
+            System.arraycopy(audioCursorPids, 0, grownPids, 0, audioCursorCount)
+            System.arraycopy(audioCursorLastPts, 0, grownPts, 0, audioCursorCount)
+            System.arraycopy(audioCursorFlags, 0, grownFlags, 0, audioCursorCount)
+            audioCursorPids = grownPids
+            audioCursorLastPts = grownPts
+            audioCursorFlags = grownFlags
+          }
+          val idx = audioCursorCount
+          audioCursorPids(idx) = pid
+          audioCursorLastPts(idx) = OptPts.EmptyRaw
+          audioCursorFlags(idx) = 0.toByte
+          audioCursorCount += 1
+          idx
+        }
+      }
+
+      private def getLastEmittedAudioPts(pid: Int): OptPts = {
+        val idx = findAudioCursorIndex(pid)
+        if (idx >= 0) OptPts.fromRaw(audioCursorLastPts(idx)) else OptPts.Empty
+      }
+
+      private def isLastAudioSynthetic(pid: Int): Boolean = {
+        val idx = findAudioCursorIndex(pid)
+        idx >= 0 && (audioCursorFlags(idx) & 0x01) != 0
+      }
+
+      private def isDroppingSyntheticAudioOverlap(pid: Int): Boolean = {
+        val idx = findAudioCursorIndex(pid)
+        idx >= 0 && (audioCursorFlags(idx) & 0x02) != 0
+      }
+
+      private def setDroppingSyntheticAudioOverlap(pid: Int, active: Boolean): Unit = {
+        val idx = if (active) ensureAudioCursorIndex(pid) else findAudioCursorIndex(pid)
+        if (idx >= 0) {
+          audioCursorFlags(idx) =
+            if (active) (audioCursorFlags(idx) | 0x02).toByte
+            else (audioCursorFlags(idx) & ~0x02).toByte
+        }
+      }
+
+      private def setLastEmittedAudioPts(pid: Int, ptsRaw: Long, synthetic: Boolean): Unit = {
+        val idx = ensureAudioCursorIndex(pid)
+        audioCursorLastPts(idx) = ptsRaw
+        audioCursorFlags(idx) =
+          if (synthetic) (audioCursorFlags(idx) | 0x01).toByte
+          else (audioCursorFlags(idx) & ~0x01).toByte
+      }
+
+      private def emitSilentAudioUpTo(
+        apid: Int
+      , stOpt: Option[Int]
+      , fmtOpt: Option[FreezeFramePacer.AudioFormat]
+      , targetPts: PtsTicks
+      , maxFrames: Int
+      , builder: org.apache.pekko.util.ByteStringBuilder
+      ): Int = {
+        val step = FreezeFramePacer.audioFrameStepTicks(stOpt, fmtOpt)
+        val lastOpt = getLastEmittedAudioPts(apid)
+        val diff = if (lastOpt.isDefined) targetPts.signedDiff(lastOpt.rawValue) else Long.MaxValue
+        if (lastOpt.isEmpty || diff > MaxAudioBridgeJumpTicks || diff < -FreezeFramePacer.MaxSinglePacketPtsJumpTicks) {
+          val _ = builder ++= FreezeFramePacer.synthesizeSilentAudioFrame(
+            apid
+          , stOpt
+          , fmtOpt
+          , targetPts.value
+          , () => nextOutboundCc(apid, hasPayload = true)
+          )
+          setLastEmittedAudioPts(apid, targetPts.value, synthetic = true)
+          1
+        } else if (diff <= 0L) {
+          0
+        } else {
+          var lastAudio = lastOpt.get
+          var nextAudio = lastAudio.advance(step)
+          var emitted = 0
+          while (nextAudio.signedDiff(targetPts.value) <= 0L && emitted < maxFrames) {
+            val _ = builder ++= FreezeFramePacer.synthesizeSilentAudioFrame(
+              apid
+            , stOpt
+            , fmtOpt
+            , nextAudio.value
+            , () => nextOutboundCc(apid, hasPayload = true)
+            )
+            lastAudio = nextAudio
+            nextAudio = lastAudio.advance(step)
+            emitted += 1
+          }
+          if (emitted > 0) {
+            setLastEmittedAudioPts(apid, lastAudio.value, synthetic = true)
+          }
+          emitted
+        }
+      }
 
       private def recordInputPts(arr: Array[Byte], pktOffset: Int, isVideo: Boolean): Unit = {
         val pesOff = FreezeFramePacer.findPesHeaderOffset(arr, pktOffset)
@@ -944,9 +1064,10 @@ object MpegTsSync {
         }
       }
 
-      private def normalizePacketTimestamps(arr: Array[Byte], pktOffset: Int, isVideo: Boolean): Unit = {
+      private def normalizePacketTimestamps(arr: Array[Byte], pktOffset: Int, isVideo: Boolean): OptPts = {
         val pktEnd = pktOffset + PacketSize
         val pesOff = FreezeFramePacer.findPesHeaderOffset(arr, pktOffset)
+        var emittedPts: OptPts = OptPts.Empty
         if (pesOff >= 0) {
           val inPtsOpt = OptPts.fromRaw(FreezeFramePacer.readPesPts(arr, pesOff, pktEnd))
           if (inPtsOpt.isDefined) {
@@ -1012,6 +1133,7 @@ object MpegTsSync {
               }
             }
 
+            emittedPts = OptPts(outPts.value)
             val outDts =
               if (inDts.isDefined) {
                 val ptsMinusDts = inPts.signedDiff(inDts.rawValue)
@@ -1043,6 +1165,7 @@ object MpegTsSync {
             lastOutputPts = OptPts(outPcr.value)
           }
         }
+        emittedPts
       }
 
       private def processPacket(
@@ -1423,7 +1546,7 @@ object MpegTsSync {
                   }
                 }
                 recordInputPts(arr, pos, isVideo = true)
-                normalizePacketTimestamps(arr, pos, isVideo = true)
+                val _ = normalizePacketTimestamps(arr, pos, isVideo = true)
                 if (lastOutputPts.isDefined) {
                   if (mediaClockAnchorPts.isEmpty) {
                     mediaClockAnchorPts = lastOutputPts
@@ -1496,11 +1619,36 @@ object MpegTsSync {
                     val _ = learnedAudioFormats.put(pid, fmt)
                   }
                 }
-                normalizePacketTimestamps(arr, pos, isVideo = false)
-                if (updated.audioPids.headOption.contains(pid)) {
-                  recordInputPts(arr, pos, isVideo = false)
+                if (pusi) {
+                  setDroppingSyntheticAudioOverlap(pid, active = false)
                 }
-                emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+                val outAudioPts = normalizePacketTimestamps(arr, pos, isVideo = false)
+                val dropOverlap =
+                  if (pusi) {
+                    outAudioPts.isDefined && isLastAudioSynthetic(pid) && {
+                      val lastOpt = getLastEmittedAudioPts(pid)
+                      lastOpt.isDefined && {
+                        val delta = outAudioPts.get.signedDiff(lastOpt.rawValue)
+                        delta <= 0L && delta > -FreezeFramePacer.MaxSinglePacketPtsJumpTicks
+                      }
+                    }
+                  } else {
+                    isDroppingSyntheticAudioOverlap(pid)
+                  }
+                if (dropOverlap) {
+                  if (pusi) {
+                    setDroppingSyntheticAudioOverlap(pid, active = true)
+                  }
+                  val _ = outputBuilder ++= MPEGTS_NULL_PACKET
+                } else {
+                  if (outAudioPts.isDefined) {
+                    setLastEmittedAudioPts(pid, outAudioPts.rawValue, synthetic = false)
+                  }
+                  if (updated.audioPids.headOption.contains(pid)) {
+                    recordInputPts(arr, pos, isVideo = false)
+                  }
+                  emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
+                }
               }
             }
           } else {
@@ -1514,7 +1662,7 @@ object MpegTsSync {
             if (isDroppingOtherPid(pid)) {
               val _ = outputBuilder ++= MPEGTS_NULL_PACKET
             } else {
-              normalizePacketTimestamps(arr, pos, isVideo = false)
+              val _ = normalizePacketTimestamps(arr, pos, isVideo = false)
               emitWithOutboundCc(arr, pos, pid, hasPayload, outputBuilder)
             }
           }
@@ -1593,13 +1741,7 @@ object MpegTsSync {
                 headers.audioPids.foreach { apid =>
                   val stOpt = headers.audioStreamTypes.get(apid)
                   val fmtOpt = learnedAudioFormats.get(apid)
-                  val _ = b ++= FreezeFramePacer.synthesizeSilentAudioFrame(
-                    apid
-                  , stOpt
-                  , fmtOpt
-                  , nextPts.value
-                  , () => nextOutboundCc(apid, hasPayload = true)
-                  )
+                  val _ = emitSilentAudioUpTo(apid, stOpt, fmtOpt, nextPts, MaxSilentAudioFramesPerBurst, b)
                 }
                 f += 1
               }

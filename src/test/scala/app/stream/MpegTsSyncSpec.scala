@@ -280,6 +280,44 @@ object MpegTsSyncSpec {
     ByteString(arr)
   }
 
+  def buildAdtsAudioPesPacket(
+    pid: Int
+  , pts: Long
+  , cc: Int = 0
+  , withValidSyncword: Boolean = true
+  ): ByteString = {
+    val arr = Array.fill[Byte](188)(0xFF.toByte)
+    arr(0) = 0x47.toByte
+    arr(1) = (0x40 | ((pid >> 8) & 0x1F)).toByte
+    arr(2) = (pid & 0xFF).toByte
+    arr(3) = (0x10 | (cc & 0x0F)).toByte
+    arr(4) = 0x00.toByte
+    arr(5) = 0x00.toByte
+    arr(6) = 0x01.toByte
+    arr(7) = 0xC0.toByte // ADTS AAC audio stream ID
+    arr(8) = 0x00.toByte
+    arr(9) = 0x15.toByte
+    arr(10) = 0x80.toByte
+    arr(11) = 0x80.toByte
+    arr(12) = 5.toByte
+    FreezeFramePacer.encodePtsBytes(arr, 13, 2, pts)
+    val es = 18
+    if (withValidSyncword) {
+      // 48 kHz Stereo AAC-LC ADTS header (freqIdx = 3 -> 1920 ticks/frame)
+      arr(es) = 0xFF.toByte
+      arr(es + 1) = 0xF1.toByte
+      arr(es + 2) = 0x4C.toByte
+      arr(es + 3) = 0x80.toByte
+      arr(es + 4) = 0x01.toByte
+      arr(es + 5) = 0xA1.toByte
+      arr(es + 6) = 0x00.toByte
+    } else {
+      arr(es) = 0xAA.toByte
+      arr(es + 1) = 0xAA.toByte
+    }
+    ByteString(arr)
+  }
+
   def buildVideoPacketWithPcr(
     pid: Int
   , pcr: Long
@@ -1790,6 +1828,104 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
         i += 1
       }
       syntheticVideoFound shouldBe true
+    }
+
+    "cacheFlow should pace ADTS AAC silent freeze audio at exact 1920-tick codec rate and skip overlapping live audio splice" in {
+      val videoPid = 0x0101
+      val audioPid = 0x0102
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacketWithAudio(
+        pmtPid = 0x0100
+      , pcrPid = videoPid
+      , videoPid = videoPid
+      , videoStreamType = 0x02
+      , audioPid = audioPid
+      , audioStreamType = 0x0F
+      )
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val initialKeyframe = buildVideoPesPacket(videoPid, pts = 90000L, cc = 1, isKeyframe = true)
+      val initialAudio = buildAdtsAudioPesPacket(audioPid, pts = 90000L, cc = 1)
+
+      val (queue, probe) = Source.queue[ByteString](bufferSize = 64)
+        .via(
+          MpegTsSync.cacheFlow(
+            cachedHeadersRef
+          , freezeThreshold = 60.millis
+          , freezeTickInterval = 25.millis
+          )
+        )
+        .toMat(Sink.seq)(org.apache.pekko.stream.scaladsl.Keep.both)
+        .run()
+
+      val _ = queue.offer(pat ++ pmt ++ initialKeyframe ++ initialAudio)
+
+      // Stall long enough for multiple freeze bursts (12+ video frames, ~18+ ADTS audio frames)
+      Thread.sleep(240L)
+
+      // Resume with live keyframe + an overlapping leading audio packet (behind last synthetic audio) + clean forward audio
+      val liveKeyframe = buildVideoPesPacket(videoPid, pts = 500000L, cc = 2, isKeyframe = true)
+      val overlappingAudio = buildAdtsAudioPesPacket(audioPid, pts = 494000L, cc = 2)
+      val forwardAudio = buildAdtsAudioPesPacket(audioPid, pts = 505000L, cc = 3)
+      val _ = queue.offer(liveKeyframe ++ overlappingAudio ++ forwardAudio)
+      queue.complete()
+
+      val emitted = probe.futureValue.foldLeft(ByteString.empty)(_ ++ _)
+      val pktCount = emitted.length / 188
+      val videoPtsList = scala.collection.mutable.ArrayBuffer.empty[Long]
+      val audioPtsList = scala.collection.mutable.ArrayBuffer.empty[Long]
+      var lastAudioCc = -1
+      var i = 0
+      while (i < pktCount) {
+        val pkt = emitted.slice(i * 188, (i + 1) * 188).toArray
+        val pid = ((pkt(1) & 0x1F) << 8) | (pkt(2) & 0xFF)
+        val pusi = (pkt(1) & 0x40) != 0
+        val cc = pkt(3) & 0x0F
+        if (pid == audioPid) {
+          if (lastAudioCc >= 0) {
+            val _ = cc shouldBe ((lastAudioCc + 1) & 0x0F)
+          }
+          lastAudioCc = cc
+        }
+        if (pusi) {
+          val pesOff = FreezeFramePacer.findPesHeaderOffset(pkt, 0)
+          if (pesOff >= 0) {
+            val pts = FreezeFramePacer.readPesPts(pkt, pesOff, 188)
+            if (pts >= 0L) {
+              if (pid == videoPid) videoPtsList += pts
+              else if (pid == audioPid) audioPtsList += pts
+            }
+          }
+        }
+        i += 1
+      }
+
+      // Multiple synthetic freeze frames emitted, with ~1.56x more ADTS audio frames than video frames
+      val _ = videoPtsList.size should be >= 7
+      val _ = audioPtsList.size should be > videoPtsList.size
+
+      // Every emitted audio PTS must be strictly monotonic (overlapping leading live audio dropped cleanly)
+      var j = 1
+      while (j < audioPtsList.size) {
+        val _ = audioPtsList(j) should be > audioPtsList(j - 1)
+        j += 1
+      }
+
+      // Freeze audio frames (indices 1 .. audioPtsList.size - 2) must step by exact 1920 ticks (48 kHz ADTS)
+      var k = 2
+      while (k < audioPtsList.size - 1) {
+        val _ = (audioPtsList(k) - audioPtsList(k - 1)) shouldBe FreezeFramePacer.AdtsStepTicks
+        k += 1
+      }
+
+      // Last synthetic audio frame before live resume must track last synthetic video frame within <= 1 ADTS frame (1920 ticks)
+      val lastFreezeVideoPts = videoPtsList(videoPtsList.size - 2)
+      val lastFreezeAudioPts = audioPtsList(audioPtsList.size - 2)
+      val driftTicks = lastFreezeVideoPts - lastFreezeAudioPts
+      val _ = driftTicks should be >= 0L
+      val _ = driftTicks should be < FreezeFramePacer.AdtsStepTicks
+      // Overlapping leading live audio (494000) was skipped, and forward live audio (505000 = liveKey + 5000) resumed cleanly
+      audioPtsList.last shouldBe (videoPtsList.last + 5000L)
     }
 
     "alignToIFrame should align and emit PUSI=1 audio packets immediately while waiting for video keyframe (Failure Mode G fix)" in {
