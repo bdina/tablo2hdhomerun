@@ -1314,6 +1314,191 @@ class MpegTsSyncSpec extends ScalaTestWithActorTestKit with AnyWordSpecLike with
       restoredSeq.slice(13, 25) shouldBe ByteString.fromArray(lockedSeqHeaderBytes)
     }
 
+    "cacheFlow should lock 22-byte 0xB3+0xB5 header across intra quantiser matrix and restore corrupted 0xB3 and 0xB5 1x while preserving 0xB5 8x" in {
+      val videoPid = 0x0101
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0101, videoPid = videoPid)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val seqHdr12 = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+        0x78.toByte, 0x04.toByte, 0x38.toByte, 0x34.toByte,
+        0x12.toByte, 0x34.toByte, 0x56.toByte, 0x82.toByte // load_intra_quantiser_matrix = 1
+      )
+      val intraMatrix = Array.fill[Byte](64)(0x10.toByte)
+      val seqExt10 = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+        0x14.toByte, 0x82.toByte, 0x00.toByte, 0x01.toByte,
+        0x00.toByte, 0x00.toByte
+      )
+      val picCodingExt = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+        0x8F.toByte, 0xFF.toByte, 0xF3.toByte, 0x41.toByte,
+        0x80.toByte
+      )
+
+      def makeKeyframePacket(hdr: Array[Byte], ext: Array[Byte], cc: Int): ByteString = {
+        val arr = Array.fill[Byte](188)(0xFF.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = (0x40 | ((videoPid >> 8) & 0x1F)).toByte
+        arr(2) = (videoPid & 0xFF).toByte
+        arr(3) = (0x10 | (cc & 0x0F)).toByte
+        val pesHdr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte, 0x00.toByte, 0x80.toByte, 0x00.toByte, 0x00.toByte)
+        System.arraycopy(pesHdr, 0, arr, 4, pesHdr.length)
+        val esStart = 4 + pesHdr.length // 13
+        System.arraycopy(hdr, 0, arr, esStart, 12)
+        System.arraycopy(intraMatrix, 0, arr, esStart + 12, 64)
+        System.arraycopy(ext, 0, arr, esStart + 76, 10)
+        System.arraycopy(picCodingExt, 0, arr, esStart + 86, picCodingExt.length)
+        ByteString(arr)
+      }
+
+      val kf1 = makeKeyframePacket(seqHdr12, seqExt10, cc = 0)
+      val kf2 = makeKeyframePacket(seqHdr12, seqExt10, cc = 1)
+
+      val badHdr = seqHdr12.clone()
+      badHdr(5) = 0x00.toByte
+      badHdr(6) = 0x00.toByte
+      val badExt = seqExt10.clone()
+      badExt(5) = 0x8C.toByte // progressive_sequence=1, chroma_format=4:2:2
+      badExt(6) = 0x20.toByte // vertical_size_extension=1
+      val corruptedKf = makeKeyframePacket(badHdr, badExt, cc = 2)
+
+      val out = Source(List(pat, pmt, kf1, kf2, corruptedKf))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = out.length shouldBe 5
+      val locked = cachedHeadersRef.get().lockedSeqHeader
+      val _ = locked.isDefined shouldBe true
+      val _ = locked.get.length shouldBe 22
+      val _ = (locked.get(11) & 0x03) shouldBe 0
+      val _ = locked.get.slice(12, 22) shouldBe ByteString.fromArray(seqExt10)
+
+      val sanitized = out(4)
+      val _ = sanitized.slice(13, 25) shouldBe ByteString.fromArray(seqHdr12)
+      val _ = sanitized.slice(89, 99) shouldBe ByteString.fromArray(seqExt10)
+      sanitized.slice(99, 99 + picCodingExt.length) shouldBe ByteString.fromArray(picCodingExt)
+    }
+
+    "cacheFlow should not lock unconfirmed 0xB5 on mismatch and should upgrade 12-byte lock once two clean 0xB5 extensions match" in {
+      val videoPid = 0x0101
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0101, videoPid = videoPid)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val seqHdr12 = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+        0x78.toByte, 0x04.toByte, 0x38.toByte, 0x34.toByte,
+        0x12.toByte, 0x34.toByte, 0x56.toByte, 0x80.toByte
+      )
+      val cleanExt = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+        0x14.toByte, 0x82.toByte, 0x00.toByte, 0x01.toByte,
+        0x00.toByte, 0x00.toByte
+      )
+      val flippedProgExt = cleanExt.clone()
+      flippedProgExt(5) = 0x8A.toByte // progressive_sequence = 1 (passes structural validity, disagrees with cleanExt)
+
+      def makePkt(ext: Array[Byte], cc: Int): ByteString = {
+        val arr = Array.fill[Byte](188)(0xFF.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = (0x40 | ((videoPid >> 8) & 0x1F)).toByte
+        arr(2) = (videoPid & 0xFF).toByte
+        arr(3) = (0x10 | (cc & 0x0F)).toByte
+        val pesHdr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte, 0x00.toByte, 0x80.toByte, 0x00.toByte, 0x00.toByte)
+        System.arraycopy(pesHdr, 0, arr, 4, pesHdr.length)
+        System.arraycopy(seqHdr12, 0, arr, 13, 12)
+        System.arraycopy(ext, 0, arr, 25, 10)
+        ByteString(arr)
+      }
+
+      // First run only kf1 (clean) + kf2 (flipped progressive_sequence): must lock 12B only, NOT the flipped 0xB5
+      val refMismatch = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+      val _ = Source(List(pat, pmt, makePkt(cleanExt, 0), makePkt(flippedProgExt, 1)))
+        .via(MpegTsSync.cacheFlow(refMismatch))
+        .runWith(Sink.seq)
+        .futureValue
+      val _ = refMismatch.get().lockedSeqHeader.map(_.length) shouldBe Some(12)
+
+      // Next run kf1 (clean), kf2 (flipped), kf3 (clean), kf4 (clean), kf5 (corrupted):
+      // kf3+kf4 upgrade lock to clean 22B, and kf5 is restored to cleanExt.
+      val out = Source(List(
+        pat, pmt,
+        makePkt(cleanExt, 0),
+        makePkt(flippedProgExt, 1),
+        makePkt(cleanExt, 2),
+        makePkt(cleanExt, 3),
+        makePkt(flippedProgExt, 4)
+      ))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = cachedHeadersRef.get().lockedSeqHeader.map(_.length) shouldBe Some(22)
+      val _ = cachedHeadersRef.get().lockedSeqHeader.get.slice(12, 22) shouldBe ByteString.fromArray(cleanExt)
+      out(6).slice(25, 35) shouldBe ByteString.fromArray(cleanExt)
+    }
+
+    "cacheFlow should lock split-packet 0xB3 (PUSI=1) + 0xB5 1x (PUSI=0) and sanitize subsequent PUSI=0 0xB5 corruption" in {
+      val videoPid = 0x0101
+      val pat = buildPatPacket(0x0100)
+      val pmt = buildFullPmtPacket(pmtPid = 0x0100, pcrPid = 0x0101, videoPid = videoPid)
+      val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
+
+      val seqHdr12 = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+        0x78.toByte, 0x04.toByte, 0x38.toByte, 0x34.toByte,
+        0x12.toByte, 0x34.toByte, 0x56.toByte, 0x82.toByte
+      )
+      val seqExt10 = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+        0x14.toByte, 0x82.toByte, 0x00.toByte, 0x01.toByte,
+        0x00.toByte, 0x00.toByte
+      )
+
+      def makeB3Pkt(cc: Int): ByteString = {
+        val arr = Array.fill[Byte](188)(0x10.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = (0x40 | ((videoPid >> 8) & 0x1F)).toByte
+        arr(2) = (videoPid & 0xFF).toByte
+        arr(3) = (0x10 | (cc & 0x0F)).toByte
+        val pesHdr = Array[Byte](0x00.toByte, 0x00.toByte, 0x01.toByte, 0xE0.toByte, 0x00.toByte, 0x00.toByte, 0x80.toByte, 0x00.toByte, 0x00.toByte)
+        System.arraycopy(pesHdr, 0, arr, 4, pesHdr.length)
+        System.arraycopy(seqHdr12, 0, arr, 13, 12)
+        ByteString(arr)
+      }
+
+      def makeB5ContPkt(ext: Array[Byte], cc: Int): ByteString = {
+        val arr = Array.fill[Byte](188)(0x10.toByte)
+        arr(0) = 0x47.toByte
+        arr(1) = ((videoPid >> 8) & 0x1F).toByte // PUSI = 0
+        arr(2) = (videoPid & 0xFF).toByte
+        arr(3) = (0x10 | (cc & 0x0F)).toByte
+        System.arraycopy(ext, 0, arr, 10, 10)
+        ByteString(arr)
+      }
+
+      val badExt = seqExt10.clone()
+      badExt(5) = 0x8C.toByte
+      badExt(6) = 0x20.toByte
+
+      val out = Source(List(
+        pat, pmt,
+        makeB3Pkt(0), makeB5ContPkt(seqExt10, 1),
+        makeB3Pkt(2), makeB5ContPkt(seqExt10, 3),
+        makeB3Pkt(4), makeB5ContPkt(badExt, 5)
+      ))
+        .via(MpegTsSync.cacheFlow(cachedHeadersRef))
+        .runWith(Sink.seq)
+        .futureValue
+
+      val _ = cachedHeadersRef.get().lockedSeqHeader.map(_.length) shouldBe Some(22)
+      val _ = cachedHeadersRef.get().lockedSeqHeader.get.slice(12, 22) shouldBe ByteString.fromArray(seqExt10)
+      out(7).slice(10, 20) shouldBe ByteString.fromArray(seqExt10)
+    }
+
     "cacheFlow should gate audio on TEI/CC error and reject PUSI=1 packet with garbage elementary bytes until valid syncword arrives" in {
       val audioPid = 0x0102
       val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](

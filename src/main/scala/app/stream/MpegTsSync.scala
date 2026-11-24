@@ -351,6 +351,122 @@ object MpegTsSync {
       else Source.single(headers.syncPrefix).concat(aligned)
     }.mapMaterializedValue(_ => NotUsed)
 
+  private[stream] enum SeqHeaderLockEvent derives CanEqual {
+    case NoChange
+    case Locked(bytes: Int, maxSliceRow: Int)
+    case UpgradedToExtension(maxSliceRow: Int)
+  }
+
+  private[stream] final case class SeqHeaderLockState(
+    candidateHeader: Option[ByteString] = None
+  , candidateExtension: Option[ByteString] = None
+  , lockedHeader: Option[ByteString] = None
+  , maxSliceRow: Int = FreezeFramePacer.DefaultMaxSliceRow
+  , pendingB3ForNextPacket: Option[(ByteString, Int)] = None
+  ) {
+    def effectiveHeader: Option[ByteString] = lockedHeader.orElse(candidateHeader)
+    def needsHeaderOrExtension: Boolean = lockedHeader.forall(_.length < 22)
+    def clearPendingContinuation: SeqHeaderLockState =
+      if (pendingB3ForNextPacket.isDefined) copy(pendingB3ForNextPacket = None) else this
+
+    def observeSequenceHeader(hdr: ByteString, rows: Int): (SeqHeaderLockState, SeqHeaderLockEvent) = {
+      val base = clearPendingContinuation
+      base.lockedHeader match {
+        case Some(locked) if locked.length >= 22 =>
+          (base, SeqHeaderLockEvent.NoChange)
+        case Some(locked) =>
+          if (hdr.length >= 7 && locked.length >= 7 && locked.take(7) == hdr.take(7)) {
+            if (hdr.length >= 22) {
+              val ext = hdr.slice(12, 22)
+              if (base.candidateExtension.contains(ext)) {
+                val upgraded = FreezeFramePacer.combineSequenceHeaderAndExtension(locked, ext)
+                (
+                  base.copy(lockedHeader = Some(upgraded), candidateExtension = None)
+                , SeqHeaderLockEvent.UpgradedToExtension(base.maxSliceRow)
+                )
+              } else {
+                (base.copy(candidateExtension = Some(ext)), SeqHeaderLockEvent.NoChange)
+              }
+            } else {
+              (base.copy(pendingB3ForNextPacket = Some((hdr, rows))), SeqHeaderLockEvent.NoChange)
+            }
+          } else {
+            (base, SeqHeaderLockEvent.NoChange)
+          }
+        case None =>
+          base.candidateHeader match {
+            case Some(c) if c.length >= 7 && hdr.length >= 7 && c.take(7) == hdr.take(7) =>
+              if (c.length >= 22 && hdr.length >= 22 && c.slice(12, 22) == hdr.slice(12, 22)) {
+                (
+                  base.copy(
+                    lockedHeader = Some(hdr)
+                  , candidateExtension = None
+                  , maxSliceRow = rows
+                  )
+                , SeqHeaderLockEvent.Locked(hdr.length, rows)
+                )
+              } else {
+                val locked12 = hdr.take(12)
+                val nextCandExt =
+                  if (hdr.length >= 22) Some(hdr.slice(12, 22))
+                  else if (c.length >= 22) Some(c.slice(12, 22))
+                  else None
+                val nextPending = if (hdr.length < 22) Some((hdr, rows)) else None
+                (
+                  base.copy(
+                    lockedHeader = Some(locked12)
+                  , candidateExtension = nextCandExt
+                  , maxSliceRow = rows
+                  , pendingB3ForNextPacket = nextPending
+                  )
+                , SeqHeaderLockEvent.Locked(locked12.length, rows)
+                )
+              }
+            case _ =>
+              val nextPending = if (hdr.length < 22) Some((hdr, rows)) else None
+              (
+                base.copy(candidateHeader = Some(hdr), pendingB3ForNextPacket = nextPending)
+              , SeqHeaderLockEvent.NoChange
+              )
+          }
+      }
+    }
+
+    def observeContinuationExtension(extOpt: Option[ByteString]): (SeqHeaderLockState, SeqHeaderLockEvent) =
+      pendingB3ForNextPacket match {
+        case Some((hdr12, _)) =>
+          val cleared = copy(pendingB3ForNextPacket = None)
+          extOpt match {
+            case Some(ext10) =>
+              val combined = FreezeFramePacer.combineSequenceHeaderAndExtension(hdr12, ext10)
+              cleared.lockedHeader match {
+                case Some(locked) if locked.length < 22 =>
+                  if (cleared.candidateExtension.contains(ext10)) {
+                    val upgraded = FreezeFramePacer.combineSequenceHeaderAndExtension(locked, ext10)
+                    (
+                      cleared.copy(lockedHeader = Some(upgraded), candidateExtension = None)
+                    , SeqHeaderLockEvent.UpgradedToExtension(cleared.maxSliceRow)
+                    )
+                  } else {
+                    (cleared.copy(candidateExtension = Some(ext10)), SeqHeaderLockEvent.NoChange)
+                  }
+                case None =>
+                  if (cleared.candidateHeader.exists(c => c.length >= 7 && c.take(7) == hdr12.take(7))) {
+                    (cleared.copy(candidateHeader = Some(combined)), SeqHeaderLockEvent.NoChange)
+                  } else {
+                    (cleared, SeqHeaderLockEvent.NoChange)
+                  }
+                case _ =>
+                  (cleared, SeqHeaderLockEvent.NoChange)
+              }
+            case None =>
+              (cleared, SeqHeaderLockEvent.NoChange)
+          }
+        case None =>
+          (this, SeqHeaderLockEvent.NoChange)
+      }
+  }
+
   private def sameTablePacket(existingOpt: Option[ByteString], arr: Array[Byte], pos: Int): Boolean =
     existingOpt match {
       case Some(existing) if existing.length == PacketSize =>
@@ -401,9 +517,8 @@ object MpegTsSync {
       private val pidFlags = new Array[Byte](8192)
       private var droppingVideoSlice: Boolean = false
       private var requireVideoPesStart: Boolean = false
-      private var maxSliceRow: Int = FreezeFramePacer.DefaultMaxSliceRow
-      private var candidateSeqHeader: Option[ByteString] = None
-      private var lockedSeqHeader: Option[ByteString] = None
+      private var seqHeaderState: SeqHeaderLockState = SeqHeaderLockState()
+      private def maxSliceRow: Int = seqHeaderState.maxSliceRow
       private val learnedAudioFormats = scala.collection.mutable.Map.empty[Int, FreezeFramePacer.AudioFormat]
       private var seenLiveKeyframe: Boolean = false
       private var lastLiveDataNanos: Long = System.nanoTime()
@@ -423,11 +538,13 @@ object MpegTsSync {
       private var totalTeiPackets: Long = 0L
       private var totalCcErrors: Long = 0L
       private var totalClampedSlices: Long = 0L
+      private var totalRestoredSeqHeaders: Long = 0L
       private var totalScrubbedPts: Long = 0L
       private var totalFreezeBursts: Long = 0L
       private var lastLoggedTei: Long = 0L
       private var lastLoggedCc: Long = 0L
       private var lastLoggedClamped: Long = 0L
+      private var lastLoggedRestoredSeqHeaders: Long = 0L
       private var lastLoggedScrubbed: Long = 0L
       private var lastStatsLogNanos: Long = System.nanoTime()
       private val statsLogIntervalNanos: Long = 30.seconds.toNanos
@@ -993,6 +1110,7 @@ object MpegTsSync {
             windowTei += 1L
             if (updated.videoPid.contains(pid)) {
               droppingVideoSlice = true
+              seqHeaderState = seqHeaderState.clearPendingContinuation
               if (pusi) {
                 requireVideoPesStart = true
               }
@@ -1179,6 +1297,7 @@ object MpegTsSync {
                   currentVideoFrameCorrupt = isCcError || hasOutOfBoundsSlice
                 }
               } else {
+                seqHeaderState = seqHeaderState.clearPendingContinuation
                 val _ = outputBuilder ++= MPEGTS_NULL_PACKET
               }
             }
@@ -1201,6 +1320,7 @@ object MpegTsSync {
               }
 
               if (droppingVideoSlice) {
+                seqHeaderState = seqHeaderState.clearPendingContinuation
                 currentVideoFrameStarted = true
                 currentVideoFrameCorrupt = true
                 if (!hasOutOfBoundsSlice) {
@@ -1246,26 +1366,60 @@ object MpegTsSync {
                   else pos + PacketSize
                 val pktPayloadLen = math.max(0, (pos + PacketSize) - pktPayloadOffset)
                 if (isMpeg2 && pktPayloadLen > 0) {
-                  if (lockedSeqHeader.isEmpty && pusi) {
-                    FreezeFramePacer.parseMpeg2SequenceHeader(arr, pktPayloadOffset, pktPayloadLen).foreach { case (hdr, rows) =>
-                      if (candidateSeqHeader.exists(c => c.take(7) == hdr.take(7))) {
-                        maxSliceRow = rows
-                        lockedSeqHeader = Some(hdr)
+                  if (seqHeaderState.needsHeaderOrExtension) {
+                    val (nextState, lockEvent) =
+                      if (pusi) {
+                        FreezeFramePacer.parseMpeg2SequenceHeader(arr, pktPayloadOffset, pktPayloadLen) match {
+                          case Some((hdr, rows)) =>
+                            seqHeaderState.observeSequenceHeader(hdr, rows)
+                          case None =>
+                            (seqHeaderState.clearPendingContinuation, SeqHeaderLockEvent.NoChange)
+                        }
+                      } else if (seqHeaderState.pendingB3ForNextPacket.isDefined) {
+                        val extOpt = FreezeFramePacer.parseMpeg2SequenceExtension(arr, pktPayloadOffset, pktPayloadLen)
+                        seqHeaderState.observeContinuationExtension(extOpt)
                       } else {
-                        candidateSeqHeader = Some(hdr)
+                        (seqHeaderState, SeqHeaderLockEvent.NoChange)
                       }
+                    seqHeaderState = nextState
+                    lockEvent match {
+                      case SeqHeaderLockEvent.Locked(bytes, rows) =>
+                        log.info(
+                          "[mpegts] locked MPEG-2 sequence header{} bytes={} maxSliceRow={}"
+                        , labelPrefix
+                        , bytes
+                        , rows
+                        )
+                      case SeqHeaderLockEvent.UpgradedToExtension(rows) =>
+                        log.info(
+                          "[mpegts] upgraded locked MPEG-2 sequence header with sequence_extension{} bytes=22 maxSliceRow={}"
+                        , labelPrefix
+                        , rows
+                        )
+                      case SeqHeaderLockEvent.NoChange => ()
                     }
                   }
-                  val effectiveSeqHdr = lockedSeqHeader.orElse(candidateSeqHeader)
+                  val effectiveSeqHdr = seqHeaderState.effectiveHeader
                   if (effectiveSeqHdr.isDefined && updated.lockedSeqHeader != effectiveSeqHdr) {
                     updated = updated.copy(lockedSeqHeader = effectiveSeqHdr)
                   }
-                  val clamped = FreezeFramePacer.sanitizeMpeg2Payload(arr, pktPayloadOffset, pktPayloadLen, maxSliceRow, lockedSeqHeader).toLong
+                  val sanitizeResult = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(
+                    arr
+                  , pktPayloadOffset
+                  , pktPayloadLen
+                  , maxSliceRow
+                  , seqHeaderState.lockedHeader
+                  )
+                  val clamped = sanitizeResult.clampedSlices.toLong
+                  val restored = sanitizeResult.restoredHeaders.toLong
                   if (clamped > 0L) {
                     totalClampedSlices += clamped
                     windowSliceDrops += clamped
                     currentVideoFrameStarted = true
                     currentVideoFrameCorrupt = true
+                  }
+                  if (restored > 0L) {
+                    totalRestoredSeqHeaders += restored
                   }
                 }
                 recordInputPts(arr, pos, isVideo = true)
@@ -1510,12 +1664,13 @@ object MpegTsSync {
             totalTeiPackets > lastLoggedTei ||
               totalCcErrors > lastLoggedCc ||
               totalClampedSlices > lastLoggedClamped ||
+              totalRestoredSeqHeaders > lastLoggedRestoredSeqHeaders ||
               totalScrubbedPts > lastLoggedScrubbed
           if (hasNewAnomalies) {
             val now = System.nanoTime()
             if (now - lastStatsLogNanos >= statsLogIntervalNanos) {
               log.warn(
-                "[mpegts] transport anomalies{} tei={} (+{}) ccErrors={} (+{}) clampedSlices={} (+{}) scrubbedPts={} (+{})"
+                "[mpegts] transport anomalies{} tei={} (+{}) ccErrors={} (+{}) clampedSlices={} (+{}) restoredSeqHeaders={} (+{}) scrubbedPts={} (+{})"
               , labelPrefix
               , totalTeiPackets
               , totalTeiPackets - lastLoggedTei
@@ -1523,12 +1678,15 @@ object MpegTsSync {
               , totalCcErrors - lastLoggedCc
               , totalClampedSlices
               , totalClampedSlices - lastLoggedClamped
+              , totalRestoredSeqHeaders
+              , totalRestoredSeqHeaders - lastLoggedRestoredSeqHeaders
               , totalScrubbedPts
               , totalScrubbedPts - lastLoggedScrubbed
               )
               lastLoggedTei = totalTeiPackets
               lastLoggedCc = totalCcErrors
               lastLoggedClamped = totalClampedSlices
+              lastLoggedRestoredSeqHeaders = totalRestoredSeqHeaders
               lastLoggedScrubbed = totalScrubbedPts
               lastStatsLogNanos = now
             }

@@ -202,6 +202,51 @@ object FreezeFramePacer {
     arr
   }
 
+  def isValidMpeg2SequenceExtension(arr: Array[Byte], offset: Int, limit: Int): Boolean =
+    limit <= arr.length &&
+      hasSequenceExtensionStartAt(arr, offset, limit) &&
+      (arr(offset + 5) & 0x06) == 0x02 &&
+      (arr(offset + 5) & 0x01) == 0 &&
+      (arr(offset + 6) & 0x80) == 0 &&
+      (arr(offset + 6) & 0x60) == 0 &&
+      (arr(offset + 7) & 0x01) == 1
+
+  def parseMpeg2SequenceExtension(arr: Array[Byte], offset: Int, len: Int): Option[ByteString] =
+    if (offset < 0 || len < 10 || offset + len > arr.length) {
+      None
+    } else {
+      val limit = offset + len
+      val end = limit - 10
+      var i = offset
+      var result: Option[ByteString] = None
+      while (i <= end && result.isEmpty) {
+        if (isValidMpeg2SequenceExtension(arr, i, limit)) {
+          result = Some(ByteString.fromArray(arr, i, 10))
+        }
+        i += 1
+      }
+      result
+    }
+
+  def combineSequenceHeaderAndExtension(seqHdr: ByteString, seqExt: ByteString): ByteString =
+    if (seqHdr.length >= 12 && seqExt.length >= 10) {
+      val combined = new Array[Byte](22)
+      var i = 0
+      while (i < 12) {
+        combined(i) = seqHdr(i)
+        i += 1
+      }
+      combined(11) = (combined(11) & 0xFC).toByte
+      var j = 0
+      while (j < 10) {
+        combined(12 + j) = seqExt(j)
+        j += 1
+      }
+      ByteString.fromArray(combined)
+    } else {
+      seqHdr
+    }
+
   def parseMpeg2SequenceHeader(arr: Array[Byte], offset: Int, len: Int): Option[(ByteString, Int)] =
     if (offset < 0 || len < 12 || offset + len > arr.length) {
       None
@@ -227,19 +272,12 @@ object FreezeFramePacer {
             var k = 0
             while (k < extCandidateOffsets.length && extOffset < 0) {
               val cand = extCandidateOffsets(k)
-              if (cand + 10 <= limit &&
-                  arr(cand) == 0x00.toByte &&
-                  arr(cand + 1) == 0x00.toByte &&
-                  arr(cand + 2) == 0x01.toByte &&
-                  (arr(cand + 3) & 0xFF) == 0xB5 &&
-                  (arr(cand + 4) & 0xF0) == 0x10) {
+              if (isValidMpeg2SequenceExtension(arr, cand, limit)) {
                 extOffset = cand
               }
               k += 1
             }
-            val hdrBytes = if (extOffset == i + 12) {
-              ByteString.fromArray(arr, i, 22)
-            } else if (extOffset > i + 12) {
+            val hdrBytes = if (extOffset >= i + 12) {
               val combined = new Array[Byte](22)
               System.arraycopy(arr, i, combined, 0, 12)
               combined(11) = (combined(11) & 0xFC).toByte
@@ -328,6 +366,7 @@ object FreezeFramePacer {
       var i = payloadOffset
       var clamped = 0
       var restoredHeaders = 0
+      var expectSeqExtAt = -1
       while (i <= end - 4) {
         if (arr(i) == 0x00.toByte &&
             arr(i + 1) == 0x00.toByte &&
@@ -376,8 +415,34 @@ object FreezeFramePacer {
                 else if (hasIntraQuant || hasNonIntraQuant) 76
                 else 12
               i += seqHeaderLen
+              expectSeqExtAt = i
             } else {
               i = end
+            }
+          } else if (code == 0xB5) {
+            val isSeqExt = i + 10 <= end && ((arr(i + 4) & 0xF0) == 0x10 || i == expectSeqExtAt)
+            if (isSeqExt) {
+              lockedSeqHeader.foreach { locked =>
+                if (locked.length >= 22) {
+                  var differs = false
+                  var k = 0
+                  while (k < 10 && !differs) {
+                    if (arr(i + k) != locked(12 + k)) differs = true
+                    k += 1
+                  }
+                  if (differs) {
+                    var j = 0
+                    while (j < 10) {
+                      arr(i + j) = locked(12 + j)
+                      j += 1
+                    }
+                    restoredHeaders += 1
+                  }
+                }
+              }
+              i += 10
+            } else {
+              i += 4
             }
           } else if (code >= 0x01 && code <= 0xAF && code > maxSliceRow) {
             arr(i + 2) = 0x00.toByte

@@ -440,6 +440,117 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = corrupted(11) shouldBe 0x80.toByte
       corrupted(24) shouldBe 0x00.toByte
     }
+
+    "reject invalid 0xB5 sequence_extension fields in parseMpeg2SequenceHeader and fall back to 12-byte 0xB3" in {
+      def buildHeaderWithSeqExt(b5: Byte, b6: Byte, b7: Byte): Array[Byte] =
+        Array[Byte](
+          0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+          0x78.toByte, 0x04.toByte, 0x38.toByte, 0x34.toByte,
+          0x12.toByte, 0x34.toByte, 0x56.toByte, 0x80.toByte,
+          0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+          0x14.toByte, b5, b6, b7,
+          0x00.toByte, 0x00.toByte
+        )
+
+      val valid = buildHeaderWithSeqExt(0x82.toByte, 0x00.toByte, 0x01.toByte)
+      val _ = FreezeFramePacer.parseMpeg2SequenceHeader(valid, 0, valid.length).get._1.length shouldBe 22
+
+      // chroma_format = 4:2:2 (0x84 instead of 0x82)
+      val badChroma = buildHeaderWithSeqExt(0x84.toByte, 0x00.toByte, 0x01.toByte)
+      val _ = FreezeFramePacer.parseMpeg2SequenceHeader(badChroma, 0, badChroma.length).get._1.length shouldBe 12
+
+      // vertical_size_extension = 1 (byte 6 bits 6..5 = 0x20)
+      val badVertExt = buildHeaderWithSeqExt(0x82.toByte, 0x20.toByte, 0x01.toByte)
+      val _ = FreezeFramePacer.parseMpeg2SequenceHeader(badVertExt, 0, badVertExt.length).get._1.length shouldBe 12
+
+      // horizontal_size_extension = 1 (byte 6 bit 7 = 0x80)
+      val badHorizExt = buildHeaderWithSeqExt(0x82.toByte, 0x80.toByte, 0x01.toByte)
+      val _ = FreezeFramePacer.parseMpeg2SequenceHeader(badHorizExt, 0, badHorizExt.length).get._1.length shouldBe 12
+
+      // marker_bit = 0 (byte 7 bit 0 = 0x00)
+      val badMarker = buildHeaderWithSeqExt(0x82.toByte, 0x00.toByte, 0x00.toByte)
+      FreezeFramePacer.parseMpeg2SequenceHeader(badMarker, 0, badMarker.length).get._1.length shouldBe 12
+    }
+
+    "restore corrupted 0xB5 1x sequence_extension after intra quantiser matrix while leaving 0xB5 8x/2x extensions untouched" in {
+      // Simulate CBS 4.1: 12-byte 0xB3 + 64-byte intra matrix + 10-byte 0xB5 1x + 0xB5 2x + 0x00 + 0xB5 8x
+      val clean = Array.fill[Byte](120)(0x10.toByte)
+      clean(0) = 0x00.toByte
+      clean(1) = 0x00.toByte
+      clean(2) = 0x01.toByte
+      clean(3) = 0xB3.toByte
+      clean(4) = 0x78.toByte
+      clean(5) = 0x04.toByte
+      clean(6) = 0x38.toByte
+      clean(7) = 0x34.toByte
+      clean(8) = 0x12.toByte
+      clean(9) = 0x34.toByte
+      clean(10) = 0x56.toByte
+      clean(11) = 0x82.toByte // load_intra_quantiser_matrix = 1
+      // Sequence Extension (0xB5 1x) at offset 76: MP@HL, interlaced (progressive_sequence=0), 4:2:0, size_ext=0, marker=1
+      clean(76) = 0x00.toByte
+      clean(77) = 0x00.toByte
+      clean(78) = 0x01.toByte
+      clean(79) = 0xB5.toByte
+      clean(80) = 0x14.toByte
+      clean(81) = 0x82.toByte
+      clean(82) = 0x00.toByte
+      clean(83) = 0x01.toByte
+      clean(84) = 0x00.toByte
+      clean(85) = 0x00.toByte
+      // Sequence Display Extension (0xB5 2x) at offset 86
+      clean(86) = 0x00.toByte
+      clean(87) = 0x00.toByte
+      clean(88) = 0x01.toByte
+      clean(89) = 0xB5.toByte
+      clean(90) = 0x23.toByte
+      clean(91) = 0x05.toByte
+      // Picture Coding Extension (0xB5 8x) at offset 98
+      clean(98) = 0x00.toByte
+      clean(99) = 0x00.toByte
+      clean(100) = 0x01.toByte
+      clean(101) = 0xB5.toByte
+      clean(102) = 0x8F.toByte
+      clean(103) = 0xFF.toByte
+      clean(104) = 0xF3.toByte
+      clean(105) = 0x41.toByte
+      clean(106) = 0x80.toByte
+
+      val lockedHdr = FreezeFramePacer.parseMpeg2SequenceHeader(clean, 0, clean.length).get._1
+      val _ = lockedHdr.length shouldBe 22
+
+      // Case A: 08:14:09 bit-flip (progressive_sequence=1, chroma_format=4:2:2, vertical_size_extension=1, marker=0)
+      val corrupted = clean.clone()
+      corrupted(81) = 0x8C.toByte // progressive_sequence=1 (0x08) | chroma_format=4:2:2 (0x04)
+      corrupted(82) = 0xA0.toByte // horizontal_size_ext LSB=1 | vertical_size_ext=1
+      corrupted(83) = 0x00.toByte // marker_bit cleared
+
+      val resA = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(corrupted, 0, corrupted.length, 68, Some(lockedHdr))
+      val _ = resA.clampedSlices shouldBe 0
+      val _ = resA.restoredHeaders shouldBe 1
+      val _ = ByteString.fromArray(corrupted, 76, 10) shouldBe ByteString.fromArray(clean, 76, 10)
+      val _ = ByteString.fromArray(corrupted, 86, 6) shouldBe ByteString.fromArray(clean, 86, 6)
+      val _ = ByteString.fromArray(corrupted, 98, 9) shouldBe ByteString.fromArray(clean, 98, 9)
+
+      // Case B: bit-flip in extension_start_code_identifier nibble (0x14 -> 0x94) right after 0xB3
+      val corruptedId = clean.clone()
+      corruptedId(80) = 0x94.toByte
+      corruptedId(81) = 0x8A.toByte
+      val resB = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(corruptedId, 0, corruptedId.length, 68, Some(lockedHdr))
+      val _ = resB.restoredHeaders shouldBe 1
+      val _ = ByteString.fromArray(corruptedId, 76, 10) shouldBe ByteString.fromArray(clean, 76, 10)
+
+      // Case C: standalone 0xB5 1x in a PUSI=0 continuation payload (no 0xB3 in same packet)
+      val continuation = Array[Byte](
+        0xAA.toByte, 0xBB.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+        0x14.toByte, 0x8C.toByte, 0x20.toByte, 0x00.toByte,
+        0x00.toByte, 0x00.toByte
+      )
+      val resC = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(continuation, 0, continuation.length, 68, Some(lockedHdr))
+      val _ = resC.restoredHeaders shouldBe 1
+      ByteString.fromArray(continuation, 2, 10) shouldBe lockedHdr.slice(12, 22)
+    }
   }
 
   "FreezeFramePacer slice offset & packet prefix stuffing" should {
