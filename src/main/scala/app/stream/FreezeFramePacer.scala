@@ -7,7 +7,7 @@ import java.util.Arrays
 import scala.util.boundary
 import scala.util.boundary.break
 
-import MpegTsTypes.{OptPts, PtsTicks}
+import MpegTsTypes.{Mpeg2SanitizeResult, OptPts, PtsTicks}
 
 object FreezeFramePacer {
   val PacketSize: Int = 188
@@ -296,6 +296,15 @@ object FreezeFramePacer {
     ByteString.fromArray(pkt)
   }
 
+  private def hasSequenceExtensionStartAt(arr: Array[Byte], offset: Int, limit: Int): Boolean =
+    offset >= 0 &&
+      offset + 10 <= limit &&
+      arr(offset) == 0x00.toByte &&
+      arr(offset + 1) == 0x00.toByte &&
+      arr(offset + 2) == 0x01.toByte &&
+      (arr(offset + 3) & 0xFF) == 0xB5 &&
+      (arr(offset + 4) & 0xF0) == 0x10
+
   def sanitizeMpeg2Payload(
       arr: Array[Byte],
       payloadOffset: Int,
@@ -303,12 +312,22 @@ object FreezeFramePacer {
       maxSliceRow: Int,
       lockedSeqHeader: Option[ByteString]
   ): Int =
+    sanitizeMpeg2PayloadDetailed(arr, payloadOffset, payloadLen, maxSliceRow, lockedSeqHeader).clampedSlices
+
+  def sanitizeMpeg2PayloadDetailed(
+      arr: Array[Byte],
+      payloadOffset: Int,
+      payloadLen: Int,
+      maxSliceRow: Int,
+      lockedSeqHeader: Option[ByteString]
+  ): Mpeg2SanitizeResult =
     if (payloadOffset < 0 || payloadLen < 4 || payloadOffset + payloadLen > arr.length) {
-      0
+      Mpeg2SanitizeResult.Empty
     } else {
       val end = payloadOffset + payloadLen
       var i = payloadOffset
       var clamped = 0
+      var restoredHeaders = 0
       while (i <= end - 4) {
         if (arr(i) == 0x00.toByte &&
             arr(i + 1) == 0x00.toByte &&
@@ -325,22 +344,41 @@ object FreezeFramePacer {
             i = end
           } else if (code == 0xB3) {
             if (i + 12 <= end) {
+              val immediateSeqExt = hasSequenceExtensionStartAt(arr, i + 12, end)
               lockedSeqHeader.foreach { locked =>
-                if (locked.length >= 12 && (locked.length == 12 || (arr(i + 11) & 0x03) == (locked(11) & 0x03))) {
-                  var differs = false
+                if (locked.length >= 12) {
+                  val expectedByte11 =
+                    if (immediateSeqExt) (locked(11) & 0xFC).toByte
+                    else ((locked(11) & 0xFC) | (arr(i + 11) & 0x03)).toByte
+                  var differs = arr(i + 11) != expectedByte11
                   var k = 0
-                  while (k < 12) {
+                  while (k < 11 && !differs) {
                     if (arr(i + k) != locked(k)) differs = true
                     k += 1
                   }
                   if (differs) {
-                    val _ = locked.take(12).copyToArray(arr, i)
+                    var j = 0
+                    while (j < 11) {
+                      arr(i + j) = locked(j)
+                      j += 1
+                    }
+                    arr(i + 11) = expectedByte11
+                    restoredHeaders += 1
                   }
                 }
               }
+              val hasIntraQuant = (arr(i + 11) & 0x02) != 0
+              val hasNonIntraQuant =
+                if (hasIntraQuant) i + 76 <= end && (arr(i + 75) & 0x01) != 0
+                else (arr(i + 11) & 0x01) != 0
+              val seqHeaderLen =
+                if (hasIntraQuant && hasNonIntraQuant) 140
+                else if (hasIntraQuant || hasNonIntraQuant) 76
+                else 12
+              i += seqHeaderLen
+            } else {
+              i = end
             }
-            val hasIntraQuant = i + 12 <= end && (arr(i + 11) & 0x02) != 0
-            i += (if (hasIntraQuant) 76 else 12)
           } else if (code >= 0x01 && code <= 0xAF && code > maxSliceRow) {
             arr(i + 2) = 0x00.toByte
             clamped += 1
@@ -352,7 +390,7 @@ object FreezeFramePacer {
           i += 1
         }
       }
-      clamped
+      Mpeg2SanitizeResult(clamped, restoredHeaders)
     }
 
   def hasOutOfBoundsMpeg2Slice(

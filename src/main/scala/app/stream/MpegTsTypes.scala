@@ -78,4 +78,18 @@ object MpegTsTypes {
       inline def toOption: Option[Long] = if (opt >= 0L) Some(opt) else None
     }
   }
+
+  opaque type Mpeg2SanitizeResult = Long
+
+  object Mpeg2SanitizeResult {
+    val Empty: Mpeg2SanitizeResult = 0L
+
+    inline def apply(clampedSlices: Int, restoredHeaders: Int): Mpeg2SanitizeResult =
+      ((restoredHeaders.toLong & 0xFFFFFFFFL) << 32) | (clampedSlices.toLong & 0xFFFFFFFFL)
+
+    extension (result: Mpeg2SanitizeResult) {
+      inline def clampedSlices: Int = (result & 0xFFFFFFFFL).toInt
+      inline def restoredHeaders: Int = ((result >>> 32) & 0xFFFFFFFFL).toInt
+    }
+  }
 }

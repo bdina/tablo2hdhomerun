@@ -325,6 +325,121 @@ class FreezeFramePacerSpec extends AnyWordSpec with Matchers {
       val _ = clamped shouldBe 0
       userDataPayload(6) shouldBe 0x01.toByte
     }
+
+    "restore mutated 0xB3 sequence header when locked header is 22 bytes and live packet carries an intra quantiser matrix" in {
+      val clean = Array.fill[Byte](96)(0x10.toByte)
+      clean(0) = 0x00.toByte
+      clean(1) = 0x00.toByte
+      clean(2) = 0x01.toByte
+      clean(3) = 0xB3.toByte
+      clean(4) = 0x78.toByte
+      clean(5) = 0x04.toByte
+      clean(6) = 0x38.toByte
+      clean(7) = 0x34.toByte
+      clean(8) = 0x12.toByte
+      clean(9) = 0x34.toByte
+      clean(10) = 0x56.toByte
+      clean(11) = 0x82.toByte
+      clean(76) = 0x00.toByte
+      clean(77) = 0x00.toByte
+      clean(78) = 0x01.toByte
+      clean(79) = 0xB5.toByte
+      clean(80) = 0x14.toByte
+      clean(81) = 0x82.toByte
+      clean(82) = 0x00.toByte
+      clean(83) = 0x01.toByte
+      clean(84) = 0x00.toByte
+      clean(85) = 0x00.toByte
+
+      val lockedHdr = FreezeFramePacer.parseMpeg2SequenceHeader(clean, 0, clean.length).get._1
+      val _ = lockedHdr.length shouldBe 22
+      val _ = (lockedHdr(11) & 0x03) shouldBe 0
+
+      val corrupted = clean.clone()
+      corrupted(5) = 0x00.toByte
+      corrupted(6) = 0x00.toByte
+      corrupted(11) = 0x02.toByte // VBV upper bits corrupted, intra quantiser flag intact
+
+      val res = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(corrupted, 0, corrupted.length, 68, Some(lockedHdr))
+      val _ = res.clampedSlices shouldBe 0
+      val _ = res.restoredHeaders shouldBe 1
+      val _ = ByteString.fromArray(corrupted, 0, 12) shouldBe ByteString.fromArray(clean, 0, 12)
+      ByteString.fromArray(corrupted, 12, 64) shouldBe ByteString.fromArray(clean, 12, 64)
+    }
+
+    "skip non-intra-only and dual quantiser matrices accurately before clamping subsequent slices" in {
+      // Non-intra quantiser matrix only (76 bytes total): stray 00 00 01 99 inside matrix must be skipped,
+      // while 00 00 01 99 at offset 76 must be clamped.
+      val nonIntra = Array.fill[Byte](84)(0x10.toByte)
+      nonIntra(0) = 0x00.toByte
+      nonIntra(1) = 0x00.toByte
+      nonIntra(2) = 0x01.toByte
+      nonIntra(3) = 0xB3.toByte
+      nonIntra(4) = 0x78.toByte
+      nonIntra(5) = 0x04.toByte
+      nonIntra(6) = 0x38.toByte
+      nonIntra(11) = 0x01.toByte // load_non_intra_quantiser_matrix = 1
+      nonIntra(20) = 0x00.toByte
+      nonIntra(21) = 0x00.toByte
+      nonIntra(22) = 0x01.toByte
+      nonIntra(23) = 0x99.toByte
+      nonIntra(76) = 0x00.toByte
+      nonIntra(77) = 0x00.toByte
+      nonIntra(78) = 0x01.toByte
+      nonIntra(79) = 0x99.toByte
+
+      val nonIntraRes = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(nonIntra, 0, nonIntra.length, 68, None)
+      val _ = nonIntraRes.clampedSlices shouldBe 1
+      val _ = nonIntra(22) shouldBe 0x01.toByte
+      val _ = nonIntra(78) shouldBe 0x00.toByte
+
+      // Dual intra + non-intra quantiser matrices (140 bytes total): stray 00 00 01 99 at offset 90 must be skipped,
+      // while 00 00 01 99 at offset 140 must be clamped.
+      val dual = Array.fill[Byte](148)(0x10.toByte)
+      dual(0) = 0x00.toByte
+      dual(1) = 0x00.toByte
+      dual(2) = 0x01.toByte
+      dual(3) = 0xB3.toByte
+      dual(4) = 0x78.toByte
+      dual(5) = 0x04.toByte
+      dual(6) = 0x38.toByte
+      dual(11) = 0x02.toByte // load_intra_quantiser_matrix = 1
+      dual(75) = 0x11.toByte // bit 0 = load_non_intra_quantiser_matrix = 1
+      dual(90) = 0x00.toByte
+      dual(91) = 0x00.toByte
+      dual(92) = 0x01.toByte
+      dual(93) = 0x99.toByte
+      dual(140) = 0x00.toByte
+      dual(141) = 0x00.toByte
+      dual(142) = 0x01.toByte
+      dual(143) = 0x99.toByte
+
+      val dualRes = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(dual, 0, dual.length, 68, None)
+      val _ = dualRes.clampedSlices shouldBe 1
+      val _ = dual(92) shouldBe 0x01.toByte
+      dual(142) shouldBe 0x00.toByte
+    }
+
+    "clear corrupted byte-11 quantiser flags when 0xB5 sequence_extension immediately follows 0xB3" in {
+      val clean = Array[Byte](
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB3.toByte,
+        0x78.toByte, 0x04.toByte, 0x38.toByte, 0x34.toByte,
+        0x12.toByte, 0x34.toByte, 0x56.toByte, 0x80.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0xB5.toByte,
+        0x14.toByte, 0x82.toByte, 0x00.toByte, 0x01.toByte,
+        0x00.toByte, 0x00.toByte,
+        0x00.toByte, 0x00.toByte, 0x01.toByte, 0x99.toByte
+      )
+      val lockedHdr = FreezeFramePacer.parseMpeg2SequenceHeader(clean, 0, clean.length).get._1
+      val corrupted = clean.clone()
+      corrupted(11) = 0x82.toByte // bit-flip sets load_intra_quantiser_matrix despite immediate 0xB5 at offset 12
+
+      val res = FreezeFramePacer.sanitizeMpeg2PayloadDetailed(corrupted, 0, corrupted.length, 68, Some(lockedHdr))
+      val _ = res.restoredHeaders shouldBe 1
+      val _ = res.clampedSlices shouldBe 1
+      val _ = corrupted(11) shouldBe 0x80.toByte
+      corrupted(24) shouldBe 0x00.toByte
+    }
   }
 
   "FreezeFramePacer slice offset & packet prefix stuffing" should {
