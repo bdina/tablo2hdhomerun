@@ -72,20 +72,58 @@ class BuildAutomationSpec extends AnyFlatSpec with Matchers {
     }
   }
 
-  "build.gradle" should "reuse project.version in jar manifests and define verifyCleanVersion" in {
+  "gradle.properties" should "enable Gradle caching, parallel execution, and tuned JVM flags" in {
+    val propsPath = projectRoot.resolve("gradle.properties")
+    val _ = Files.exists(propsPath) shouldBe true
+    val props = new Properties()
+    Using.resource(Files.newBufferedReader(propsPath, StandardCharsets.UTF_8)) { reader =>
+      props.load(reader)
+    }
+
+    val _ = props.getProperty("org.gradle.caching") shouldBe "true"
+    val _ = props.getProperty("org.gradle.parallel") shouldBe "true"
+    val jvmArgs = Option(props.getProperty("org.gradle.jvmargs")).getOrElse("")
+    val _ = jvmArgs should include("-XX:+UseParallelGC")
+    jvmArgs should include("-XX:+UseCompactObjectHeaders")
+  }
+
+  "build.gradle" should "resolve gitVersion once, optimize compile/test/jar tasks, and define verifyCleanVersion" in {
     val buildGradle = Files.readString(projectRoot.resolve("build.gradle"), StandardCharsets.UTF_8)
     val gitVersionCalls = "gitVersion\\(\\)".r.findAllIn(buildGradle).length
 
     val _ = gitVersionCalls shouldBe 1
+    val _ = buildGradle should not include "mvnrepository.com"
     val _ = buildGradle should include("tasks.register('verifyCleanVersion')")
-    val _ = buildGradle should include("'App-Version': project.version.toString()")
-    val _ = buildGradle should include("'Implementation-Version': project.version.toString()")
-    buildGradle should include("requireCleanVersion")
+    val _ = buildGradle should include("tasks.register('warmDependencyCache')")
+    val _ = buildGradle should include("'App-Version': resolvedProjectVersion")
+    val _ = buildGradle should include("'Implementation-Version': resolvedProjectVersion")
+    val _ = buildGradle should include("requireCleanVersion")
+    val _ = buildGradle should include("-Ybackend-parallelism:")
+    val _ = buildGradle should include("maxParallelForks")
+    val _ = buildGradle should include("testReportsEnabled")
+    buildGradle should include("singleShotCompile")
   }
 
-  "Dockerfiles" should "wire REQUIRE_CLEAN_VERSION build arg to Gradle" in {
+  "NativeImageTask" should "declare incremental InputFile and OutputFile properties" in {
+    val nativeTask = Files.readString(
+      projectRoot.resolve("buildSrc/src/main/groovy/compiler/NativeImage.groovy")
+    , StandardCharsets.UTF_8
+    )
+    val _ = nativeTask should include("@InputFile")
+    val _ = nativeTask should include("getInputJar()")
+    val _ = nativeTask should include("@OutputFile")
+    nativeTask should include("getOutputBinary()")
+  }
+
+  "Dockerfiles" should "warm Gradle caches in a dedicated layer and run offline single-shot builds" in {
     List("Dockerfile.jvm", "Dockerfile.native").foreach { name =>
       val content = Files.readString(projectRoot.resolve(name), StandardCharsets.UTF_8)
+      val _ = withClue(s"$name missing warmDependencyCache layer: ") {
+        content should include("-PskipGitVersion=true warmDependencyCache")
+      }
+      val _ = withClue(s"$name missing offline/no-build-cache/single-shot build flags: ") {
+        content should include("--offline --no-build-cache --no-watch-fs -PsingleShotCompile=true")
+      }
       val _ = withClue(s"$name missing REQUIRE_CLEAN_VERSION arg: ") {
         content should include("ARG REQUIRE_CLEAN_VERSION=false")
       }
@@ -93,6 +131,14 @@ class BuildAutomationSpec extends AnyFlatSpec with Matchers {
         content should include("-PrequireCleanVersion=${REQUIRE_CLEAN_VERSION}")
       }
     }
+  }
+
+  "docker-build-test.sh" should "persist Gradle caches in a Docker volume and default to incremental tests on latest" in {
+    val script = Files.readString(projectRoot.resolve("docker-build-test.sh"), StandardCharsets.UTF_8)
+    val _ = script should include("GRADLE_CACHE_VOLUME")
+    val _ = script should include(":/root/.gradle")
+    val _ = script should include("TAG=${TAG:-latest}")
+    script should include("--no-watch-fs")
   }
 
   "version.properties" should "match Tablo2HDHomeRun.appVersion and resolve a valid git version" in {

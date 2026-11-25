@@ -90,9 +90,16 @@ docker build -f Dockerfile.native --tag tablo2hdhomerun:<version> .
 docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 ```
 
+### Incremental Dev & Test in Docker
+
+```bash
+./docker-build-test.sh              # Incremental test with persistent Gradle cache volume
+./docker-build-test.sh clean test   # Full clean test run (add -PtestReports=true for HTML/XML reports)
+```
+
 ### Clean Release Verification
 
-On a clean Git commit or tag, Gradle and Docker builds automatically resolve a clean version without a `.dirty` suffix. To fail fast if uncommitted or untracked changes are present:
+On a clean Git commit or tag, Gradle and Docker builds automatically resolve a clean version without a `.dirty` suffix. Both Dockerfiles warm Gradle plugins and dependencies in a cached layer before copying project sources and compile offline. To fail fast if uncommitted or untracked changes are present:
 
 ```bash
 gradle -PrequireCleanVersion=true shadowJar

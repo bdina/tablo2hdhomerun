@@ -28,9 +28,6 @@ apply plugin: 'application'
 
 repositories {
     mavenCentral()
-    maven {
-        url = 'https://mvnrepository.com/artifact'
-    }
 }
 
 configurations {
@@ -73,39 +70,99 @@ dependencies {
     testImplementation "org.apache.pekko:pekko-http-testkit_${scala_maj}:${pekko_http}"
 }
 
+def testReportsEnabled = providers.gradleProperty('testReports')
+    .map { it.toBoolean() }
+    .getOrElse(false)
+
 test {
   useJUnit()
+  maxParallelForks = Math.max(1, Runtime.runtime.availableProcessors().intdiv(2))
   jvmArgs '--sun-misc-unsafe-memory-access=allow', '-XX:+UseCompactObjectHeaders'
+  reports {
+    html.required = testReportsEnabled
+    junitXml.required = testReportsEnabled
+  }
   testLogging {
     events "passed", "skipped", "failed"
     showStandardStreams = false
     exceptionFormat = 'full'
   }
-  afterSuite { desc, result ->
-    if (desc.parent == null) {
-      println "\nTest result: ${result.resultType}"
-      println "Tests: ${result.testCount}, succeeded: ${result.successfulTestCount}, failed: ${result.failedTestCount}, skipped: ${result.skippedTestCount}"
-      println "Time: ${(result.endTime - result.startTime) / 1000.0} s"
+  addTestListener(new org.gradle.api.tasks.testing.TestListener() {
+    @Override void beforeSuite(org.gradle.api.tasks.testing.TestDescriptor suite) {}
+    @Override void beforeTest(org.gradle.api.tasks.testing.TestDescriptor testDescriptor) {}
+    @Override void afterTest(org.gradle.api.tasks.testing.TestDescriptor testDescriptor, org.gradle.api.tasks.testing.TestResult result) {}
+    @Override void afterSuite(org.gradle.api.tasks.testing.TestDescriptor desc, org.gradle.api.tasks.testing.TestResult result) {
+      if (desc.parent == null) {
+        println "\nTest result: ${result.resultType}"
+        println "Tests: ${result.testCount}, succeeded: ${result.successfulTestCount}, failed: ${result.failedTestCount}, skipped: ${result.skippedTestCount}"
+        println "Time: ${(result.endTime - result.startTime) / 1000.0} s"
+      }
     }
-  }
+  })
 }
 
-version = gitVersion()
+def skipGitVersion = providers.gradleProperty('skipGitVersion')
+    .map { it.toBoolean() }
+    .getOrElse(false)
+
+version = skipGitVersion ? 'warmup' : gitVersion()
+
+def resolvedProjectVersion = version.toString()
 
 def requireCleanVersion = providers.gradleProperty('requireCleanVersion')
     .map { it.toBoolean() }
     .getOrElse(false)
 
+def singleShotCompile = providers.gradleProperty('singleShotCompile')
+    .map { it.toBoolean() }
+    .getOrElse(false)
+
+def includeTestDeps = providers.gradleProperty('includeTestDeps')
+    .map { it.toBoolean() }
+    .getOrElse(false)
+
+tasks.register('warmDependencyCache') {
+    group = 'build setup'
+    description = 'Resolves compile, runtime, and Scala/Zinc compiler dependencies to warm local/container caches without writing build artifacts'
+    def confsToResolve = [
+        configurations.compileClasspath,
+        configurations.runtimeClasspath,
+        configurations.named('zinc').get(),
+        configurations.named('scalaCompilerPlugins').get()
+    ] + (includeTestDeps ? [configurations.testCompileClasspath, configurations.testRuntimeClasspath] : [])
+    def compileScalaTask = tasks.named('compileScala', org.gradle.api.tasks.scala.ScalaCompile)
+    def compilerClasspaths = [
+        scalaClasspath: compileScalaTask.map { it.scalaClasspath },
+        zincClasspath: compileScalaTask.map { it.zincClasspath }
+    ]
+    doLast {
+        int totalFiles = 0
+        confsToResolve.each { conf ->
+            def resolved = conf.resolve()
+            totalFiles += resolved.size()
+            logger.info("[deps] warmed configuration={} files={}", conf.name, resolved.size())
+        }
+        compilerClasspaths.each { name, cpProvider ->
+            def files = cpProvider.get().files
+            totalFiles += files.size()
+            logger.info("[deps] warmed {} files={}", name, files.size())
+        }
+        logger.lifecycle("[deps] warmed {} configurations + {} compiler classpaths ({} artifact files)", confsToResolve.size(), compilerClasspaths.size(), totalFiles)
+    }
+}
+
 tasks.register('verifyCleanVersion') {
     group = 'verification'
     description = 'Verifies that the resolved git version does not have a .dirty suffix'
+    def versionToCheck = resolvedProjectVersion
+    def repoDir = project.projectDir
+    def buildscriptClassLoader = project.buildscript.classLoader
     doLast {
-        def resolvedVersion = project.version.toString()
-        if (resolvedVersion.endsWith('.dirty')) {
+        if (versionToCheck == 'warmup' || versionToCheck == 'unspecified' || versionToCheck.endsWith('.dirty')) {
             def details = []
             try {
-                def gitClass = project.buildscript.classLoader.loadClass('org.eclipse.jgit.api.Git')
-                def git = gitClass.open(project.projectDir)
+                def gitClass = buildscriptClassLoader.loadClass('org.eclipse.jgit.api.Git')
+                def git = gitClass.open(repoDir)
                 try {
                     def status = git.status().call()
                     [
@@ -130,10 +187,10 @@ tasks.register('verifyCleanVersion') {
                 details << "unable to inspect JGit status: ${e.message}"
             }
             def detailMsg = details.isEmpty() ? '' : "\nDirty paths:\n  - ${details.join('\n  - ')}"
-            logger.error("[version] dirty build version detected: {}{}", resolvedVersion, detailMsg)
-            throw new GradleException("Project version '${resolvedVersion}' is dirty. Commit, remove, or ignore pending changes before building a clean artifact.${detailMsg}")
+            logger.error("[version] dirty build version detected: {}{}", versionToCheck, detailMsg)
+            throw new GradleException("Project version '${versionToCheck}' is dirty. Commit, remove, or ignore pending changes before building a clean artifact.${detailMsg}")
         }
-        logger.lifecycle("[version] verified clean version={}", resolvedVersion)
+        logger.lifecycle("[version] verified clean version={}", versionToCheck)
     }
 }
 
@@ -179,8 +236,9 @@ tasks.register('mergeReferenceConf') {
     def pekkoJars = configurations.runtimeClasspath.elements.map { files ->
         files.collect { it.asFile }.findAll { it.name.contains('pekko') }
     }
-    inputs.files(pekkoJars)
-    inputs.property('projectVersion', provider { project.version.toString() })
+    def versionString = resolvedProjectVersion
+    inputs.files(pekkoJars).withPathSensitivity(PathSensitivity.NAME_ONLY)
+    inputs.property('projectVersion', versionString)
     outputs.dir(generatedResourcesDir)
 
     doLast {
@@ -190,26 +248,30 @@ tasks.register('mergeReferenceConf') {
         def referenceConf = new StringBuilder()
         def versionConf = new StringBuilder()
 
-        configurations.runtimeClasspath.each { jar ->
-            if (jar.name.contains('pekko')) {
-                new java.util.zip.ZipFile(jar).withCloseable { zipFile ->
-                    def refEntry = zipFile.getEntry('reference.conf')
-                    if (refEntry) {
-                        referenceConf.append(zipFile.getInputStream(refEntry).text)
-                        referenceConf.append('\n')
-                    }
-                    def verEntry = zipFile.getEntry('version.conf')
-                    if (verEntry) {
-                        versionConf.append(zipFile.getInputStream(verEntry).text)
-                        versionConf.append('\n')
-                    }
+        pekkoJars.get().each { jar ->
+            new java.util.zip.ZipFile(jar).withCloseable { zipFile ->
+                def refEntry = zipFile.getEntry('reference.conf')
+                if (refEntry) {
+                    referenceConf.append(zipFile.getInputStream(refEntry).text)
+                    referenceConf.append('\n')
+                }
+                def verEntry = zipFile.getEntry('version.conf')
+                if (verEntry) {
+                    versionConf.append(zipFile.getInputStream(verEntry).text)
+                    versionConf.append('\n')
                 }
             }
         }
 
-        new File(outputDir, 'reference.conf').text = referenceConf.toString()
-        new File(outputDir, 'version.conf').text = versionConf.toString()
-        new File(outputDir, 'version.properties').text = "version=${project.version}\n"
+        def writeIfChanged = { File target, String content ->
+            if (!target.exists() || target.text != content) {
+                target.text = content
+            }
+        }
+
+        writeIfChanged(new File(outputDir, 'reference.conf'), referenceConf.toString())
+        writeIfChanged(new File(outputDir, 'version.conf'), versionConf.toString())
+        writeIfChanged(new File(outputDir, 'version.properties'), "version=${versionString}\n")
     }
 }
 
@@ -219,34 +281,39 @@ jar {
     archiveClassifier = 'plain'
     manifest {
         attributes(
-          'App-Version': project.version.toString(),
-          'Implementation-Version': project.version.toString()
+          'App-Version': resolvedProjectVersion,
+          'Implementation-Version': resolvedProjectVersion
         )
     }
 }
 
 shadowJar {
     archiveClassifier = ''
-    exclude '**/*.tasty'
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    filesMatching('META-INF/services/**') {
+        duplicatesStrategy = DuplicatesStrategy.INCLUDE
+    }
+    exclude '**/*.tasty', '**/*.proto', '**/*.protobuf', 'META-INF/maven/**'
     manifest {
         attributes(
-          'App-Version': project.version.toString(),
-          'Implementation-Version': project.version.toString()
+          'App-Version': resolvedProjectVersion,
+          'Implementation-Version': resolvedProjectVersion
         )
     }
     mergeServiceFiles()
+    def jarVersion = resolvedProjectVersion
     doFirst {
-        def resolvedVersion = project.version.toString()
-        if (resolvedVersion.endsWith('.dirty')) {
-            logger.warn("[version] packaging dirty shadowJar version={} (run 'gradle verifyCleanVersion' to inspect dirty paths)", resolvedVersion)
+        if (jarVersion.endsWith('.dirty')) {
+            logger.warn("[version] packaging dirty shadowJar version={} (run 'gradle verifyCleanVersion' to inspect dirty paths)", jarVersion)
         } else {
-            logger.info("[version] packaging clean shadowJar version={}", resolvedVersion)
+            logger.info("[version] packaging clean shadowJar version={}", jarVersion)
         }
     }
 }
 
 nativeImage {
-    dependsOn shadowJar
+    inputJar.set(tasks.named('shadowJar').flatMap { it.archiveFile })
+    outputBinary.set(layout.buildDirectory.file(project.name))
 
     minHeap = 32
     maxHeap = 128
@@ -282,6 +349,8 @@ def javaOutputVersion = {
   return 11
 }()
 
+def scalaBackendParallelism = Math.max(1, Math.min(Runtime.runtime.availableProcessors(), 8))
+
 def scalaCompilerParams = [
     '-feature'
   , '-no-indent'
@@ -292,12 +361,22 @@ def scalaCompilerParams = [
   , '-Wsafe-init'
   , '-Wunused:all'
   , '-Wvalue-discard'
+  , "-Ybackend-parallelism:${scalaBackendParallelism}".toString()
   , "-Xunchecked-java-output-version:${javaOutputVersion}".toString()
 ]
+
+def scalaForkJvmArgs = [
+    '-XX:+UseParallelGC'
+  , '-XX:+UseCompactObjectHeaders'
+  , '--sun-misc-unsafe-memory-access=allow'
+] + (singleShotCompile ? ['-XX:TieredStopAtLevel=1'] : [])
 
 tasks.withType(org.gradle.api.tasks.scala.ScalaCompile).configureEach {
   scalaCompileOptions.deprecation = true
   scalaCompileOptions.additionalParameters = scalaCompilerParams
+  scalaCompileOptions.forkOptions.memoryInitialSize = '256m'
+  scalaCompileOptions.forkOptions.memoryMaximumSize = '2g'
+  scalaCompileOptions.forkOptions.jvmArgs = scalaForkJvmArgs
 }
 tasks.named('compileTestScala').configure {
   def testParams = scalaCompilerParams.collect { it == '-Werror' ? '-Wconf:any:w' : it }

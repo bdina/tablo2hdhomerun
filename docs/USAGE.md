@@ -121,7 +121,7 @@ gradle shadowJar
 java -jar build/libs/tablo2hdhomerun-<version>.jar
 ```
 
-To fail fast if uncommitted or untracked changes would produce a `.dirty` version suffix, run `gradle verifyCleanVersion` or pass `-PrequireCleanVersion=true` (e.g., `gradle -PrequireCleanVersion=true shadowJar`).
+To fail fast if uncommitted or untracked changes would produce a `.dirty` version suffix, run `gradle verifyCleanVersion` or pass `-PrequireCleanVersion=true` (e.g., `gradle -PrequireCleanVersion=true shadowJar`). HTML/JUnit XML test reports are disabled by default to minimize disk writes; pass `-PtestReports=true` to generate them. For fast incremental container test loops using a persistent Gradle cache volume, run `./docker-build-test.sh` (or `./docker-build-test.sh clean test` for a full clean run).
 
 ### Option 2: Native Image (Production)
 

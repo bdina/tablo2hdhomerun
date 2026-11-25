@@ -53,12 +53,17 @@ ENV PATH=${JAVA_HOME}/bin:${GRADLE_HOME}/bin:${SCALA_HOME}/bin:${PATH}
 
 WORKDIR ${GRAALVM_WORKDIR}
 
+# Warm Gradle plugins, buildSrc, and runtime/compiler caches in a separate layer
+COPY settings.gradle build.gradle gradle.properties ${GRAALVM_WORKDIR}/
+COPY buildSrc ${GRAALVM_WORKDIR}/buildSrc
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon --no-build-cache --no-watch-fs -PskipGitVersion=true warmDependencyCache \
+ && rm -rf ${GRAALVM_WORKDIR}/build ${GRAALVM_WORKDIR}/.gradle
+
 ARG REQUIRE_CLEAN_VERSION=false
 
-# Copy the entire project and build it
-# This layer is rebuilt when a file changes in the project directory
+# Copy the entire project and build it offline from cached dependencies
 COPY . ${GRAALVM_WORKDIR}
-RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon -PrequireCleanVersion=${REQUIRE_CLEAN_VERSION} nativeImage
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon --offline --no-build-cache --no-watch-fs -PsingleShotCompile=true -PrequireCleanVersion=${REQUIRE_CLEAN_VERSION} nativeImage
 
 # Create the minimal runtime image
 FROM scratch AS app

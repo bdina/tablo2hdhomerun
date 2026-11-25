@@ -12,22 +12,27 @@ ARG OPENJDK_WORKDIR=/openjdk/src/project
 
 # Install tools required for project
 # Run `docker build --no-cache .` to update dependencies
-RUN apk update \
- && apk add wget unzip \
- && wget https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -P /tmp \
- && unzip -d /opt /tmp/gradle-${GRADLE_VERSION}-bin.zip
+RUN apk add --no-cache wget unzip \
+ && wget -q https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip -P /tmp \
+ && unzip -q -d /opt /tmp/gradle-${GRADLE_VERSION}-bin.zip \
+ && rm -f /tmp/gradle-${GRADLE_VERSION}-bin.zip
 
 ENV GRADLE_HOME=/opt/gradle-${GRADLE_VERSION}
 ENV PATH=${GRADLE_HOME}/bin:${PATH}
 
 WORKDIR ${OPENJDK_WORKDIR}
 
+# Warm Gradle plugins, buildSrc, and runtime/compiler caches in a separate layer
+COPY settings.gradle build.gradle gradle.properties ${OPENJDK_WORKDIR}/
+COPY buildSrc ${OPENJDK_WORKDIR}/buildSrc
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon --no-build-cache --no-watch-fs -PskipGitVersion=true warmDependencyCache \
+ && rm -rf ${OPENJDK_WORKDIR}/build ${OPENJDK_WORKDIR}/.gradle
+
 ARG REQUIRE_CLEAN_VERSION=false
 
-# Copy the entire project and build it
-# This layer is rebuilt when a file changes in the project directory
+# Copy the entire project and build it offline from cached dependencies
 COPY . ${OPENJDK_WORKDIR}
-RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon -PrequireCleanVersion=${REQUIRE_CLEAN_VERSION} shadowJar
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon --offline --no-build-cache --no-watch-fs -PsingleShotCompile=true -PrequireCleanVersion=${REQUIRE_CLEAN_VERSION} shadowJar
 
 # This results in a single layer image
 #FROM alpine AS tablo2hdhomerun

@@ -2,11 +2,17 @@ package compiler
 
 import org.gradle.api.DefaultTask
 import org.gradle.api.GradleException
+import org.gradle.api.Plugin
+import org.gradle.api.Project
+import org.gradle.api.file.RegularFileProperty
 import org.gradle.api.tasks.Input
-import org.gradle.api.tasks.Internal
+import org.gradle.api.tasks.InputFile
+import org.gradle.api.tasks.OutputFile
+import org.gradle.api.tasks.PathSensitive
+import org.gradle.api.tasks.PathSensitivity
 import org.gradle.api.tasks.TaskAction
 
-class NativeImageTask extends DefaultTask {
+abstract class NativeImageTask extends DefaultTask {
     enum Option {
         STATIC('--static')
       , MUSL('--libc=musl')
@@ -30,37 +36,44 @@ class NativeImageTask extends DefaultTask {
     @Input
     Integer maxNew = 32
 
-    @Internal
-    File buildDir = project.layout.buildDirectory.get().asFile
+    @InputFile
+    @PathSensitive(PathSensitivity.NONE)
+    abstract RegularFileProperty getInputJar()
+
+    @OutputFile
+    abstract RegularFileProperty getOutputBinary()
 
     @TaskAction
     void runCommand() {
+        File jarFile = inputJar.get().asFile
+        File outFile = outputBinary.get().asFile
+        outFile.parentFile.mkdirs()
+
         def heap = [
           "-R:MinHeapSize=${minHeap}m"
         , "-R:MaxHeapSize=${maxHeap}m"
         , "-R:MaxNewSize=${maxNew}m"
         ]
-        def source = [ '-jar', "${buildDir}/libs/${project.name}-${project.version}.jar", '-o', "${project.name}" ]
+        def source = [ '-jar', jarFile.absolutePath, '-o', outFile.name ]
         def command = EXECUTABLE + parameters*.arg + heap + source
         logger.lifecycle "Executing native-image command -> '${command.join(' ')}'"
 
-        def process = command.execute(null, buildDir)
+        def process = command.execute(null, outFile.parentFile)
         process.consumeProcessOutput(System.out, System.err)
         process.waitFor()
 
         if (process.exitValue() != 0) {
-            logger.error "Unable to execute native-image: '${process.exitValue}'"
-            throw new GradleException()
+            logger.error "Unable to execute native-image: '${process.exitValue()}'"
+            throw new GradleException("native-image failed with exit code ${process.exitValue()}")
         }
     }
 }
 
-import org.gradle.api.Plugin
-import org.gradle.api.Project
-
 class NativeImagePlugin implements Plugin<Project> {
     @Override
     void apply(Project project) {
-        project.tasks.register('nativeImage', NativeImageTask)
+        project.tasks.register('nativeImage', NativeImageTask) { task ->
+            task.outputBinary.convention(project.layout.buildDirectory.file(project.name))
+        }
     }
 }
