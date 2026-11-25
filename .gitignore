@@ -1,0 +1,23 @@
+# Gradle & build outputs
+/.gradle/
+/build/
+/buildSrc/.gradle/
+/buildSrc/build/
+/lib/
+
+# IDE & editor files
+/.cursor/
+/.idea/
+/.vscode/
+*.iml
+*.swp
+*~
+
+# Tags & local agent instructions
+.tags
+AGENTS.md
+GEMINI.md
+
+# Local packet captures & extracted credentials
+docs/pcap/tablo-credentials.txt
+*.pcap

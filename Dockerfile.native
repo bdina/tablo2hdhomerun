@@ -53,10 +53,12 @@ ENV PATH=${JAVA_HOME}/bin:${GRADLE_HOME}/bin:${SCALA_HOME}/bin:${PATH}
 
 WORKDIR ${GRAALVM_WORKDIR}
 
+ARG REQUIRE_CLEAN_VERSION=false
+
 # Copy the entire project and build it
 # This layer is rebuilt when a file changes in the project directory
 COPY . ${GRAALVM_WORKDIR}
-RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon nativeImage
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon -PrequireCleanVersion=${REQUIRE_CLEAN_VERSION} nativeImage
 
 # Create the minimal runtime image
 FROM scratch AS app

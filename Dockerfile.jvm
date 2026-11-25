@@ -22,10 +22,12 @@ ENV PATH=${GRADLE_HOME}/bin:${PATH}
 
 WORKDIR ${OPENJDK_WORKDIR}
 
+ARG REQUIRE_CLEAN_VERSION=false
+
 # Copy the entire project and build it
 # This layer is rebuilt when a file changes in the project directory
 COPY . ${OPENJDK_WORKDIR}
-RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon shadowJar
+RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon -PrequireCleanVersion=${REQUIRE_CLEAN_VERSION} shadowJar
 
 # This results in a single layer image
 #FROM alpine AS tablo2hdhomerun

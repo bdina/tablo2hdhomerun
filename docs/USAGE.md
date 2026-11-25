@@ -121,6 +121,8 @@ gradle shadowJar
 java -jar build/libs/tablo2hdhomerun-<version>.jar
 ```
 
+To fail fast if uncommitted or untracked changes would produce a `.dirty` version suffix, run `gradle verifyCleanVersion` or pass `-PrequireCleanVersion=true` (e.g., `gradle -PrequireCleanVersion=true shadowJar`).
+
 ### Option 2: Native Image (Production)
 
 ```bash
@@ -136,7 +138,7 @@ docker run -e TABLO_IP=192.168.1.100 -e PROXY_IP=0.0.0.0 \
            -p 8080:8080 tablo2hdhomerun:jvm
 ```
 
-`Dockerfile.jvm` runs Java 25 with a build-time AppCDS archive (`-XX:SharedArchiveFile=app-cds.jsa -Xshare:auto`), `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, `-Xss256k`, `STOPSIGNAL SIGTERM`, a built-in Docker `HEALTHCHECK`, and `-d` enabled by default.
+`Dockerfile.jvm` runs Java 25 with a build-time AppCDS archive (`-XX:SharedArchiveFile=app-cds.jsa -Xshare:auto`), `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, `-Xss256k`, `STOPSIGNAL SIGTERM`, a built-in Docker `HEALTHCHECK`, and `-d` enabled by default. Pass `--build-arg REQUIRE_CLEAN_VERSION=true` to reject `.dirty` release builds.
 
 ### Option 4: Docker Native (Recommended)
 
@@ -147,7 +149,7 @@ docker run -e TABLO_IP=192.168.1.100 -e PROXY_IP=0.0.0.0 \
            tablo2hdhomerun:native
 ```
 
-`Dockerfile.native` packages the static musl binary on `scratch` with `/etc/ssl/certs/ca-certificates.crt` (for 4th Gen cloud TLS requests), `/usr/share/zoneinfo`, `STOPSIGNAL SIGTERM`, and a built-in `HEALTHCHECK`.
+`Dockerfile.native` packages the static musl binary on `scratch` with `/etc/ssl/certs/ca-certificates.crt` (for 4th Gen cloud TLS requests), `/usr/share/zoneinfo`, `STOPSIGNAL SIGTERM`, and a built-in `HEALTHCHECK`. Pass `--build-arg REQUIRE_CLEAN_VERSION=true` to enforce a clean git version prior to native-image compilation.
 
 ## Environment Variables
 

@@ -325,6 +325,7 @@ Streams fan out to subscribers via a 1024-element `BroadcastHub` buffer. When ne
 | `gradle shadowJar` | Create uber-JAR with all dependencies |
 | `gradle nativeImage` | Build GraalVM native executable |
 | `gradle scalaCli` | Run Scala CLI build |
+| `gradle verifyCleanVersion` | Verify git working tree is clean (no `.dirty` version suffix) and list dirty paths on failure |
 
 ### Native Image Build
 
@@ -345,7 +346,7 @@ The project includes custom Gradle plugins in `buildSrc/`:
 #### JVM & Dispatcher Runtime Configuration
 
 - **JVM Runtime Alignment (`Dockerfile.jvm`, Java 25)**: Runs with `-XX:+UseCompactObjectHeaders -XX:+UseSerialGC -XX:SharedArchiveFile=app-cds.jsa -Xshare:auto -Xms32m -Xmx128m -XX:MaxNewSize=64m -Xss256k -XX:+ExitOnOutOfMemoryError` (matching Native Image Serial GC and heap ceilings while loading a build-time AppCDS archive and keeping Tiered/C2 JIT active).
-- **Artifact & Resource Packaging**: `shadowJar` excludes Scala 3 compile-time `**/*.tasty` reflection metadata not needed at runtime, and Gradle `mergeReferenceConf` declares input JARs and `layout.buildDirectory` outputs for incremental builds.
+- **Artifact & Resource Packaging**: `shadowJar` excludes Scala 3 compile-time `**/*.tasty` reflection metadata not needed at runtime, and Gradle `mergeReferenceConf` declares input JARs and `layout.buildDirectory` outputs for incremental builds. Repository-level `.gitignore` ignores Gradle build outputs (`/.gradle/`, `/build/`, `/buildSrc/.gradle/`, `/buildSrc/build/`) and local tooling files so pure-Java JGit (`com.palantir.git-version`) resolves clean versions inside Docker containers without depending on host `~/.gitignore_global`; `.dockerignore` excludes only untracked build/local artifacts (never Git-tracked files such as `docs/` or `README.md`) so `Dockerfile.jvm` and `Dockerfile.native` builds never receive false `.dirty` version suffixes. Passing `-PrequireCleanVersion=true` (or `--build-arg REQUIRE_CLEAN_VERSION=true` to Docker) wires `verifyCleanVersion` before artifact packaging to enforce clean release builds.
 - **Native Container Runtime (`Dockerfile.native`)**: `FROM scratch` includes `/etc/ssl/certs/ca-certificates.crt` (`SSL_CERT_FILE`), `/usr/share/zoneinfo`, `STOPSIGNAL SIGTERM`, OCI metadata labels, and a built-in `HEALTHCHECK` probing `/opt/tablo2hdhomerun/tablo2hdhomerun --healthcheck`.
 - **Pekko Dispatcher & Pool Bounds (`application.conf`, `2a70433`)**: `default-dispatcher.fork-join-executor.parallelism-min = 2`, `internal-dispatcher.fork-join-executor.parallelism-min = 1`, `default-blocking-io-dispatcher.thread-pool-executor.fixed-pool-size = 4`, `http.host-connection-pool.max-connections = 8`, and `coordinated-shutdown.default-phase-timeout = 10 s`.
 - **Healthcheck Fast-Path**: `--healthcheck` resolves `PROXY_IP`/`PROXY_PORT` before full `AppConfig.load()` initialization and runs cleanly with `-XX:MinHeapSize=4m -XX:MaxHeapSize=16m -XX:MaxNewSize=8m`.

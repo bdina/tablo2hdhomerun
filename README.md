@@ -90,6 +90,15 @@ docker build -f Dockerfile.native --tag tablo2hdhomerun:<version> .
 docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
 ```
 
+### Clean Release Verification
+
+On a clean Git commit or tag, Gradle and Docker builds automatically resolve a clean version without a `.dirty` suffix. To fail fast if uncommitted or untracked changes are present:
+
+```bash
+gradle -PrequireCleanVersion=true shadowJar
+docker build -f Dockerfile.native --build-arg REQUIRE_CLEAN_VERSION=true --tag tablo2hdhomerun:latest .
+```
+
 ## Configuration
 
 | Environment Variable | Default | Description |

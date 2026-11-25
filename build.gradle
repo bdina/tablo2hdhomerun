@@ -92,6 +92,51 @@ test {
 
 version = gitVersion()
 
+def requireCleanVersion = providers.gradleProperty('requireCleanVersion')
+    .map { it.toBoolean() }
+    .getOrElse(false)
+
+tasks.register('verifyCleanVersion') {
+    group = 'verification'
+    description = 'Verifies that the resolved git version does not have a .dirty suffix'
+    doLast {
+        def resolvedVersion = project.version.toString()
+        if (resolvedVersion.endsWith('.dirty')) {
+            def details = []
+            try {
+                def gitClass = project.buildscript.classLoader.loadClass('org.eclipse.jgit.api.Git')
+                def git = gitClass.open(project.projectDir)
+                try {
+                    def status = git.status().call()
+                    [
+                      added: status.getAdded(),
+                      changed: status.getChanged(),
+                      modified: status.getModified(),
+                      missing: status.getMissing(),
+                      removed: status.getRemoved(),
+                      untracked: status.getUntracked(),
+                      conflicting: status.getConflicting()
+                    ].each { label, paths ->
+                        if (paths && !paths.isEmpty()) {
+                            def sample = paths.sort(false).take(20)
+                            def suffix = paths.size() > 20 ? " (+${paths.size() - 20} more)" : ''
+                            details << "${label}(${paths.size()}): ${sample.join(', ')}${suffix}"
+                        }
+                    }
+                } finally {
+                    git.close()
+                }
+            } catch (Exception e) {
+                details << "unable to inspect JGit status: ${e.message}"
+            }
+            def detailMsg = details.isEmpty() ? '' : "\nDirty paths:\n  - ${details.join('\n  - ')}"
+            logger.error("[version] dirty build version detected: {}{}", resolvedVersion, detailMsg)
+            throw new GradleException("Project version '${resolvedVersion}' is dirty. Commit, remove, or ignore pending changes before building a clean artifact.${detailMsg}")
+        }
+        logger.lifecycle("[version] verified clean version={}", resolvedVersion)
+    }
+}
+
 application {
     mainClass.set('app.tablo2hdhomerunApp')
     applicationDefaultJvmArgs = [
@@ -172,6 +217,12 @@ sourceSets.main.resources.srcDir(tasks.named('mergeReferenceConf'))
 
 jar {
     archiveClassifier = 'plain'
+    manifest {
+        attributes(
+          'App-Version': project.version.toString(),
+          'Implementation-Version': project.version.toString()
+        )
+    }
 }
 
 shadowJar {
@@ -179,11 +230,19 @@ shadowJar {
     exclude '**/*.tasty'
     manifest {
         attributes(
-          'App-Version': gitVersion(),
-          'Implementation-Version': gitVersion()
+          'App-Version': project.version.toString(),
+          'Implementation-Version': project.version.toString()
         )
     }
     mergeServiceFiles()
+    doFirst {
+        def resolvedVersion = project.version.toString()
+        if (resolvedVersion.endsWith('.dirty')) {
+            logger.warn("[version] packaging dirty shadowJar version={} (run 'gradle verifyCleanVersion' to inspect dirty paths)", resolvedVersion)
+        } else {
+            logger.info("[version] packaging clean shadowJar version={}", resolvedVersion)
+        }
+    }
 }
 
 nativeImage {
@@ -198,6 +257,13 @@ nativeImage {
     , NativeImageTask.Option.MUSL
     , NativeImageTask.Option.CPU
     ]
+}
+
+if (requireCleanVersion) {
+    tasks.named('mergeReferenceConf') { dependsOn tasks.named('verifyCleanVersion') }
+    tasks.named('jar') { dependsOn tasks.named('verifyCleanVersion') }
+    tasks.named('shadowJar') { dependsOn tasks.named('verifyCleanVersion') }
+    tasks.named('nativeImage') { dependsOn tasks.named('verifyCleanVersion') }
 }
 
 scalaCli {
