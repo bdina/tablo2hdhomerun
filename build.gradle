@@ -27,6 +27,11 @@ apply plugin: 'scala'
 apply plugin: 'application'
 
 repositories {
+    mavenLocal {
+        content {
+            includeGroup 'com.scalarometer'
+        }
+    }
     mavenCentral()
 }
 
@@ -41,6 +46,7 @@ ext {
     pekko_core = '2.0.0'
     pekko_http = '2.0.0'
     scala_test = '3.2.20'
+    scalarometer_ver = '0.0.3'
 }
 
 dependencies {
@@ -48,6 +54,7 @@ dependencies {
     replCompiler "org.scala-lang:scala${scala_maj}-compiler_${scala_maj}:${scala_ver}"
 
     implementation 'org.slf4j:slf4j-simple:2.0.20'
+    implementation "com.scalarometer:scalarometer_${scala_maj}:${scalarometer_ver}"
 
     implementation "org.apache.pekko:pekko-actor-typed_${scala_maj}:${pekko_core}"
     implementation "org.apache.pekko:pekko-slf4j_${scala_maj}:${pekko_core}"

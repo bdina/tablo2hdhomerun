@@ -929,6 +929,8 @@ object TabloLegacy {
       private val legacyVctInfo = new ConcurrentHashMap[String, (String, String)]()
       private val activeStreams = new ConcurrentHashMap[String, (String, AtomicReference[app.stream.StreamMetrics.WindowSnapshot])]()
 
+      def activeStreamCount: Int = activeStreams.size()
+
       def registerVctInfo(channelId: String, vctNumber: String, vctName: String): Unit = {
         val _ = legacyVctInfo.put(channelId, (vctNumber, vctName))
       }
@@ -1079,16 +1081,21 @@ object TabloLegacy {
             }
           }
 
-        def watchChannel(): Future[Response.WatchResponse] =
+        def watchChannel(): Future[Response.WatchResponse] = {
+          val watchStart = com.scalarometer.statistics.StopWatch.Marker.now
           HttpCtx.singleRequest(Request.WatchRequest.httpRequest(watchUri)).flatMap { response =>
             log.debug("[channel] http POST /guide/channels/{}/watch status={}", channelId, response.status.intValue())
             Unmarshal(response.entity).to[String].recover { case _ => "" }.flatMap { body =>
               classifyWatchResponse(response.status, body) match {
-                case err: LegacyError             => Future.failed(err)
-                case watch: Response.WatchResponse => Future.successful(watch)
+                case err: LegacyError =>
+                  Future.failed(err)
+                case watch: Response.WatchResponse =>
+                  AppContext.metrics.recordTuneLockMs(watchStart.elapsed)
+                  Future.successful(watch)
               }
             }
           }
+        }
 
         def startWatchSession(checkTuners: Boolean): Future[Response.WatchResponse] = {
           val availableFuture =
@@ -1104,6 +1111,7 @@ object TabloLegacy {
                 }
               }
             } else {
+              AppContext.metrics.recordColdRetune()
               Future.successful(true)
             }
           availableFuture.flatMap { available =>
@@ -1119,13 +1127,15 @@ object TabloLegacy {
           Source.lazySource { () =>
             var nextPlaylistUrl: Option[String] = Some(firstPlaylistUrl)
             val lastSeqRef = new java.util.concurrent.atomic.AtomicInteger(0)
-            val hlsCollector = new StreamMetrics.HlsCollector()
+            val hlsCollector = new StreamMetrics.HlsCollector(Some(AppContext.metrics))
             val latestMetricsRef = new AtomicReference[StreamMetrics.WindowSnapshot](StreamMetrics.WindowSnapshot.initial)
             val cachedHeadersRef = new AtomicReference[MpegTsSync.CachedHeaders](MpegTsSync.CachedHeaders())
             val retuneTrigger = new ResilientHlsSource.RetuneTrigger()
             val metricsInterval =
               Option(AppContext.config).map(_.stream.metricsIntervalSec.seconds).getOrElse(30.seconds)
             val _ = activeStreams.put(streamId, (channelId.toString, latestMetricsRef))
+            AppContext.metrics.recordSessionOpened()
+            AppContext.metrics.recordSessionAttached()
 
             def streamFactory() = {
               nextPlaylistUrl match {
@@ -1173,7 +1183,11 @@ object TabloLegacy {
               , latestMetricsRef = Some(latestMetricsRef)
               , onAudioLossRetune = detail => {
                   lastSeqRef.set(0)
+                  AppContext.metrics.recordAudioLossRetune()
                   val _ = retuneTrigger.trigger(app.stream.HlsError.SustainedAudioLoss(detail))
+                }
+              , onFreezeStateChanged = frozen => {
+                  if (frozen) AppContext.metrics.recordStreamFreeze()
                 }
               ))
               .watchTermination { (_, done) =>
@@ -1199,6 +1213,7 @@ object TabloLegacy {
               )
             )
           case Failure(LegacyError.NoAvailableTunersError) =>
+            AppContext.metrics.recordRejectedNoTuners()
             complete(
               rejectResponse(
                 HDHomeRunError.AllTunersInUse
@@ -1206,6 +1221,7 @@ object TabloLegacy {
               )
             )
           case Failure(ex) =>
+            AppContext.metrics.recordRejectedFailed()
             complete(
               rejectResponse(
                 HDHomeRunError.fromThrowable(ex)

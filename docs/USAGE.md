@@ -133,23 +133,23 @@ gradle nativeImage
 ### Option 3: Docker JVM
 
 ```bash
-docker build -f Dockerfile.jvm --tag tablo2hdhomerun:jvm .
+./docker-build-image.sh jvm --tag tablo2hdhomerun:jvm
 docker run -e TABLO_IP=192.168.1.100 -e PROXY_IP=0.0.0.0 \
            -p 8080:8080 tablo2hdhomerun:jvm
 ```
 
-`Dockerfile.jvm` runs Java 25 with a build-time AppCDS archive (`-XX:SharedArchiveFile=app-cds.jsa -Xshare:auto`), `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, `-Xss256k`, `STOPSIGNAL SIGTERM`, a built-in Docker `HEALTHCHECK`, and `-d` enabled by default. Pass `--build-arg REQUIRE_CLEAN_VERSION=true` to reject `.dirty` release builds.
+`Dockerfile.jvm` runs Java 25 with a build-time AppCDS archive (`-XX:SharedArchiveFile=app-cds.jsa -Xshare:auto`), `-XX:+UseCompactObjectHeaders`, `-XX:+UseSerialGC`, `-Xms32m`, `-Xmx128m`, `-XX:MaxNewSize=64m`, `-Xss256k`, `STOPSIGNAL SIGTERM`, a built-in Docker `HEALTHCHECK`, and `-d` enabled by default. `./docker-build-image.sh` diff-syncs locally published `~/.m2` dependencies (such as `com.scalarometer:scalarometer_3:0.0.3`) into gitignored `.m2-local/` while preserving Docker layer caches; once synced, `docker build -f Dockerfile.jvm --tag tablo2hdhomerun:jvm .` also works directly. Pass `--build-arg REQUIRE_CLEAN_VERSION=true` to reject `.dirty` release builds.
 
 ### Option 4: Docker Native (Recommended)
 
 ```bash
-docker build -f Dockerfile.native --tag tablo2hdhomerun:native .
+./docker-build-image.sh native --tag tablo2hdhomerun:native
 docker run -e TABLO_IP=192.168.1.100 -e PROXY_IP=0.0.0.0 \
            -p 8080:8080 --device /dev/dri:/dev/dri \
            tablo2hdhomerun:native
 ```
 
-`Dockerfile.native` packages the static musl binary on `scratch` with `/etc/ssl/certs/ca-certificates.crt` (for 4th Gen cloud TLS requests), `/usr/share/zoneinfo`, `STOPSIGNAL SIGTERM`, and a built-in `HEALTHCHECK`. Pass `--build-arg REQUIRE_CLEAN_VERSION=true` to enforce a clean git version prior to native-image compilation.
+`Dockerfile.native` packages the static musl binary on `scratch` with `/etc/ssl/certs/ca-certificates.crt` (for 4th Gen cloud TLS requests), `/usr/share/zoneinfo`, `STOPSIGNAL SIGTERM`, and a built-in `HEALTHCHECK`. `./docker-build-image.sh` syncs locally published `~/.m2` dependencies into `.m2-local/` (only when changed); pass `--build-arg REQUIRE_CLEAN_VERSION=true` to enforce a clean git version prior to native-image compilation.
 
 ## Environment Variables
 
@@ -212,19 +212,21 @@ MPEG-TS null-packet keepalive and slate video generation (in `ResilientHlsSource
 | `STREAM_HLS_POLL_FAILURES_MAX` | `4` | Consecutive playlist fetch or keepalive probe failures before retune |
 | `STREAM_HLS_MAX_STALL_SEC` | `60` | Maximum seconds an unchanged HLS playlist may stall before triggering cold retune (`<= 0` disables cap) |
 
-### Operational Stream Quality Metrics (`[stream:metrics]` & `GET /status.json`)
+### Operational Stream & Service Telemetry (`[stream:metrics]`, `[service:metrics]`, `GET /status.json`, `GET /metrics.json`)
 
-While a channel is tuned, `MpegTsSync.cacheFlow` and `StreamMetrics.HlsCollector` continuously measure transport, elementary frame, media clock, and HLS segment delivery health over a rolling window (default `30s`, configurable via `STREAM_METRICS_INTERVAL_SEC`).
+While a channel is tuned, `MpegTsSync.cacheFlow` and `StreamMetrics.HlsCollector` (backed by Scalarometer `Counter` and bounded `Histogram` primitives) continuously measure transport, elementary frame, media clock, and HLS segment delivery health over a rolling window (default `30s`, configurable via `STREAM_METRICS_INTERVAL_SEC`).
 
 Every 30 seconds (and on stream completion), an `INFO` log line is emitted:
 
 ```text
-[stream:metrics] channel="CBS 2.1 (a1b2c3d4)" windowSec=30.0 signalQualityPct=100.0 feedQualityPct=100.0 symbolQualityPct=100.0 bitrateMbps=6.62 fps=59.94 ptsAdvanceSec=30.0 avSkewMs=-12 videoFrames=1798/1798 audioFrames=937/937 keyframes=30 tei=0 ccErr=0 sliceDrops=0 ptsScrubs=0 syncLossBytes=0 keepalivePct=0.0 segs=15 maxGapMs=1980 shortReads=0 seqGaps=0 segRetries=0 stallPolls=0 retunes=0
+[stream:metrics] channel="CBS 2.1 (a1b2c3d4)" windowSec=30.0 signalQualityPct=100.0 feedQualityPct=100.0 symbolQualityPct=100.0 bitrateMbps=6.62 fps=59.94 ptsAdvanceSec=30.0 avSkewMs=-12 videoFrames=1798/1798 audioFrames=937/937 keyframes=30 tei=0 ccErr=0 sliceDrops=0 ptsScrubs=0 syncLossBytes=0 keepalivePct=0.0 segs=15 maxGapMs=1980 shortReads=0 seqGaps=0 segRetries=0 stallPolls=0 retunes=0 segGapP50Ms=1960 segGapP95Ms=1980 segFetchP95Ms=62 segFetchMaxMs=74
 ```
 
 - **`signalQualityPct` (`0.0–100.0%`)**: Percentage of decoded video PES frames (80% weight) and audio PES frames (20% weight) delivered completely intact without `TEI`, continuity counter (`CC`) discontinuities, out-of-bounds MPEG-2 slice drops, or invalid audio syncwords.
 - **`feedQualityPct` (`0.0–100.0%`)**: Real-time media clock completeness (`ptsAdvanceSec / windowSec`), with a 1-segment (`2.0s`) burst boundary tolerance so healthy segmented HLS delivery reports `100.0%`. Drops when upstream stalls or experiences Failure Mode E2 trickle collapse.
 - **`symbolQualityPct` (`0.0–100.0%`)**: Percentage of elementary stream MPEG-TS packets free of transport errors (`TEI`, `CC` jumps, slice drops, or syncword misses).
+- **`segGapP50Ms` / `segGapP95Ms` / `segFetchP95Ms` / `segFetchMaxMs`**: Per-window HLS segment arrival gap percentiles and HTTP segment fetch latency stats computed by Scalarometer `Histogram`s.
+- **Process-wide `[service:metrics]` & `GET /metrics.json`**: `ServiceMetrics` tracks lifetime counters (`sessions.*`, `retunes.cold`, `retunes.audio_loss`, `stream.freezes`, `hls.*`, `auth.refreshes`), live `MetricScope`-managed tuner/client gauges (`tuners.capacity`, `sessions.live/opening/idle_grace`, `clients.active`), and interval latency distributions (`tune.lock.ms`, `hls.seg.fetch.ms`, `hls.poll.ms`, `keepalive.probe.ms`). `PeriodicReporter` logs `[service:metrics]` every `SERVICE_METRICS_INTERVAL_SEC` (`60s` default; suppressed automatically when completely idle to avoid disk log churn; flushed on `SIGTERM`). `GET /metrics.json` (enabled by default via `ENABLE_METRICS_ENDPOINT=true`) returns a read-only `application/json` snapshot (`Cache-Control: no-store`, `reset=false`).
 - **Co-existence with `[mpegts] transport anomalies`**: The periodic `[stream:metrics]` `INFO` log co-exists with the 30s `[mpegts] transport anomalies` `WARN` log, which fires only when transport errors occur.
 - **SiliconDust HDHomeRun `GET /status.json`**: Live per-tuner metrics are also exposed via `GET /status.json`, mapping `feedQualityPct` to `SignalStrengthPercent`, `signalQualityPct` to `SignalQualityPercent`, `symbolQualityPct` to `SymbolQualityPercent`, and real MPEG-TS throughput to `NetworkRate` (bps).
 
@@ -239,6 +241,8 @@ Every 30 seconds (and on stream completion), an `INFO` log line is emitted:
 | `TUNER_COUNT` | `2` | Number of virtual tuners reported in discover.json |
 | `ENABLE_UDP_DISCOVERY` | `true` | Enable UDP 65001 HDHomeRun broadcast auto-discovery responder |
 | `ENABLE_HLS_ENDPOINT` | `true` | Enable open-standard HLS playlist (`.m3u8` and `.m3u`) endpoints |
+| `ENABLE_METRICS_ENDPOINT` | `true` | Enable read-only `GET /metrics.json` Scalarometer service telemetry endpoint |
+| `SERVICE_METRICS_INTERVAL_SEC` | `60` | Interval in seconds for idle-gated `[service:metrics]` operational logs (`<= 0` disables) |
 | `SESSION_IDLE_GRACE_SEC` | `180` | Idle grace period (in seconds) to keep tuner session active after client disconnects |
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Stream MPEG-TS null packets (PID 0x1FFF) immediately on cold tunes to satisfy Plex grabber timeouts |
 | `STREAM_PRE_ROLL_INTERVAL_MS` | `100` | Pre-roll keepalive emission interval in milliseconds |
@@ -351,6 +355,7 @@ docker run -d \
 |----------|---------------|-------------|
 | `GET /discover.json` | JSON | HDHomeRun device metadata (`DeviceID`, `TunerCount`, `BaseURL`, etc.) |
 | `GET /status.json` | JSON | SiliconDust HDHomeRun per-tuner status array (`Resource`, `VctNumber`, `VctName`, `SignalStrengthPercent`, `SignalQualityPercent`, `SymbolQualityPercent`, `NetworkRate`, `TargetIP`) |
+| `GET /metrics.json` | JSON | Read-only service-wide Scalarometer telemetry snapshot (`Cache-Control: no-store`, gated by `ENABLE_METRICS_ENDPOINT`) |
 | `GET /lineup.json` | JSON | HDHomeRun channel lineup array with GuideName/GuideNumber |
 | `GET /lineup_status.json` | JSON | Channel scan status (`ScanInProgress`, `ScanPossible`, `Source`) |
 | `POST /lineup.post?scan=start` | Empty / 200 OK | Trigger channel lineup refresh / scan |

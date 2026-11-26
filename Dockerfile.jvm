@@ -23,9 +23,11 @@ ENV PATH=${GRADLE_HOME}/bin:${PATH}
 WORKDIR ${OPENJDK_WORKDIR}
 
 # Warm Gradle plugins, buildSrc, and runtime/compiler caches in a separate layer
+COPY .m2-local /root/.m2/repository
 COPY settings.gradle build.gradle gradle.properties ${OPENJDK_WORKDIR}/
 COPY buildSrc ${OPENJDK_WORKDIR}/buildSrc
-RUN ${GRADLE_HOME}/bin/gradle -q --no-daemon --no-build-cache --no-watch-fs -PskipGitVersion=true warmDependencyCache \
+RUN test -d /root/.m2/repository/com/scalarometer || { echo "ERROR: .m2-local/com/scalarometer missing — run ./docker-build-image.sh jvm first" >&2; exit 1; } \
+ && ${GRADLE_HOME}/bin/gradle -q --no-daemon --no-build-cache --no-watch-fs -PskipGitVersion=true warmDependencyCache \
  && rm -rf ${OPENJDK_WORKDIR}/build ${OPENJDK_WORKDIR}/.gradle
 
 ARG REQUIRE_CLEAN_VERSION=false

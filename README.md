@@ -81,19 +81,21 @@ gradle nativeImage
 ### Docker Build (Native)
 
 ```bash
-docker build -f Dockerfile.native --tag tablo2hdhomerun:<version> .
+./docker-build-image.sh native --tag tablo2hdhomerun:<version>
 ```
 
 ### Docker Build (JVM)
 
 ```bash
-docker build -f Dockerfile.jvm --tag tablo2hdhomerun:<version> .
+./docker-build-image.sh jvm --tag tablo2hdhomerun:<version>
 ```
+
+`./docker-build-image.sh` diff-syncs locally published `~/.m2` dependencies (e.g., `com.scalarometer:scalarometer_3:0.0.3`) into gitignored `.m2-local/` before invoking `docker build` (preserving Docker layer caches; once synced, plain `docker build -f Dockerfile.native ... .` also works directly).
 
 ### Incremental Dev & Test in Docker
 
 ```bash
-./docker-build-test.sh              # Incremental test with persistent Gradle cache volume
+./docker-build-test.sh              # Incremental test with persistent Gradle cache volume & read-only ~/.m2
 ./docker-build-test.sh clean test   # Full clean test run (add -PtestReports=true for HTML/XML reports)
 ```
 
@@ -103,7 +105,7 @@ On a clean Git commit or tag, Gradle and Docker builds automatically resolve a c
 
 ```bash
 gradle -PrequireCleanVersion=true shadowJar
-docker build -f Dockerfile.native --build-arg REQUIRE_CLEAN_VERSION=true --tag tablo2hdhomerun:latest .
+./docker-build-image.sh native --build-arg REQUIRE_CLEAN_VERSION=true --tag tablo2hdhomerun:latest
 ```
 
 ## Configuration
@@ -120,6 +122,8 @@ docker build -f Dockerfile.native --build-arg REQUIRE_CLEAN_VERSION=true --tag t
 | `STREAM_PRE_ROLL_KEEP_ALIVE` | `true` | Emit MPEG-TS null packets during cold tune to prevent client timeouts |
 | `SESSION_IDLE_GRACE_SEC` | `180` | Idle grace period (in seconds) to retain tuner session |
 | `STREAM_METRICS_INTERVAL_SEC` | `30` | Periodic `[stream:metrics]` operational log interval in seconds (`<= 0` disables periodic logs) |
+| `SERVICE_METRICS_INTERVAL_SEC` | `60` | Idle-gated `[service:metrics]` periodic log interval in seconds (`<= 0` disables) |
+| `ENABLE_METRICS_ENDPOINT` | `true` | Enable read-only `GET /metrics.json` service telemetry endpoint |
 | `STREAM_RECOVERY_TIMEOUT_SEC` | `0` | Total outage duration before ending stream (`0` = indefinite while viewer is tuned) |
 | `MEDIA_ROOT` | (none) | Optional media transcoding path |
 
@@ -129,6 +133,7 @@ docker build -f Dockerfile.native --build-arg REQUIRE_CLEAN_VERSION=true --tag t
 |----------|-------------|
 | `GET /discover.json` | Device discovery metadata |
 | `GET /status.json` | Per-tuner signal/feed/symbol quality and network bitrate status |
+| `GET /metrics.json` | Read-only service-wide Scalarometer JSON telemetry snapshot |
 | `GET /lineup.json` | Channel lineup |
 | `GET /lineup_status.json` | Scan status |
 | `GET /channel/{id}` | Live MPEG-TS stream |

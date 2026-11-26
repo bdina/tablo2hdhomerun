@@ -320,6 +320,41 @@ paths:
                 type: string
               example: <tv></tv>
 
+  /metrics.json:
+    get:
+      operationId: getServiceMetrics
+      summary: Service telemetry metrics snapshot (proxy extension)
+      description: >
+        Returns a read-only JSON object of process-wide operational metrics backed by
+        Scalarometer (`MetricsFormat.Json`, `reset=false`), including lifetime session/retune/HLS
+        counters, scoped live tuner/client gauges, and interval latency distributions.
+        Non-SiliconDust diagnostic extension gated by `ENABLE_METRICS_ENDPOINT` (default `true`).
+      tags:
+        - Discovery
+      responses:
+        '200':
+          description: Service telemetry metrics map
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+                example: no-store
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: number
+              example:
+                clients.active: 1
+                hls.segs.completed: 42
+                retunes.cold: 0
+                sessions.live: 1
+                sessions.opened: 1
+                tuners.capacity: 4
+        '404':
+          description: Metrics endpoint disabled (`ENABLE_METRICS_ENDPOINT=false`)
+
   /favicon.ico:
     get:
       operationId: getFavicon

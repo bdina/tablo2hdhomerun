@@ -20,6 +20,7 @@ import scala.io.StdIn
 import scala.util.{Failure, Success, Try}
 
 import app.config.{AppConfig, TabloAuthEnv, TabloGen}
+import app.metrics.ServiceMetrics
 import app.sys.LogConfig
 import app.tuner.TabloLegacy.Response.Discover
 
@@ -40,11 +41,30 @@ object AppContext {
   @volatile private var _config: AppConfig = scala.compiletime.uninitialized
   @volatile private var _discover: Discover = scala.compiletime.uninitialized
   @volatile private var _system: ActorSystem[pekko.NotUsed] = scala.compiletime.uninitialized
+  @volatile private var _metrics: ServiceMetrics | Null = null
 
   def config: AppConfig = _config
   def discover: Discover = _discover
   def updateDiscover(discover: Discover): Unit = { _discover = discover }
   def system: ActorSystem[pekko.NotUsed] = _system
+
+  def metrics: ServiceMetrics = {
+    val existing = _metrics
+    if (existing != null) existing
+    else synchronized {
+      val current = _metrics
+      if (current != null) current
+      else {
+        val created = new ServiceMetrics()
+        _metrics = created
+        created
+      }
+    }
+  }
+
+  private[app] def initializeMetrics(metrics: ServiceMetrics): Unit = {
+    _metrics = metrics
+  }
 
   private[app] def initialize(config: AppConfig, discover: Discover): Unit = {
     _config = config
@@ -76,10 +96,27 @@ object Tablo2HDHomeRun {
 
   def start(config: AppConfig, tabloAuth: TabloAuthEnv, daemon: Boolean): Unit = {
     val discover = buildDiscover(config)
+    val serviceMetrics = new ServiceMetrics()
+    AppContext.initializeMetrics(serviceMetrics)
     AppContext.initialize(config, discover)
+    val _ = serviceMetrics.initializeJmxIfEnabled()
+    val metricsReporter = serviceMetrics.startReporter(
+      intervalSec = config.proxy.serviceMetricsIntervalSec
+    , flushOnClose = true
+    )
     val discoveryCloser = app.tuner.HDHomeRunDiscovery.start(config)
     val system = ActorSystem(apply(config, tabloAuth, daemon), "tablo2hdhomerun-system")
     AppContext.initialize(system)
+    CoordinatedShutdown(system).addTask(
+      CoordinatedShutdown.PhaseBeforeActorSystemTerminate
+    , "close-service-metrics"
+    ) { () =>
+      scala.concurrent.Future.successful {
+        metricsReporter.foreach(_.close())
+        serviceMetrics.unregisterJmxIfEnabled()
+        pekko.Done
+      }
+    }
     CoordinatedShutdown(system).addTask(
       CoordinatedShutdown.PhaseActorSystemTerminate
     , "close-udp-discovery"
@@ -90,6 +127,8 @@ object Tablo2HDHomeRun {
       }
     }
     system.whenTerminated.onComplete { _ =>
+      metricsReporter.foreach(_.close())
+      serviceMetrics.unregisterJmxIfEnabled()
       discoveryCloser.close()
     }(using system.executionContext)
     if (!daemon) {
@@ -163,7 +202,7 @@ object Tablo2HDHomeRun {
 
   def logStartupConfig(config: AppConfig): Unit =
     log.info(
-      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} metricsIntervalSec={} idleGraceSec={} tunerStatePollIntervalSec={} stallTimeoutSec={} tuneTimeoutSec={} recoveryTimeoutSec={} preRollKeepAlive={} mediaRoot={}"
+      "[startup] ready version={} tabloGen={} tabloIp={} proxyIp={} proxyPort={} streamBackend={} metricsIntervalSec={} serviceMetricsIntervalSec={} enableMetricsEndpoint={} idleGraceSec={} tunerStatePollIntervalSec={} stallTimeoutSec={} tuneTimeoutSec={} recoveryTimeoutSec={} preRollKeepAlive={} mediaRoot={}"
     , appVersion
     , config.tablo.gen.envValue
     , config.tablo.ipHost
@@ -171,6 +210,8 @@ object Tablo2HDHomeRun {
     , config.proxy.bindPort
     , config.stream.backend.envValue
     , config.stream.metricsIntervalSec
+    , config.proxy.serviceMetricsIntervalSec
+    , config.proxy.enableMetricsEndpoint
     , config.proxy.idleGraceSec
     , config.proxy.tunerStatePollIntervalSec
     , config.stream.resilient.stallTimeoutSec
@@ -283,13 +324,30 @@ object Tablo2HDHomeRun {
         if (AppContext.discover != null && AppContext.discover.TunerCount != tuners) {
           AppContext.updateDiscover(AppContext.discover.copy(TunerCount = tuners))
         }
+        val legacyGaugeHandle = AppContext.metrics.registerSessionGauges(
+          tunersCapacity = () => tuners
+        , sessionsLive = () => Channel.activeStreamCount
+        , sessionsOpening = () => 0
+        , sessionsIdleGrace = () => 0
+        , clientsActive = () => Channel.activeStreamCount
+        )
+        CoordinatedShutdown(context.system).addTask(
+          CoordinatedShutdown.PhaseServiceRequestsDone
+        , "close-legacy-metrics-gauges"
+        ) { () =>
+          scala.concurrent.Future.successful {
+            legacyGaugeHandle.close()
+            pekko.Done
+          }
+        }
         val lineup = context.spawn(Lineup.LineupActor(), "lineup-actor", pekko.actor.typed.Props.empty)
         Some(Response.Discover.route ~ Lineup.route(lineup) ~ Channel.route(lineup) ~ Guide.route ~ Favicon.route)
     }
 
     maybeRoutes match {
       case Some(routes) =>
-        startHttp(config, routes, daemon)
+        val metricsRoute = ServiceMetrics.route(config.proxy.enableMetricsEndpoint, AppContext.metrics)
+        startHttp(config, metricsRoute ~ routes, daemon)
         Behaviors.empty
       case None =>
         Behaviors.stopped

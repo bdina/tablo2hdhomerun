@@ -1,7 +1,9 @@
 package app.stream
 
+import app.metrics.ServiceMetrics
+import com.scalarometer.statistics.{Counter, Histogram}
+
 import java.util.Locale
-import java.util.concurrent.atomic.AtomicLong
 
 object StreamMetrics {
   val PacketSize: Int = 188
@@ -17,65 +19,145 @@ object StreamMetrics {
   , segRetries: Long = 0L
   , stallPolls: Long = 0L
   , retunes: Long = 0L
+  , segGapP50Ms: Long = 0L
+  , segGapP95Ms: Long = 0L
+  , segFetchP95Ms: Long = 0L
+  , segFetchMaxMs: Long = 0L
   )
 
-  final class HlsCollector {
-    private val segsCounter = new AtomicLong(0L)
-    private val maxGapMsGauge = new AtomicLong(0L)
-    private val shortReadsCounter = new AtomicLong(0L)
-    private val seqGapsCounter = new AtomicLong(0L)
-    private val segRetriesCounter = new AtomicLong(0L)
-    private val stallPollsCounter = new AtomicLong(0L)
-    private val retunesCounter = new AtomicLong(0L)
+  object HlsCollector {
+    val MaxWindowSnapshots: Int = 128
+  }
 
-    def onSegmentCompleted(gapMs: Long, isShortRead: Boolean): Unit = {
-      val _ = segsCounter.incrementAndGet()
-      if (gapMs > 0L) {
-        val _ = maxGapMsGauge.accumulateAndGet(gapMs, math.max)
+  final class HlsCollector(serviceMetrics: Option[ServiceMetrics] = None) {
+    private val windowLock = new Object
+    private val segsCounter = Counter("hls.segs")
+    private val shortReadsCounter = Counter("hls.short_reads")
+    private val seqGapsCounter = Counter("hls.seq_gaps")
+    private val segRetriesCounter = Counter("hls.seg_retries")
+    private val stallPollsCounter = Counter("hls.stall_polls")
+    private val retunesCounter = Counter("hls.retunes")
+    private val segGapHistogram = Histogram("hls.seg_gap.ms", max_snapshots = HlsCollector.MaxWindowSnapshots)
+    private val segFetchHistogram = Histogram("hls.seg_fetch.ms", max_snapshots = HlsCollector.MaxWindowSnapshots)
+    private var exactMaxGapMs: Long = 0L
+    private var exactMaxFetchMs: Long = 0L
+
+    def onSegmentCompleted(gapMs: Long, isShortRead: Boolean, fetchMs: Long = -1L): Unit = {
+      windowLock.synchronized {
+        val _ = segsCounter.increment()
+        if (gapMs >= 0L) {
+          val _ = segGapHistogram.incrementByAndRecordSnapshot(gapMs)
+          if (gapMs > exactMaxGapMs) exactMaxGapMs = gapMs
+        }
+        if (fetchMs >= 0L) {
+          val _ = segFetchHistogram.incrementByAndRecordSnapshot(fetchMs)
+          if (fetchMs > exactMaxFetchMs) exactMaxFetchMs = fetchMs
+        }
+        if (isShortRead) {
+          val _ = shortReadsCounter.increment()
+        }
       }
-      if (isShortRead) {
-        val _ = shortReadsCounter.incrementAndGet()
-      }
+      serviceMetrics.foreach(_.recordHlsSegmentCompleted(isShortRead, fetchMs))
     }
+
+    def onPlaylistPolled(pollMs: Long): Unit =
+      if (pollMs >= 0L) {
+        serviceMetrics.foreach(_.recordHlsPollMs(pollMs))
+      }
 
     def onSequenceGap(gap: Int): Unit =
       if (gap > 0) {
-        val _ = seqGapsCounter.addAndGet(gap.toLong)
+        windowLock.synchronized {
+          val _ = seqGapsCounter.increment(gap.toLong)
+        }
       }
 
     def onSegmentRetry(): Unit = {
-      val _ = segRetriesCounter.incrementAndGet()
+      windowLock.synchronized {
+        val _ = segRetriesCounter.increment()
+      }
+      serviceMetrics.foreach(_.recordHlsSegmentRetry())
     }
 
     def onStallPoll(): Unit = {
-      val _ = stallPollsCounter.incrementAndGet()
+      windowLock.synchronized {
+        val _ = stallPollsCounter.increment()
+      }
+      serviceMetrics.foreach(_.recordHlsStallPoll())
     }
 
-    def onRetune(): Unit = {
-      val _ = retunesCounter.incrementAndGet()
+    def onRetune(): Unit =
+      windowLock.synchronized {
+        val _ = retunesCounter.increment()
+      }
+
+    private def captureWindowStats(reset: Boolean): HlsWindowStats = {
+      var segs = 0L
+      var maxGap = 0L
+      var shortReads = 0L
+      var seqGaps = 0L
+      var segRetries = 0L
+      var stallPolls = 0L
+      var retunes = 0L
+      var maxFetch = 0L
+      var gapSorted: Array[Long] = Array.emptyLongArray
+      var fetchSorted: Array[Long] = Array.emptyLongArray
+
+      windowLock.synchronized {
+        segs = segsCounter.value
+        maxGap = exactMaxGapMs
+        shortReads = shortReadsCounter.value
+        seqGaps = seqGapsCounter.value
+        segRetries = segRetriesCounter.value
+        stallPolls = stallPollsCounter.value
+        retunes = retunesCounter.value
+        maxFetch = exactMaxFetchMs
+        gapSorted = segGapHistogram.snapshotsSortedArray
+        fetchSorted = segFetchHistogram.snapshotsSortedArray
+        if (reset) {
+          segsCounter.reset()
+          shortReadsCounter.reset()
+          seqGapsCounter.reset()
+          segRetriesCounter.reset()
+          stallPollsCounter.reset()
+          retunesCounter.reset()
+          segGapHistogram.reset()
+          segFetchHistogram.reset()
+          exactMaxGapMs = 0L
+          exactMaxFetchMs = 0L
+        }
+      }
+
+      val gapP50 =
+        if (gapSorted.nonEmpty) math.round(segGapHistogram.percentileValue(Histogram.Percentile.P_050, gapSorted))
+        else 0L
+      val gapP95 =
+        if (gapSorted.nonEmpty) math.round(segGapHistogram.percentileValue(Histogram.Percentile.P_095, gapSorted))
+        else 0L
+      val fetchP95 =
+        if (fetchSorted.nonEmpty) math.round(segFetchHistogram.percentileValue(Histogram.Percentile.P_095, fetchSorted))
+        else 0L
+
+      HlsWindowStats(
+        segs = segs
+      , maxGapMs = maxGap
+      , shortReads = shortReads
+      , seqGaps = seqGaps
+      , segRetries = segRetries
+      , stallPolls = stallPolls
+      , retunes = retunes
+      , segGapP50Ms = gapP50
+      , segGapP95Ms = gapP95
+      , segFetchP95Ms = fetchP95
+      , segFetchMaxMs = maxFetch
+      )
     }
 
     def currentWindowStats(): HlsWindowStats =
-      HlsWindowStats(
-        segs = segsCounter.get()
-      , maxGapMs = maxGapMsGauge.get()
-      , shortReads = shortReadsCounter.get()
-      , seqGaps = seqGapsCounter.get()
-      , segRetries = segRetriesCounter.get()
-      , stallPolls = stallPollsCounter.get()
-      , retunes = retunesCounter.get()
-      )
+      captureWindowStats(reset = false)
 
     def snapshotAndResetWindow(): HlsWindowStats =
-      HlsWindowStats(
-        segs = segsCounter.getAndSet(0L)
-      , maxGapMs = maxGapMsGauge.getAndSet(0L)
-      , shortReads = shortReadsCounter.getAndSet(0L)
-      , seqGaps = seqGapsCounter.getAndSet(0L)
-      , segRetries = segRetriesCounter.getAndSet(0L)
-      , stallPolls = stallPollsCounter.getAndSet(0L)
-      , retunes = retunesCounter.getAndSet(0L)
-      )
+      captureWindowStats(reset = true)
   }
 
   final case class WindowSnapshot(
@@ -107,6 +189,10 @@ object StreamMetrics {
   , stallPolls: Long = 0L
   , retunes: Long = 0L
   , hls: HlsWindowStats = HlsWindowStats()
+  , segGapP50Ms: Long = 0L
+  , segGapP95Ms: Long = 0L
+  , segFetchP95Ms: Long = 0L
+  , segFetchMaxMs: Long = 0L
   ) {
     def signalStrengthPercentInt: Int =
       math.round(feedQualityPct).toInt.max(0).min(100)
@@ -120,7 +206,7 @@ object StreamMetrics {
     def formatLogLine(label: String): String =
       String.format(
         Locale.ROOT
-      , "[stream:metrics] channel=\"%s\" windowSec=%.1f signalQualityPct=%.1f feedQualityPct=%.1f symbolQualityPct=%.1f bitrateMbps=%.2f fps=%.2f ptsAdvanceSec=%.1f avSkewMs=%d videoFrames=%d/%d audioFrames=%d/%d keyframes=%d tei=%d ccErr=%d sliceDrops=%d ptsScrubs=%d syncLossBytes=%d keepalivePct=%.1f segs=%d maxGapMs=%d shortReads=%d seqGaps=%d segRetries=%d stallPolls=%d retunes=%d"
+      , "[stream:metrics] channel=\"%s\" windowSec=%.1f signalQualityPct=%.1f feedQualityPct=%.1f symbolQualityPct=%.1f bitrateMbps=%.2f fps=%.2f ptsAdvanceSec=%.1f avSkewMs=%d videoFrames=%d/%d audioFrames=%d/%d keyframes=%d tei=%d ccErr=%d sliceDrops=%d ptsScrubs=%d syncLossBytes=%d keepalivePct=%.1f segs=%d maxGapMs=%d shortReads=%d seqGaps=%d segRetries=%d stallPolls=%d retunes=%d segGapP50Ms=%d segGapP95Ms=%d segFetchP95Ms=%d segFetchMaxMs=%d"
       , label
       , java.lang.Double.valueOf(windowSec)
       , java.lang.Double.valueOf(signalQualityPct)
@@ -148,6 +234,10 @@ object StreamMetrics {
       , java.lang.Long.valueOf(segRetries)
       , java.lang.Long.valueOf(stallPolls)
       , java.lang.Long.valueOf(retunes)
+      , java.lang.Long.valueOf(segGapP50Ms)
+      , java.lang.Long.valueOf(segGapP95Ms)
+      , java.lang.Long.valueOf(segFetchP95Ms)
+      , java.lang.Long.valueOf(segFetchMaxMs)
       )
   }
 
@@ -280,6 +370,10 @@ object StreamMetrics {
       , stallPolls = hls.stallPolls
       , retunes = hls.retunes
       , hls = hls
+      , segGapP50Ms = hls.segGapP50Ms
+      , segGapP95Ms = hls.segGapP95Ms
+      , segFetchP95Ms = hls.segFetchP95Ms
+      , segFetchMaxMs = hls.segFetchMaxMs
       )
     }
   }

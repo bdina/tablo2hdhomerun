@@ -41,11 +41,13 @@ final case class ProxyConfig(
 , tunerCount: Option[Int] = None
 , enableUdpDiscovery: Boolean = true
 , enableHlsEndpoint: Boolean = true
+, enableMetricsEndpoint: Boolean = true
 , idleGraceSec: Int = 180
 , enablePreRollKeepAlive: Boolean = true
 , preRollIntervalMs: Int = 100
 , preRollPackets: Int = 7
 , tunerStatePollIntervalSec: Int = 30
+, serviceMetricsIntervalSec: Int = 60
 ) {
   def bindHost: String = ip.hostString
   def bindPort: Int = port.value
@@ -121,11 +123,13 @@ object AppConfig {
     , tunerCount = get("TUNER_COUNT").flatMap(s => scala.util.Try(s.trim.toInt).toOption)
     , enableUdpDiscovery = getBoolTrue(get, "ENABLE_UDP_DISCOVERY", true)
     , enableHlsEndpoint = getBoolTrue(get, "ENABLE_HLS_ENDPOINT", true)
+    , enableMetricsEndpoint = getBoolTrue(get, "ENABLE_METRICS_ENDPOINT", true)
     , idleGraceSec = getInt(get, "SESSION_IDLE_GRACE_SEC", 180)
     , enablePreRollKeepAlive = getBoolTrue(get, "STREAM_PRE_ROLL_KEEP_ALIVE", true)
     , preRollIntervalMs = getInt(get, "STREAM_PRE_ROLL_INTERVAL_MS", 100)
     , preRollPackets = getInt(get, "STREAM_PRE_ROLL_PACKETS", 7)
     , tunerStatePollIntervalSec = getInt(get, "TUNER_STATE_POLL_INTERVAL_SEC", 30)
+    , serviceMetricsIntervalSec = getInt(get, "SERVICE_METRICS_INTERVAL_SEC", 60)
     )
     val resilient = ResilientHlsConfig(
       stallTimeoutSec = getInt(get, "STREAM_STALL_TIMEOUT_SEC", 45)

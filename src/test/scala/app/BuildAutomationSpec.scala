@@ -32,6 +32,8 @@ class BuildAutomationSpec extends AnyFlatSpec with Matchers {
     , "/build/"
     , "/buildSrc/.gradle/"
     , "/buildSrc/build/"
+    , "/.m2-local/*"
+    , "!/.m2-local/.keep"
     , ".tags"
     , "AGENTS.md"
     , "GEMINI.md"
@@ -41,6 +43,7 @@ class BuildAutomationSpec extends AnyFlatSpec with Matchers {
         patterns should contain(pattern)
       }
     }
+    Files.exists(projectRoot.resolve(".m2-local/.keep")) shouldBe true
   }
 
   ".dockerignore" should "exclude untracked build/local artifacts without hiding tracked docs from JGit" in {
@@ -93,6 +96,8 @@ class BuildAutomationSpec extends AnyFlatSpec with Matchers {
 
     val _ = gitVersionCalls shouldBe 1
     val _ = buildGradle should not include "mvnrepository.com"
+    val _ = buildGradle should include("includeGroup 'com.scalarometer'")
+    val _ = buildGradle should include("com.scalarometer:scalarometer_")
     val _ = buildGradle should include("tasks.register('verifyCleanVersion')")
     val _ = buildGradle should include("tasks.register('warmDependencyCache')")
     val _ = buildGradle should include("'App-Version': resolvedProjectVersion")
@@ -115,9 +120,15 @@ class BuildAutomationSpec extends AnyFlatSpec with Matchers {
     nativeTask should include("getOutputBinary()")
   }
 
-  "Dockerfiles" should "warm Gradle caches in a dedicated layer and run offline single-shot builds" in {
+  "Dockerfiles" should "stage .m2-local, warm Gradle caches in a dedicated layer, and run offline single-shot builds" in {
     List("Dockerfile.jvm", "Dockerfile.native").foreach { name =>
       val content = Files.readString(projectRoot.resolve(name), StandardCharsets.UTF_8)
+      val _ = withClue(s"$name missing .m2-local COPY before warmup: ") {
+        content should include("COPY .m2-local /root/.m2/repository")
+      }
+      val _ = withClue(s"$name missing fast-fail scalarometer local repo guard: ") {
+        content should include("test -d /root/.m2/repository/com/scalarometer")
+      }
       val _ = withClue(s"$name missing warmDependencyCache layer: ") {
         content should include("-PskipGitVersion=true warmDependencyCache")
       }
@@ -133,12 +144,22 @@ class BuildAutomationSpec extends AnyFlatSpec with Matchers {
     }
   }
 
-  "docker-build-test.sh" should "persist Gradle caches in a Docker volume and default to incremental tests on latest" in {
+  "docker-build-test.sh" should "persist Gradle caches, mount ~/.m2 read-only, and default to incremental tests on latest" in {
     val script = Files.readString(projectRoot.resolve("docker-build-test.sh"), StandardCharsets.UTF_8)
     val _ = script should include("GRADLE_CACHE_VOLUME")
     val _ = script should include(":/root/.gradle")
+    val _ = script should include(":/root/.m2:ro")
     val _ = script should include("TAG=${TAG:-latest}")
     script should include("--no-watch-fs")
+  }
+
+  "docker-build-image.sh" should "diff-gate syncing local ~/.m2 artifacts into .m2-local before docker build" in {
+    val scriptPath = projectRoot.resolve("docker-build-image.sh")
+    val _ = Files.exists(scriptPath) shouldBe true
+    val script = Files.readString(scriptPath, StandardCharsets.UTF_8)
+    val _ = script should include("LOCAL_M2_GROUPS")
+    val _ = script should include("diff -rq")
+    script should include(".m2-local")
   }
 
   "version.properties" should "match Tablo2HDHomeRun.appVersion and resolve a valid git version" in {

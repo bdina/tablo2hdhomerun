@@ -911,5 +911,67 @@ class Tablo4thGenSessionManagerSpec extends ScalaTestWithActorTestKit with AnyWo
       mgr ! Request.GetActiveChannelStates(statesProbe.ref)
       statesProbe.receiveMessage() shouldBe Map.empty
     }
+
+    "update ServiceMetrics counters and scoped live gauges and unregister them on PostStop" in {
+      val metrics = new app.metrics.ServiceMetrics()
+      val selfRef = new AtomicReference[ActorRef[Request]](null)
+      val mgr = testKit.spawn(
+        SessionManager(
+          startRunner = { (_, self) => selfRef.set(self) }
+        , totalTuners = 1
+        , idleGrace = 30.seconds
+        , serviceMetrics = metrics
+        )
+      )
+
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val _ = metrics.registry.contains("tuners.capacity") shouldBe true
+        metrics.registry.stats()("tuners.capacity").intValue() shouldBe 1
+      }
+
+      val probe1 = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-metrics-1", "client-1", probe1.ref)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val _ = selfRef.get() should not be null
+        val _ = metrics.registry.stats()("sessions.opening").intValue() shouldBe 1
+        metrics.registry.stats()("clients.active").intValue() shouldBe 1
+      }
+
+      selfRef.get() ! Command.CheckIn("ch-metrics-1", meta("tok-m1"), hubSource, () => ())
+      val _ = probe1.expectMessageType[Response.Attached]
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val snap = metrics.registry.stats()
+        val _ = snap("sessions.live").intValue() shouldBe 1
+        val _ = snap("sessions.opening").intValue() shouldBe 0
+        val _ = snap("clients.active").intValue() shouldBe 1
+        val _ = snap("sessions.opened").longValue() shouldBe 1L
+        snap("sessions.attached").longValue() shouldBe 1L
+      }
+
+      val probeBusy = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-metrics-2", "client-2", probeBusy.ref)
+      val _ = probeBusy.expectMessage(Response.Rejected(RejectReason.NoTuners))
+      val _ = metrics.sessionsRejectedNoTuners.value shouldBe 1L
+
+      mgr ! Request.Release("ch-metrics-1", "client-1")
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val snap = metrics.registry.stats()
+        val _ = snap("sessions.live").intValue() shouldBe 0
+        val _ = snap("sessions.idle_grace").intValue() shouldBe 1
+        snap("clients.active").intValue() shouldBe 0
+      }
+
+      val probeReuse = testKit.createTestProbe[Response.Acquire]()
+      mgr ! Request.Acquire("ch-metrics-1", "client-3", probeReuse.ref)
+      val _ = probeReuse.expectMessageType[Response.Attached]
+      val _ = metrics.sessionsIdleGraceReused.value shouldBe 1L
+
+      testKit.stop(mgr)
+      val _ = eventually(timeout(3.seconds), interval(50.millis)) {
+        val _ = metrics.registry.contains("tuners.capacity") shouldBe false
+        val _ = metrics.registry.contains("sessions.live") shouldBe false
+        metrics.registry.contains("clients.active") shouldBe false
+      }
+    }
   }
 }

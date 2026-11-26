@@ -131,6 +131,10 @@ class StreamMetricsSpec extends AnyFlatSpec with Matchers {
     , segRetries = 3
     , stallPolls = 4
     , retunes = 1
+    , segGapP50Ms = 1990L
+    , segGapP95Ms = 2080L
+    , segFetchP95Ms = 85L
+    , segFetchMaxMs = 112L
     )
     val snap = StreamMetrics.WindowSnapshot.compute(
       windowSec = 30.0
@@ -162,14 +166,18 @@ class StreamMetricsSpec extends AnyFlatSpec with Matchers {
     val _ = line should include("audioFrames=937/937")
     val _ = line should include("keyframes=30")
     val _ = line should include("tei=2 ccErr=5 sliceDrops=3 ptsScrubs=1 syncLossBytes=188")
-    line should include("segs=15 maxGapMs=2110 shortReads=1 seqGaps=2 segRetries=3 stallPolls=4 retunes=1")
+    val _ = line should include("segs=15 maxGapMs=2110 shortReads=1 seqGaps=2 segRetries=3 stallPolls=4 retunes=1")
+    line should include("segGapP50Ms=1990 segGapP95Ms=2080 segFetchP95Ms=85 segFetchMaxMs=112")
   }
 
-  "StreamMetrics.HlsCollector" should "accumulate and atomically reset window counters" in {
-    val collector = new StreamMetrics.HlsCollector()
-    collector.onSegmentCompleted(gapMs = 1800L, isShortRead = false)
-    collector.onSegmentCompleted(gapMs = 2450L, isShortRead = true)
-    collector.onSegmentCompleted(gapMs = 1950L, isShortRead = false)
+  "StreamMetrics.HlsCollector" should "accumulate percentiles/counters, fan out to ServiceMetrics, and atomically reset" in {
+    val serviceMetrics = new app.metrics.ServiceMetrics()
+    val collector = new StreamMetrics.HlsCollector(Some(serviceMetrics))
+    collector.onSegmentCompleted(gapMs = 1800L, isShortRead = false, fetchMs = 40L)
+    collector.onSegmentCompleted(gapMs = 2450L, isShortRead = true, fetchMs = 120L)
+    collector.onSegmentCompleted(gapMs = 1950L, isShortRead = false, fetchMs = 60L)
+    collector.onSegmentCompleted(gapMs = 2000L, isShortRead = false) // default fetchMs = -1L ignored
+    collector.onPlaylistPolled(15L)
     collector.onSequenceGap(3)
     collector.onSegmentRetry()
     collector.onSegmentRetry()
@@ -177,19 +185,45 @@ class StreamMetricsSpec extends AnyFlatSpec with Matchers {
     collector.onRetune()
 
     val peek = collector.currentWindowStats()
-    val _ = peek.segs shouldBe 3
+    val _ = peek.segs shouldBe 4
     val _ = peek.maxGapMs shouldBe 2450L
     val _ = peek.shortReads shouldBe 1
     val _ = peek.seqGaps shouldBe 3
     val _ = peek.segRetries shouldBe 2
     val _ = peek.stallPolls shouldBe 1
     val _ = peek.retunes shouldBe 1
+    val _ = peek.segGapP50Ms shouldBe 1975L
+    val _ = peek.segGapP95Ms should be >= 2000L
+    val _ = peek.segFetchMaxMs shouldBe 120L
+    val _ = peek.segFetchP95Ms should be >= 60L
+
+    // ServiceMetrics receives lifetime fan-out without conflating onRetune() with cold retunes
+    val _ = serviceMetrics.hlsSegsCompleted.value shouldBe 4L
+    val _ = serviceMetrics.hlsSegsShortReads.value shouldBe 1L
+    val _ = serviceMetrics.hlsSegsRetries.value shouldBe 2L
+    val _ = serviceMetrics.hlsStallPolls.value shouldBe 1L
+    val _ = serviceMetrics.retunesCold.value shouldBe 0L
+    val _ = serviceMetrics.hlsSegFetchMs.numberOfSnapshots shouldBe 3
+    val _ = serviceMetrics.hlsPollMs.max shouldBe 15L
 
     val snap = collector.snapshotAndResetWindow()
     val _ = snap shouldBe peek
 
     val afterReset = collector.currentWindowStats()
     afterReset shouldBe StreamMetrics.HlsWindowStats()
+  }
+
+  it should "preserve exact maxGapMs and segFetchMaxMs even past MaxWindowSnapshots" in {
+    val collector = new StreamMetrics.HlsCollector()
+    var i = 0
+    while (i < StreamMetrics.HlsCollector.MaxWindowSnapshots + 10) {
+      collector.onSegmentCompleted(gapMs = 1000L + i.toLong, isShortRead = false, fetchMs = 20L + i.toLong)
+      i += 1
+    }
+    val stats = collector.snapshotAndResetWindow()
+    val _ = stats.segs shouldBe (StreamMetrics.HlsCollector.MaxWindowSnapshots + 10).toLong
+    val _ = stats.maxGapMs shouldBe (1000L + StreamMetrics.HlsCollector.MaxWindowSnapshots + 9).toLong
+    stats.segFetchMaxMs shouldBe (20L + StreamMetrics.HlsCollector.MaxWindowSnapshots + 9).toLong
   }
 
   "HDHomeRunStatus" should "serialize active and idle tuners in SiliconDust status.json format" in {

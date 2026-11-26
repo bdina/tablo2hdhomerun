@@ -20,6 +20,7 @@ import org.slf4j.LoggerFactory
 
 import app.AppContext
 import app.sys.LogConfig
+import com.scalarometer.statistics.StopWatch
 
 import scala.concurrent.Future
 import scala.concurrent.duration._
@@ -208,7 +209,11 @@ object HlsBackend extends StreamBackend {
       )
     def step(state: PollState): WithMaterializer[Future[Option[(PollState, Seq[SegmentInfo])]]] = {
       val doFetch: () => Future[Option[(PollState, Seq[SegmentInfo])]] = () => {
+        val pollStart = StopWatch.Marker.now
         fetchPlaylistWithState(state)
+          .andThen { case _ =>
+            metricsCollector.foreach(_.onPlaylistPolled(pollStart.elapsed))
+          }
           .map { case (fetchedState, bodyOpt) =>
             bodyOpt match {
               case None =>
@@ -345,8 +350,9 @@ object HlsBackend extends StreamBackend {
             .mapConcat(identity)
             .buffer(2, OverflowStrategy.backpressure)
             .flatMapConcat { seg =>
-              val segStartNanos = System.nanoTime()
-              val gapMs = (segStartNanos - lastArrivalNanos.getAndSet(segStartNanos)) / 1000000L
+              val segStart = StopWatch.Marker.now
+              val segStartNanos = segStart.timestamp
+              val gapMs = (segStartNanos - lastArrivalNanos.getAndSet(segStartNanos)) / StopWatch.NanosPerMilli
               val segBytes = new java.util.concurrent.atomic.AtomicLong(0L)
               val expectedLengthOpt = HlsSegmentFetch.safeByteRange(seg.byteRange).map(_._2)
 
@@ -363,15 +369,17 @@ object HlsBackend extends StreamBackend {
                 .watchTermination { (_, done) =>
                   done.onComplete {
                     case Success(_) =>
+                      val fetchMs = segStart.elapsed
                       val totalSegBytes = segBytes.get()
                       lastSeqOut.set(seg.sequence + 1)
                       log.info(
-                        "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={}"
+                        "[stream:hls] segment completed label={} seq={} duration={}s bytes={} gapMs={} fetchMs={}"
                       , label
                       , seg.sequence
                       , seg.duration
                       , totalSegBytes
                       , gapMs
+                      , fetchMs
                       )
                       val isShortRead = expectedLengthOpt.exists(expected => totalSegBytes < expected)
                       expectedLengthOpt.foreach { expected =>
@@ -386,7 +394,7 @@ object HlsBackend extends StreamBackend {
                           )
                         }
                       }
-                      metricsCollector.foreach(_.onSegmentCompleted(gapMs, isShortRead))
+                      metricsCollector.foreach(_.onSegmentCompleted(gapMs, isShortRead, fetchMs))
                       onSegmentKeyCompleted(HlsPlaylistPoller.segmentKey(seg))
                       onSeqAdvanced(seg.sequence + 1)
                     case Failure(ex) =>

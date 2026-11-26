@@ -5,7 +5,7 @@ import org.apache.pekko
 import pekko.NotUsed
 import pekko.actor.typed.scaladsl.AskPattern.{Askable, schedulerFromActorSystem}
 import pekko.actor.typed.scaladsl.Behaviors
-import pekko.actor.typed.{ActorRef, ActorSystem, Behavior}
+import pekko.actor.typed.{ActorRef, ActorSystem, Behavior, PostStop}
 import pekko.http.scaladsl.Http
 import pekko.http.scaladsl.model.{ContentTypes, HttpEntity, HttpHeader, HttpMethod, HttpMethods, HttpRequest, HttpResponse, MediaType, StatusCode, StatusCodes, Uri}
 import pekko.http.scaladsl.server.Directives._
@@ -15,7 +15,7 @@ import pekko.util.ByteString
 import pekko.util.Timeout
 
 import java.util.concurrent.{ConcurrentHashMap, ConcurrentMap}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger, AtomicReference}
 import java.time.{LocalDate, ZonedDateTime, ZoneOffset}
 import java.time.format.DateTimeFormatter
 import java.security.MessageDigest
@@ -37,8 +37,10 @@ import DefaultJsonProtocol._
 
 import app.{AppContext, Tablo2HDHomeRun}
 import app.config.TabloAuthEnv
+import app.metrics.ServiceMetrics
 import app.stream.{HlsError, HlsPlaylistPoller, MpegTsSync, StreamBackend}
 import app.sys.{LogConfig, SafeJson}
+import com.scalarometer.statistics.StopWatch
 
 object Tablo4thGen {
   val log = LoggerFactory.getLogger(this.getClass)
@@ -273,6 +275,7 @@ object Tablo4thGen {
       _tabloAuth match {
         case Some(tabloAuth) =>
           log.info("[auth] refreshing cloud authentication tokens")
+          AppContext.metrics.recordAuthRefresh()
           authenticate(tabloAuth)
         case None =>
           _authContext match {
@@ -1524,6 +1527,7 @@ object Tablo4thGen {
         startRunner: (String, ActorRef[Request]) => Unit
       , totalTuners: Int = 4
       , idleGrace: FiniteDuration = defaultIdleGrace
+      , serviceMetrics: ServiceMetrics = AppContext.metrics
       ): Behavior[Request] =
         withCancel(
           startRunner = { (channelId, self) =>
@@ -1532,22 +1536,62 @@ object Tablo4thGen {
           }
         , totalTuners = totalTuners
         , idleGrace = idleGrace
+        , serviceMetrics = serviceMetrics
         )
 
       def withCancel(
         startRunner: (String, ActorRef[Request]) => () => Unit
       , totalTuners: Int = 4
       , idleGrace: FiniteDuration = defaultIdleGrace
+      , serviceMetrics: ServiceMetrics = AppContext.metrics
       ): Behavior[Request] = Behaviors.setup { context =>
         Behaviors.withTimers { timers =>
         var sessions = Map.empty[ChannelId, SessionState]
         var tuners = totalTuners
+
+        val tunerCapacityMirror = new AtomicInteger(totalTuners)
+        val liveCountMirror = new AtomicInteger(0)
+        val openingCountMirror = new AtomicInteger(0)
+        val idleGraceCountMirror = new AtomicInteger(0)
+        val clientCountMirror = new AtomicInteger(0)
+
+        val gaugeHandle = serviceMetrics.registerSessionGauges(
+          tunersCapacity = () => tunerCapacityMirror.get()
+        , sessionsLive = () => liveCountMirror.get()
+        , sessionsOpening = () => openingCountMirror.get()
+        , sessionsIdleGrace = () => idleGraceCountMirror.get()
+        , clientsActive = () => clientCountMirror.get()
+        )
+
+        def syncGauges(): Unit = {
+          var live = 0
+          var opening = 0
+          var idle = 0
+          var clients = 0
+          sessions.valuesIterator.foreach {
+            case s: SessionState.Live =>
+              live += 1
+              clients += s.clientIds.size
+            case s: SessionState.Opening =>
+              opening += 1
+              clients += s.waiters.size
+            case _: SessionState.IdleGrace =>
+              idle += 1
+          }
+          tunerCapacityMirror.set(tuners)
+          liveCountMirror.set(live)
+          openingCountMirror.set(opening)
+          idleGraceCountMirror.set(idle)
+          clientCountMirror.set(clients)
+        }
 
         def occupied: Int = sessions.size
 
         def openChannel(channelId: ChannelId, clientId: ClientId, replyTo: ActorRef[Response.Acquire]): Unit = {
           val waiter = SessionState.Waiter(clientId, replyTo)
           sessions += channelId -> SessionState.Opening(Vector(waiter))
+          syncGauges()
+          serviceMetrics.recordSessionOpened()
           context.log.info(
             "[session] opening channel={} channelId={} clientId={} occupied={}/{}"
           , Lineup.channelLabel(channelId.asString)
@@ -1580,6 +1624,7 @@ object Tablo4thGen {
             }
           }
           val chLabel = Lineup.channelLabel(channelId.asString)
+          serviceMetrics.recordSessionAttached()
           context.log.info(
             "[session] attach channel={} channelId={} clientId={} occupied={}/{}"
           , chLabel
@@ -1631,6 +1676,7 @@ object Tablo4thGen {
             case _ => ()
           }
           sessions -= channelId
+          syncGauges()
           Try(teardown()).failed.foreach { ex =>
             context.log.warn("[session] teardown failed channelId={}", channelId.asString, ex)
           }
@@ -1643,7 +1689,7 @@ object Tablo4thGen {
           )
         }
 
-        Behaviors.receiveMessage {
+        Behaviors.receiveMessage[Request] {
           case Request.GetTunerStatuses(replyTo) =>
             val activeInfos = sessions.toSeq.sortBy(_._1.asString).map {
               case (chId, state) =>
@@ -1689,6 +1735,7 @@ object Tablo4thGen {
 
           case Request.SetTotalTuners(total) =>
             tuners = math.max(1, total)
+            syncGauges()
             Behaviors.same
 
           case Request.Acquire(rawChannelId, rawClientId, replyTo) =>
@@ -1712,10 +1759,12 @@ object Tablo4thGen {
                       , clientId.asString
                       )
                       timers.cancel(GraceTimerKey(idleChannelId))
+                      serviceMetrics.recordIdleGraceEvicted()
                       teardownAndRemove(idleChannelId, idle.teardown)
                       openChannel(channelId, clientId, replyTo)
                     case None =>
                       val activeChannels = sessions.keys.map(id => s"${Lineup.channelLabel(id.asString)} [${id.asString}]").mkString(", ")
+                      serviceMetrics.recordRejectedNoTuners()
                       context.log.warn(
                         "[session] no-tuners rejecting channel={} channelId={} clientId={} occupied={}/{} active=[{}]"
                       , Lineup.channelLabel(channelId.asString)
@@ -1734,6 +1783,7 @@ object Tablo4thGen {
 
               case Some(opening @ SessionState.Opening(waiters, _)) =>
                 sessions += channelId -> opening.copy(waiters = waiters :+ SessionState.Waiter(clientId, replyTo))
+                syncGauges()
                 context.log.info(
                   "[session] enqueue channel={} channelId={} clientId={} waiters={}"
                 , Lineup.channelLabel(channelId.asString)
@@ -1748,6 +1798,7 @@ object Tablo4thGen {
                   attachClient(channelId, clientId, live.hubSource, live.cachedHeadersRef, replyTo)
                 } else {
                   sessions += channelId -> live.copy(clientIds = live.clientIds + clientId)
+                  syncGauges()
                   attachClient(channelId, clientId, live.hubSource, live.cachedHeadersRef, replyTo)
                 }
                 Behaviors.same
@@ -1757,6 +1808,8 @@ object Tablo4thGen {
                 if (idle.meta.isHealthy()) {
                   idle.drainSwitch.foreach(_.shutdown())
                   sessions += channelId -> SessionState.Live(idle.meta, idle.hubSource, idle.teardown, Set(clientId), idle.cachedHeadersRef)
+                  syncGauges()
+                  serviceMetrics.recordIdleGraceReused()
                   context.log.info(
                     "[session] grace-cancel channel={} channelId={} clientId={}"
                   , Lineup.channelLabel(channelId.asString)
@@ -1772,6 +1825,7 @@ object Tablo4thGen {
                   , idle.meta.leaseId
                   , clientId.asString
                   )
+                  serviceMetrics.recordIdleGraceEvicted()
                   teardownAndRemove(channelId, idle.teardown)
                   openChannel(channelId, clientId, replyTo)
                 }
@@ -1786,6 +1840,7 @@ object Tablo4thGen {
                 val remaining = live.clientIds - clientId
                 if (remaining.nonEmpty) {
                   sessions += channelId -> live.copy(clientIds = remaining)
+                  syncGauges()
                   context.log.info(
                     "[session] release channel={} channelId={} clientId={} clients={}"
                   , Lineup.channelLabel(channelId.asString)
@@ -1795,6 +1850,7 @@ object Tablo4thGen {
                   )
                 } else if (live.meta.isHealthy()) {
                   sessions += channelId -> enterIdleGrace(channelId, live.copy(clientIds = Set.empty))
+                  syncGauges()
                 } else {
                   context.log.info(
                     "[session] skipping idle-grace for unhealthy session channel={} channelId={} leaseId={}"
@@ -1808,6 +1864,7 @@ object Tablo4thGen {
                 val remaining = waiters.filterNot(_.clientId == clientId)
                 if (remaining.nonEmpty) {
                   sessions += channelId -> opening.copy(waiters = remaining)
+                  syncGauges()
                   context.log.info(
                     "[session] opening release channel={} channelId={} clientId={} remainingWaiters={}"
                   , Lineup.channelLabel(channelId.asString)
@@ -1817,6 +1874,7 @@ object Tablo4thGen {
                   )
                 } else {
                   sessions -= channelId
+                  syncGauges()
                   Try(cancel()).failed.foreach { ex =>
                     context.log.warn("[session] opening cancel failed channelId={}", channelId.asString, ex)
                   }
@@ -1845,6 +1903,7 @@ object Tablo4thGen {
               case Some(SessionState.Opening(waiters, _)) =>
                 val clientIds = waiters.map(_.clientId).toSet
                 sessions += channelId -> SessionState.Live(meta, hubSource, teardown, clientIds, cachedHeadersRef)
+                syncGauges()
                 context.log.info(
                   "[session] check-in channel={} channelId={} token={} clients={} occupied={}/{}"
                 , Lineup.channelLabel(channelId.asString)
@@ -1866,6 +1925,8 @@ object Tablo4thGen {
             sessions.get(channelId) match {
               case Some(SessionState.Opening(waiters, _)) =>
                 sessions -= channelId
+                syncGauges()
+                serviceMetrics.recordRejectedFailed()
                 context.log.warn(
                   "[session] acquire-failed channel={} channelId={} waiters={}"
                 , Lineup.channelLabel(channelId.asString)
@@ -1958,8 +2019,13 @@ object Tablo4thGen {
                 }
             }
             sessions = Map.empty
+            syncGauges()
             context.log.info("[session] shutdown-all closedSessions={}", count)
             replyTo ! pekko.Done
+            Behaviors.same
+        }.receiveSignal {
+          case (_, PostStop) =>
+            gaugeHandle.close()
             Behaviors.same
         }
         }
@@ -1974,8 +2040,9 @@ object Tablo4thGen {
       , onFailed: Throwable => Unit
       , onUpstreamEnded: String => Unit
       , onSessionUnhealthy: (String, String) => Unit = (_, _) => ()
+      , serviceMetrics: ServiceMetrics = AppContext.metrics
       ): WithSystem[Unit] = {
-        val _ = startCancellable(channelId, authContext, onCheckIn, onFailed, onUpstreamEnded, onSessionUnhealthy)
+        val _ = startCancellable(channelId, authContext, onCheckIn, onFailed, onUpstreamEnded, onSessionUnhealthy, serviceMetrics)
       }
 
       def startCancellable(
@@ -1985,6 +2052,7 @@ object Tablo4thGen {
       , onFailed: Throwable => Unit
       , onUpstreamEnded: String => Unit
       , onSessionUnhealthy: (String, String) => Unit = (_, _) => ()
+      , serviceMetrics: ServiceMetrics = AppContext.metrics
       ): WithSystem[() => Unit] = {
         val system = summon[ActorSystem[?]]
         given ec: scala.concurrent.ExecutionContext = system.executionContext
@@ -2002,7 +2070,7 @@ object Tablo4thGen {
         val cancelled = new AtomicBoolean(false)
         @volatile var retryTimer: Option[pekko.actor.Cancellable] = None
         @volatile var activeTeardown: Option[() => Unit] = None
-        val hlsCollector = new app.stream.StreamMetrics.HlsCollector()
+        val hlsCollector = new app.stream.StreamMetrics.HlsCollector(Some(serviceMetrics))
         val latestMetricsRef = new AtomicReference[app.stream.StreamMetrics.WindowSnapshot](
           app.stream.StreamMetrics.WindowSnapshot.initial
         )
@@ -2131,15 +2199,18 @@ object Tablo4thGen {
               Future.failed(FourthGenError.SessionTokenMissing)
           }
 
-        def retuneWatchSession(): Future[WatchSession.Session] =
+        def retuneWatchSession(): Future[WatchSession.Session] = {
+          val watchStart = StopWatch.Marker.now
           watchChannel().flatMap { data =>
             WatchSession.decodeSession(data) match {
               case newSession: WatchSession.Session =>
+                serviceMetrics.recordTuneLockMs(watchStart.elapsed)
                 Future.successful(newSession)
               case err: FourthGenError =>
                 Future.failed(err)
             }
           }
+        }
 
         def streamFromWatchSession(
           session: WatchSession.Session
@@ -2234,7 +2305,9 @@ object Tablo4thGen {
             if (leaseStopped.get()) Future.successful(false)
             else {
               val previous = currentSession.get()
+              val probeStart = StopWatch.Marker.now
               keepaliveSession(previous).transformWith { result =>
+                serviceMetrics.recordKeepaliveProbeMs(probeStart.elapsed)
                 if (leaseStopped.get()) Future.successful(false)
                 else {
                   val (outcome, nextFailures) =
@@ -2272,6 +2345,7 @@ object Tablo4thGen {
 
                     case WatchSession.ProbeOutcome.ClosedByTablo =>
                       log.warn("[channel] session closed by tablo channel={} leaseId={}, triggering cold retune", channelDisplay, leaseId)
+                      serviceMetrics.recordHlsProbeClosed()
                       sessionClosedByTablo.set(true)
                       streamKillSwitch.get().foreach(_.abort(HlsError.SessionEnded))
                       Future.successful(false)
@@ -2318,6 +2392,7 @@ object Tablo4thGen {
             } else {
               inRecovery.set(true)
               onSessionUnhealthy(leaseId, s"cold-retune-attempt-$attempt")
+              serviceMetrics.recordColdRetune()
               val closedByTablo = sessionClosedByTablo.getAndSet(false)
               log.info(
                 "[4thgen-channel] cold recovery retune attempt={} channel={} channelId={} leaseId={} closedByTablo={}"
@@ -2430,12 +2505,17 @@ object Tablo4thGen {
               , latestMetricsRef = Some(latestMetricsRef)
               , onAudioLossRetune = detail => {
                   playlistRollover.set(false)
+                  serviceMetrics.recordAudioLossRetune()
                   val _ = retuneTrigger.trigger(HlsError.SustainedAudioLoss(detail))
                 }
               , onFreezeStateChanged = frozen => {
                   isFrozen.set(frozen)
-                  if (frozen) onSessionUnhealthy(leaseId, "freeze-active")
-                  else inRecovery.set(false)
+                  if (frozen) {
+                    serviceMetrics.recordStreamFreeze()
+                    onSessionUnhealthy(leaseId, "freeze-active")
+                  } else {
+                    inRecovery.set(false)
+                  }
                 }
               ))
               .viaMat(KillSwitches.single)(Keep.right)
@@ -2792,7 +2872,7 @@ object Tablo4thGen {
         , clientId: String
         , source: Source[ByteString, NotUsed]
         ): Source[ByteString, NotUsed] = {
-          val startNanos = System.nanoTime()
+          val streamStart = StopWatch.Marker.now
           val bytesSent = new java.util.concurrent.atomic.AtomicLong(0L)
 
           source
@@ -2802,7 +2882,7 @@ object Tablo4thGen {
             }
             .watchTermination { (_, done) =>
               done.onComplete { result =>
-                val durationMs = (System.nanoTime() - startNanos) / 1000000L
+                val durationMs = streamStart.elapsed
                 val totalBytes = bytesSent.get()
                 val outcome = result match {
                   case Success(_) => "downstream-closed"

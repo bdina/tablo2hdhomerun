@@ -21,3 +21,7 @@ GEMINI.md
 # Local packet captures & extracted credentials
 docs/pcap/tablo-credentials.txt
 *.pcap
+
+# Staged local Maven artifacts for Docker image builds
+/.m2-local/*
+!/.m2-local/.keep

@@ -25,11 +25,13 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.effectiveTunerCount shouldBe 2
     val _ = config.proxy.enableUdpDiscovery shouldBe true
     val _ = config.proxy.enableHlsEndpoint shouldBe true
+    val _ = config.proxy.enableMetricsEndpoint shouldBe true
     val _ = config.proxy.idleGraceSec shouldBe 180
     val _ = config.proxy.enablePreRollKeepAlive shouldBe true
     val _ = config.proxy.preRollIntervalMs shouldBe 100
     val _ = config.proxy.preRollPackets shouldBe 7
     val _ = config.proxy.tunerStatePollIntervalSec shouldBe 30
+    val _ = config.proxy.serviceMetricsIntervalSec shouldBe 60
     val _ = config.stream.backend shouldBe StreamBackendKind.Hls
     val _ = config.stream.metricsIntervalSec shouldBe 30
     val _ = config.stream.freezeThresholdSec shouldBe 10
@@ -164,7 +166,9 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
       "TUNER_COUNT" -> "4",
       "ENABLE_UDP_DISCOVERY" -> "false",
       "ENABLE_HLS_ENDPOINT" -> "false",
-      "TUNER_STATE_POLL_INTERVAL_SEC" -> "45"
+      "ENABLE_METRICS_ENDPOINT" -> "false",
+      "TUNER_STATE_POLL_INTERVAL_SEC" -> "45",
+      "SERVICE_METRICS_INTERVAL_SEC" -> "0"
     )).config
     val _ = config.proxy.bindHost shouldBe "192.168.1.50"
     val _ = config.proxy.port.value shouldBe 9090
@@ -173,7 +177,9 @@ class AppConfigSpec extends AnyFlatSpec with Matchers {
     val _ = config.proxy.effectiveTunerCount shouldBe 4
     val _ = config.proxy.enableUdpDiscovery shouldBe false
     val _ = config.proxy.enableHlsEndpoint shouldBe false
-    config.proxy.tunerStatePollIntervalSec shouldBe 45
+    val _ = config.proxy.enableMetricsEndpoint shouldBe false
+    val _ = config.proxy.tunerStatePollIntervalSec shouldBe 45
+    config.proxy.serviceMetricsIntervalSec shouldBe 0
   }
 
   "ConfigTypes.DeviceId" should "validate SiliconDust nibble-permutation checksums" in {
